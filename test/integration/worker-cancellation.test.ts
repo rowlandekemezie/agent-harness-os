@@ -11,10 +11,16 @@ import { createTestRepository } from '../helpers/git.js'
 async function startHangingProvider(): Promise<{
 	baseUrl: string
 	server: Server
+	requestReceived: Promise<void>
 	close(): Promise<void>
 }> {
+	let resolveRequestReceived: (() => void) | undefined
+	const requestReceived = new Promise<void>(resolve => {
+		resolveRequestReceived = resolve
+	})
 	const server = createServer(request => {
 		request.resume()
+		resolveRequestReceived?.()
 	})
 
 	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -27,6 +33,7 @@ async function startHangingProvider(): Promise<{
 	return {
 		baseUrl: `http://127.0.0.1:${address.port}/v1`,
 		server,
+		requestReceived,
 		close: async () => {
 			server.closeAllConnections()
 			await new Promise<void>((resolve, reject) => {
@@ -66,7 +73,8 @@ test('cancels an active provider request and releases worktree and repository le
 			allowNetwork: false,
 		}, controller.signal)
 
-		setTimeout(() => controller.abort(), 50)
+		await provider.requestReceived
+		controller.abort()
 		const report = await operation
 
 		assert.equal(report.status, 'cancelled')
