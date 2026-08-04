@@ -23,6 +23,7 @@ import { PathPolicy } from '../security/path-policy.js'
 export type ToolExecutorContext = {
 	task: WorkerTask
 	worktreePath: string
+	repositoryPath?: string
 	config: HarnessConfig
 	baseCommit: string
 	policyViolations: Array<string>
@@ -178,7 +179,7 @@ export class WorkerToolExecutor {
 				content: JSON.stringify({
 					error: error instanceof HarnessError ? error.code : 'TOOL_EXECUTION_FAILED',
 					message: getErrorMessage(error),
-			}),
+				}),
 				isError: true,
 			}
 		}
