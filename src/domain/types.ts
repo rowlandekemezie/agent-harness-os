@@ -2,6 +2,30 @@ export type WorkerMode = 'research' | 'implementation' | 'testing' | 'review'
 
 export type ExecutionBackend = 'local' | 'docker'
 
+export type WorkerAdapter = 'openai-compatible' | 'anthropic'
+
+export type WorkerCapability =
+	| WorkerMode
+	| 'tool-calling'
+	| 'long-context'
+	| 'private'
+
+export type WorkerCostTier = 'low' | 'medium' | 'high'
+
+export type WorkerLatencyTier = 'fast' | 'standard' | 'slow'
+
+export type RoutingStrategy = 'balanced' | 'cost' | 'latency' | 'quality'
+
+export type WorkerRoutingPolicy = {
+	preferredWorkerId: string | null
+	requiredCapabilities: Array<WorkerCapability>
+	strategy: RoutingStrategy
+	maxCostTier: WorkerCostTier | null
+	maxLatencyTier: WorkerLatencyTier | null
+	allowFallback: boolean
+	maxAttempts: number
+}
+
 export type RunStatus =
 	| 'completed'
 	| 'failed'
@@ -46,12 +70,41 @@ export type WorkerTask = {
 	maxIterations: number
 	timeoutSeconds: number
 	allowNetwork: boolean
+	routing?: WorkerRoutingPolicy
+}
+
+export type ProviderUsage = {
+	requestCount: number
+	inputTokens: number
+	outputTokens: number
+	totalTokens: number
+	totalLatencyMs: number
+	estimatedCostUsd: number | null
+}
+
+export type WorkerAttemptSummary = {
+	runId: string
+	workerId: string
+	status: RunStatus
+	failureCode: string | null
+}
+
+export type WorkerRoutingMetadata = {
+	strategy: RoutingStrategy
+	requiredCapabilities: Array<WorkerCapability>
+	candidateWorkerIds: Array<string>
+	selectedWorkerId: string
+	attemptNumber: number
+	maxAttempts: number
+	fallbackEnabled: boolean
+	previousAttempts: Array<WorkerAttemptSummary>
 }
 
 export type WorkerRunReport = {
 	schemaVersion: 1
 	runId: string
 	status: RunStatus
+	failureCode?: string | null
 	objective: string
 	mode: WorkerMode
 	repositoryPath: string
@@ -69,10 +122,18 @@ export type WorkerRunReport = {
 	policyViolations: Array<string>
 	warnings: Array<string>
 	provider: {
+		workerId?: string
+		adapter?: WorkerAdapter
 		baseUrl: string
 		model: string
 		requestCount: number
+		inputTokens?: number
+		outputTokens?: number
+		totalTokens?: number
+		totalLatencyMs?: number
+		estimatedCostUsd?: number | null
 	}
+	routing?: WorkerRoutingMetadata
 }
 
 export type ProviderMessage = {
@@ -113,7 +174,8 @@ export type ProviderRequest = {
 
 export interface WorkerProvider {
 	complete(request: ProviderRequest): Promise<ProviderCompletion>
-	getRequestCount(): number
+	getUsage?(): ProviderUsage
+	getRequestCount?(): number
 }
 
 export type ToolExecutionResult = {

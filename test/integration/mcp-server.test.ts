@@ -30,7 +30,14 @@ test('speaks newline-delimited MCP JSON-RPC over stdio', async function () {
 	const response = lines[1] as { result: { tools: Array<{ name: string }> } }
 	assert.deepEqual(
 		response.result.tools.map(tool => tool.name),
-		['health_check', 'delegate_to_worker', 'get_worker_run', 'apply_worker_patch'],
+		[
+			'health_check',
+			'list_workers',
+			'route_worker',
+			'delegate_to_worker',
+			'get_worker_run',
+			'apply_worker_patch',
+		],
 	)
 
 	child.kill('SIGTERM')
@@ -84,7 +91,14 @@ test('supports stateless MCP 2026-07-28 discovery and tool calls', async functio
 		assert.equal(list.resultType, 'complete')
 		assert.deepEqual(
 			list.tools.map(tool => tool.name),
-			['health_check', 'delegate_to_worker', 'get_worker_run', 'apply_worker_patch'],
+			[
+			'health_check',
+			'list_workers',
+			'route_worker',
+			'delegate_to_worker',
+			'get_worker_run',
+			'apply_worker_patch',
+		],
 		)
 
 		child.stdin.write(`${JSON.stringify({

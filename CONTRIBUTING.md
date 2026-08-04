@@ -13,7 +13,7 @@ npm run check
 
 - Keep one security or behavior change per pull request when practical.
 - Add regression tests for every bug.
-- Update documentation when changing tools, environment variables, provider behavior, artifact format, or trust boundaries.
+- Update documentation when changing tools, environment variables, provider adapters, worker metadata, routing, fallback, artifact format, or trust boundaries.
 - Preserve the two-step delegate/apply workflow.
 - Explain threat-model consequences in the pull-request description.
 
@@ -30,4 +30,4 @@ npm run check
 
 ## Security-sensitive changes
 
-Changes to path handling, command execution, environment forwarding, provider transport, response bounds, artifact storage, worktree behavior, Git configuration, patch generation, patch application, cancellation, concurrency, or MCP approval metadata require explicit adversarial tests.
+Changes to path handling, command execution, environment forwarding, provider transport, provider translation, worker configuration, routing, fallback, response bounds, artifact storage, worktree behavior, Git configuration, patch generation, patch application, cancellation, concurrency, or MCP approval metadata require explicit adversarial tests.

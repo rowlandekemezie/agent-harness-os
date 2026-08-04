@@ -1,63 +1,78 @@
 # Provider compatibility
 
-## Required API behavior
+## OpenAI-compatible adapter
 
-The worker provider must accept an HTTP POST compatible with OpenAI chat completions:
+A compatible endpoint must support:
 
-```text
-<base-url>/chat/completions
-```
+- `POST /chat/completions`
+- system, user, assistant, and tool messages
+- function definitions using JSON Schema
+- assistant tool calls with stable IDs, names, and JSON arguments
+- tool-result messages correlated by tool-call ID
+- a final assistant message without tool calls
 
-The request includes:
+The adapter accepts usage fields using either `prompt_tokens`/`completion_tokens` or `input_tokens`/`output_tokens`.
 
-- `model`
-- `messages`
-- `tools`
-- `tool_choice: "auto"`
-- `temperature`
-
-The provider must return at least one choice containing an assistant message. Tool calls must use the conventional shape:
+### OpenAI
 
 ```json
 {
-  "id": "call-id",
-  "type": "function",
-  "function": {
-    "name": "read_file",
-    "arguments": "{\"path\":\"src/index.ts\"}"
-  }
+  "adapter": "openai-compatible",
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKeyEnv": "OPENAI_API_KEY",
+  "maxOutputTokensParameter": "max_completion_tokens"
 }
 ```
 
-The adapter does not currently support provider-native Responses APIs, streaming-only endpoints, XML tool calls, or proprietary tool-call formats. Responses are capped by `QWEN_MAX_RESPONSE_BYTES`, provider requests have bounded retries and timeouts, a single assistant turn may contain at most 32 tool calls, a complete run is bounded by `AGENT_HARNESS_MAX_TOTAL_TOOL_CALLS`, and the serialized provider conversation is bounded by `AGENT_HARNESS_MAX_PROVIDER_CONTEXT_BYTES`.
+OpenAI's current Chat Completions API deprecates `max_tokens` in favour of `max_completion_tokens`, and some reasoning models reject the older field. Configure the field explicitly for those workers.
 
-## URL configuration
+### Gemini
 
-Use `QWEN_BASE_URL` for a conventional API root such as `https://provider.example/v1`. HTTPS is mandatory for non-loopback hosts by default. Plain HTTP is accepted for `localhost`, `*.localhost`, IPv4 loopback, and `::1`. Set `QWEN_ALLOW_INSECURE_HTTP=true` only for a trusted endpoint that cannot provide TLS.
-
-Provider URLs may not embed usernames or passwords. `QWEN_BASE_URL` may not contain a query string; use the full endpoint override when a provider requires query parameters.
-
-Use `QWEN_CHAT_COMPLETIONS_URL` for a full endpoint override. When present, it takes precedence over `QWEN_BASE_URL`. HTTP redirects are not followed, so a provider must return the completion response from the configured origin rather than redirecting the credential and source context elsewhere.
-
-## Authentication
-
-The adapter sends:
+Google exposes an OpenAI-compatible base URL:
 
 ```text
-Authorization: Bearer <QWEN_API_KEY>
+https://generativelanguage.googleapis.com/v1beta/openai
 ```
 
-Additional string headers can be supplied through `QWEN_HEADERS_JSON`. Additional headers override the default header when names collide, so treat configuration access as security-sensitive. The task's `allowNetwork` setting applies to post-model validation commands, not to the provider request itself.
+Use bearer authentication with `GEMINI_API_KEY`. Google recommends its native API for provider-specific advanced features; this harness uses the compatibility surface for the shared coding-worker contract.
 
-## Compatibility validation
+### Ollama
 
-Before using a real repository:
+Ollama exposes an OpenAI-compatible endpoint at a local base such as:
+
+```text
+http://127.0.0.1:11434/v1
+```
+
+Use `auth: "none"`. The selected local model must support tool calling. Marking a worker `private` remains an operator assertion about the complete local environment, not merely the endpoint address.
+
+### Qwen and OpenRouter
+
+Use the base URL and exact model ID from the selected host. Do not assume that every Qwen deployment implements OpenAI function calling identically. Validate the complete multi-turn tool loop before assigning write authority.
+
+## Anthropic adapter
+
+The native adapter uses:
+
+- `POST /v1/messages`
+- `x-api-key`
+- `anthropic-version`
+- Anthropic tool definitions
+- `tool_use` and `tool_result` content blocks
+
+Set `baseUrl` to `https://api.anthropic.com/v1`, or provide a complete `endpointUrl` for a compatible gateway.
+
+## Compatibility smoke test
+
+Before allowing repository writes:
 
 1. Run `agent-harness-os doctor`.
-2. Delegate a read-only research task against a disposable repository.
-3. Verify that the provider calls `list_files` or `read_file` and returns a final assistant response.
-4. Delegate a one-file implementation task.
-5. Inspect the report and patch.
-6. Apply it and rerun local validation.
+2. Inspect `list_workers` and `route_worker` output.
+3. Delegate a read-only task against a disposable repository.
+4. Confirm the worker performs at least one file-tool call and returns a final response.
+5. Delegate a one-file implementation task.
+6. Inspect the selected worker, route metadata, changed files, and patch.
+7. Apply the patch and rerun validation in the real checkout.
+8. Test a deliberate provider failure and confirm fallback starts from a clean base.
 
-A provider that can generate ordinary text but cannot preserve tool-call IDs and arguments across turns is not compatible.
+A provider that generates text but cannot preserve tool-call IDs and arguments across turns is not compatible.

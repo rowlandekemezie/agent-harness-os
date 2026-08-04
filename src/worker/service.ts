@@ -2,14 +2,18 @@ import path from 'node:path'
 import type {
 	AcceptanceCriterionResult,
 	CommandResult,
+	ProviderUsage,
 	RunStatus,
+	WorkerAttemptSummary,
+	WorkerProvider,
 	WorkerRunReport,
 	WorkerTask,
 } from '../domain/types.js'
-import type { HarnessConfig } from '../config.js'
+import type { HarnessConfig, WorkerConfig } from '../config.js'
 import {
 	assertArtifactRootOutsideRepository,
-	assertProviderConfigured,
+	assertWorkersConfigured,
+	getWorkerSecrets,
 	resolveArtifactRoot,
 } from '../config.js'
 import { ArtifactStore, sha256 } from '../artifacts/store.js'
@@ -29,7 +33,8 @@ import { Logger } from '../lib/logger.js'
 import { Redactor } from '../lib/redaction.js'
 import { acquireRepositoryLease } from '../lib/repository-lock.js'
 import { Semaphore } from '../lib/semaphore.js'
-import { OpenAiCompatibleProvider } from '../provider/openai-compatible.js'
+import { WorkerRegistry } from '../provider/registry.js'
+import type { WorkerRoute } from '../provider/router.js'
 import { CommandPolicy } from '../security/command-policy.js'
 import { PathPolicy } from '../security/path-policy.js'
 import { runAgentLoop } from './agent-loop.js'
@@ -48,6 +53,7 @@ export class WorkerService {
 	private readonly logger: Logger
 	private readonly worktreeManager: WorktreeManager
 	private readonly artifactStore: ArtifactStore
+	private readonly workerRegistry: WorkerRegistry
 	private readonly semaphore: Semaphore
 	private readonly activeRepositories = new Set<string>()
 
@@ -55,12 +61,14 @@ export class WorkerService {
 		this.config = config
 		this.logger = new Logger('worker-service', config.logLevel)
 		this.worktreeManager = new WorktreeManager(this.logger)
+		const workerSecrets = getWorkerSecrets(config)
 		this.artifactStore = new ArtifactStore(
 			new Redactor(
-				{ QWEN_API_KEY: config.provider.apiKey },
-				Object.values(config.provider.headers),
+				workerSecrets.namedSecrets,
+				workerSecrets.additionalSecrets,
 			),
 		)
+		this.workerRegistry = new WorkerRegistry(config, this.logger)
 		this.semaphore = new Semaphore(config.limits.maxConcurrency)
 	}
 
@@ -70,19 +78,62 @@ export class WorkerService {
 	): Promise<WorkerRunReport> {
 		return await this.semaphore.use(async () => {
 			throwIfAborted(externalSignal)
-			assertProviderConfigured(this.config)
+			assertWorkersConfigured(this.config)
 			this.assertTaskContract(task)
+			const route = this.workerRegistry.route(task.mode, task.routing)
 			const repositoryPath = await resolveRepositoryRoot(task.repositoryPath)
 			await assertSafeRepositoryConfiguration(repositoryPath)
 			this.assertRepositoryAvailable(repositoryPath)
 			const artifactRoot = await this.getArtifactRoot(repositoryPath)
 			const lease = await acquireRepositoryLease(artifactRoot)
+			const deadlineMs = Date.now() + task.timeoutSeconds * 1_000
+			const previousAttempts: Array<WorkerAttemptSummary> = []
 			this.activeRepositories.add(repositoryPath)
 
 			try {
-				return await this.executeInWorktree(
-					{ ...task, repositoryPath },
-					externalSignal,
+				let lastReport: WorkerRunReport | null = null
+
+				for (let index = 0; index < route.maxAttempts; index += 1) {
+					throwIfAborted(externalSignal)
+					if (Date.now() >= deadlineMs) {
+						break
+					}
+
+					const candidate = route.candidates[index]
+					if (candidate === undefined) {
+						break
+					}
+
+					const report = await this.executeInWorktree(
+						{ ...task, repositoryPath },
+						candidate.worker,
+						route,
+						index + 1,
+						previousAttempts,
+						deadlineMs,
+						externalSignal,
+					)
+					lastReport = report
+
+					if (!shouldFallback(report, route, index)) {
+						return report
+					}
+
+					previousAttempts.push({
+						runId: report.runId,
+						workerId: candidate.worker.id,
+						status: report.status,
+						failureCode: report.failureCode ?? null,
+					})
+				}
+
+				if (lastReport !== null) {
+					return lastReport
+				}
+
+				throw new HarnessError(
+					'WORKER_ROUTE_TIMED_OUT',
+					'Worker routing deadline expired before an attempt could start',
 				)
 			} finally {
 				this.activeRepositories.delete(repositoryPath)
@@ -214,6 +265,11 @@ export class WorkerService {
 
 	private async executeInWorktree(
 		task: WorkerTask,
+		worker: WorkerConfig,
+		route: WorkerRoute,
+		attemptNumber: number,
+		previousAttempts: Array<WorkerAttemptSummary>,
+		deadlineMs: number,
 		externalSignal?: AbortSignal,
 	): Promise<WorkerRunReport> {
 		const startedAtMs = Date.now()
@@ -231,25 +287,33 @@ export class WorkerService {
 			: AbortSignal.any([externalSignal, timeoutController.signal])
 		const timeout = setTimeout(
 			() => timeoutController.abort(),
-			task.timeoutSeconds * 1_000,
+			Math.max(1, deadlineMs - Date.now()),
 		)
 		const sandboxHome = path.join(worktree.parentPath, 'home')
-		const provider = new OpenAiCompatibleProvider(
-			this.config.provider,
-			new Logger('qwen-provider', this.config.logLevel),
-		)
-		const commandRunner = createCommandRunner(this.config)
-		const toolExecutor = new WorkerToolExecutor({
-			task,
-			worktreePath: worktree.path,
-			config: this.config,
-			baseCommit: worktree.baseCommit,
-			policyViolations,
-			signal,
-		})
+		let provider: WorkerProvider
+		let commandRunner: ReturnType<typeof createCommandRunner>
+		let toolExecutor: WorkerToolExecutor
+
+		try {
+			provider = this.workerRegistry.createProvider(worker)
+			commandRunner = createCommandRunner(this.config)
+			toolExecutor = new WorkerToolExecutor({
+				task,
+				worktreePath: worktree.path,
+				config: this.config,
+				baseCommit: worktree.baseCommit,
+				policyViolations,
+				signal,
+			})
+		} catch (error) {
+			clearTimeout(timeout)
+			await worktree.cleanup()
+			throw error
+		}
 		let workerSummary = ''
 		let transcript = ''
 		let status: RunStatus = 'completed'
+		let failureCode: string | null = null
 		let patch = ''
 		let changedFiles: Array<string> = []
 		let preserveWorktree = false
@@ -282,6 +346,7 @@ export class WorkerService {
 		} catch (error) {
 			workerSummary = getErrorMessage(error)
 			transcript = `${transcript}\n\nerror: ${workerSummary}`.trim()
+			failureCode = getFailureCode(error)
 			status = classifyRunError(
 				error,
 				externalSignal,
@@ -300,11 +365,13 @@ export class WorkerService {
 			policyViolations.push(...candidate.policyViolations)
 		} catch (error) {
 			status = 'failed'
+			failureCode = failureCode ?? getFailureCode(error)
 			warnings.push(`Patch collection failed: ${getErrorMessage(error)}`)
 		}
 
 		if (policyViolations.length > 0) {
 			status = 'policy_violation'
+			failureCode = failureCode ?? 'WORKER_POLICY_VIOLATION'
 		}
 
 		if (status === 'completed') {
@@ -324,6 +391,7 @@ export class WorkerService {
 					status = 'timed_out'
 				}
 			} catch (error) {
+				failureCode = failureCode ?? getFailureCode(error)
 				status = classifyRunError(
 					error,
 					externalSignal,
@@ -353,6 +421,7 @@ export class WorkerService {
 					)
 				} catch (error) {
 					status = 'failed'
+					failureCode = failureCode ?? getFailureCode(error)
 					warnings.push(
 						`Validation integrity check failed: ${getErrorMessage(error)}`,
 					)
@@ -367,6 +436,7 @@ export class WorkerService {
 			commandResults.some(result => result.exitCode !== 0 || result.timedOut)
 		) {
 			status = 'failed'
+			failureCode = failureCode ?? 'VALIDATION_COMMAND_FAILED'
 		}
 
 		if (
@@ -375,14 +445,17 @@ export class WorkerService {
 			status === 'completed'
 		) {
 			status = 'blocked'
+			failureCode = failureCode ?? 'WORKER_NO_CHANGES'
 			warnings.push('Implementation task completed without producing file changes.')
 		}
 
 		const completedAtMs = Date.now()
+		const usage = getProviderUsage(provider)
 		const initialReport: WorkerRunReport = {
 			schemaVersion: 1,
 			runId: worktree.runId,
 			status,
+			failureCode,
 			objective: task.objective,
 			mode: task.mode,
 			repositoryPath: task.repositoryPath,
@@ -404,9 +477,26 @@ export class WorkerService {
 			policyViolations,
 			warnings,
 			provider: {
-				baseUrl: this.config.provider.baseUrl,
-				model: this.config.provider.model,
-				requestCount: provider.getRequestCount(),
+				workerId: worker.id,
+				adapter: worker.adapter,
+				baseUrl: worker.endpointUrl ?? worker.baseUrl,
+				model: worker.model,
+				requestCount: usage.requestCount,
+				inputTokens: usage.inputTokens,
+				outputTokens: usage.outputTokens,
+				totalTokens: usage.totalTokens,
+				totalLatencyMs: usage.totalLatencyMs,
+				estimatedCostUsd: usage.estimatedCostUsd,
+			},
+			routing: {
+				strategy: route.strategy,
+				requiredCapabilities: route.requiredCapabilities,
+				candidateWorkerIds: route.candidates.map(candidate => candidate.worker.id),
+				selectedWorkerId: worker.id,
+				attemptNumber,
+				maxAttempts: route.maxAttempts,
+				fallbackEnabled: route.fallbackEnabled,
+				previousAttempts: [...previousAttempts],
 			},
 		}
 
@@ -711,9 +801,58 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 	}
 }
 
+function shouldFallback(
+	report: WorkerRunReport,
+	route: WorkerRoute,
+	candidateIndex: number,
+): boolean {
+	return (
+		route.fallbackEnabled &&
+		candidateIndex + 1 < route.maxAttempts &&
+		report.status === 'failed' &&
+		isFallbackEligibleCode(report.failureCode ?? null)
+	)
+}
+
+function isFallbackEligibleCode(code: string | null): boolean {
+	return (
+		code !== null &&
+		(code.startsWith('PROVIDER_') ||
+			code === 'WORKER_EMPTY_RESPONSE' ||
+			code === 'WORKER_ITERATION_LIMIT')
+	)
+}
+
+function getFailureCode(error: unknown): string {
+	if (error instanceof HarnessError) {
+		return error.code
+	}
+	if (error instanceof DOMException && error.name === 'AbortError') {
+		return 'WORKER_ABORTED'
+	}
+	return 'WORKER_FAILED'
+}
+
+
 function isPinnedDockerImage(image: string): boolean {
 	return (
 		/@sha256:[a-f0-9]{64}$/i.test(image) ||
 		/^sha256:[a-f0-9]{64}$/i.test(image)
 	)
+}
+
+function getProviderUsage(provider: WorkerProvider): ProviderUsage {
+	if (provider.getUsage !== undefined) {
+		return provider.getUsage()
+	}
+
+	const requestCount = provider.getRequestCount?.() ?? 0
+	return {
+		requestCount,
+		inputTokens: 0,
+		outputTokens: 0,
+		totalTokens: 0,
+		totalLatencyMs: 0,
+		estimatedCostUsd: null,
+	}
 }

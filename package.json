@@ -1,7 +1,7 @@
 {
   "name": "agent-harness-os",
-  "version": "0.1.0",
-  "description": "A secure MCP worker harness for delegating bounded coding tasks from Codex to OpenAI-compatible models such as Qwen.",
+  "version": "0.2.0",
+  "description": "A secure, model-agnostic Agent OS for routing bounded coding tasks from Codex to pluggable AI workers.",
   "type": "module",
   "private": false,
   "bin": {
@@ -40,9 +40,14 @@
   "keywords": [
     "codex",
     "mcp",
+    "agent-os",
+    "multi-model",
+    "worker-router",
+    "anthropic",
+    "openai",
     "qwen",
-    "agent",
-    "coding-agent",
+    "gemini",
+    "ollama",
     "worktree"
   ],
   "license": "MIT",

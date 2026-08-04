@@ -2,6 +2,33 @@
 
 All notable changes are documented here.
 
+## 0.2.0 - 2026-08-04
+
+### Added
+
+- Model-agnostic worker registry configured through environment-backed JSON
+- Deterministic capability, cost, latency, quality, and preferred-worker routing
+- Bounded fallback using a fresh detached worktree for every worker attempt
+- Native Anthropic Messages API adapter
+- Generic OpenAI-compatible adapter for OpenAI, Qwen hosts, Gemini compatibility, OpenRouter, Ollama, and similar endpoints
+- Worker usage, token, latency, estimated cost, selected route, and prior-attempt evidence in reports
+- `list_workers` and `route_worker` MCP tools
+- Automatic Codex forwarding for custom credential environment-variable names declared by the worker registry
+- Worker-registry, routing, fallback, and provider-compatibility documentation
+
+### Security
+
+- Rejected credentials embedded in endpoint query parameters and static authorization headers
+- Redacted query values from worker-registry inspection
+- Restricted fallback to provider and bounded model-loop failures
+- Preserved the original base commit and clean worktree boundary across attempts
+- Removed unsupported capability claims from the routable capability vocabulary
+
+### Compatibility
+
+- Retained legacy `QWEN_*` single-worker configuration
+- Retained version 1 run-report compatibility through optional routing and telemetry fields
+
 ## 0.1.0 - 2026-08-03
 
 ### Added

@@ -23,7 +23,6 @@ import { PathPolicy } from '../security/path-policy.js'
 export type ToolExecutorContext = {
 	task: WorkerTask
 	worktreePath: string
-	repositoryPath?: string
 	config: HarnessConfig
 	baseCommit: string
 	policyViolations: Array<string>
@@ -137,36 +136,36 @@ export class WorkerToolExecutor {
 			switch (name) {
 				case 'list_files':
 					return success(limitToolOutput(
-						await this.listFiles(argumentsRecord),
-						this.context.config.limits.maxToolOutputBytes,
-					))
+					await this.listFiles(argumentsRecord),
+					this.context.config.limits.maxToolOutputBytes,
+				))
 				case 'read_file':
 					return success(limitToolOutput(
-						await this.readFile(argumentsRecord),
-						this.context.config.limits.maxToolOutputBytes,
-					))
+					await this.readFile(argumentsRecord),
+					this.context.config.limits.maxToolOutputBytes,
+				))
 				case 'search_files':
 					return success(limitToolOutput(
-						await this.searchFiles(argumentsRecord),
-						this.context.config.limits.maxToolOutputBytes,
-					))
+					await this.searchFiles(argumentsRecord),
+					this.context.config.limits.maxToolOutputBytes,
+				))
 				case 'get_diff':
 					return success(limitToolOutput(
-						await this.getDiff(),
-						this.context.config.limits.maxToolOutputBytes,
-					))
+					await this.getDiff(),
+					this.context.config.limits.maxToolOutputBytes,
+				))
 				case 'write_file':
 					this.assertWritableMode()
 					return success(limitToolOutput(
-						await this.writeFile(argumentsRecord),
-						this.context.config.limits.maxToolOutputBytes,
-					))
+					await this.writeFile(argumentsRecord),
+					this.context.config.limits.maxToolOutputBytes,
+				))
 				case 'delete_file':
 					this.assertWritableMode()
 					return success(limitToolOutput(
-						await this.deleteFile(argumentsRecord),
-						this.context.config.limits.maxToolOutputBytes,
-					))
+					await this.deleteFile(argumentsRecord),
+					this.context.config.limits.maxToolOutputBytes,
+				))
 				default:
 					throw new HarnessError('UNKNOWN_WORKER_TOOL', `Unknown worker tool: ${name}`)
 			}
@@ -179,7 +178,7 @@ export class WorkerToolExecutor {
 				content: JSON.stringify({
 					error: error instanceof HarnessError ? error.code : 'TOOL_EXECUTION_FAILED',
 					message: getErrorMessage(error),
-				}),
+			}),
 				isError: true,
 			}
 		}

@@ -36,5 +36,14 @@
   "baseRef": "HEAD",
   "maxIterations": 24,
   "timeoutSeconds": 900,
-  "allowNetwork": false
+  "allowNetwork": false,
+  "routing": {
+    "preferredWorkerId": null,
+    "requiredCapabilities": [],
+    "strategy": "balanced",
+    "maxCostTier": "medium",
+    "maxLatencyTier": "standard",
+    "allowFallback": true,
+    "maxAttempts": 2
+  }
 }

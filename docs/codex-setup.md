@@ -1,53 +1,68 @@
 # Codex setup
 
-## Authentication
-
-Use Codex's supported ChatGPT sign-in flow when you want Codex activity to use your ChatGPT subscription:
+## Install and validate
 
 ```bash
-codex login
+npm ci --ignore-scripts
+npm run check
+npm link
+agent-harness-os doctor
 ```
 
-Choose ChatGPT sign-in rather than API-key authentication.
+## Configure workers
 
-The worker model remains a separate provider integration and requires its own endpoint and credential.
+Export provider credentials and `AGENT_OS_WORKERS_JSON` in the shell that starts Codex. A complete registry example is in `examples/workers.json`.
 
-## MCP configuration
+```bash
+export OPENAI_API_KEY='...'
+export ANTHROPIC_API_KEY='...'
+export AGENT_OS_WORKERS_JSON="$(cat examples/workers.json)"
+```
 
-Generate a configuration block from the installed path:
+The example file contains placeholder model IDs; replace or remove workers before use.
+
+## Generate MCP configuration
 
 ```bash
 agent-harness-os codex-config
 ```
 
-The server retains the legacy MCP initialization flow currently used by Codex and also supports stateless MCP `2026-07-28` clients.
+Add the generated block to Codex configuration. The server is named `agent_os`.
 
-The generated block uses:
+Run this command with `AGENT_OS_WORKERS_JSON` set. The generated `env_vars` list includes common provider credentials and every custom `apiKeyEnv` and `headerEnv` name declared by the loaded registry. Regenerate the block whenever those names change.
 
-- a local STDIO server
-- named environment-variable forwarding
-- required server startup
-- a one-hour tool timeout
-- `writes` as the default tool approval mode
-- automatic approval for read-only health and report tools
-- prompts for delegation and application
+## Approval model
 
-Store the block in `~/.codex/config.toml` for all trusted projects or `.codex/config.toml` for one trusted repository.
+Recommended approvals:
 
-Restart the Codex host after editing configuration, then use:
+- `health_check`: approve
+- `list_workers`: approve
+- `route_worker`: approve
+- `get_worker_run`: approve
+- `delegate_to_worker`: prompt
+- `apply_worker_patch`: prompt
 
-```bash
-codex mcp list
-```
+Delegation is non-destructive to the caller's checkout but sends bounded repository context to a selected external worker. Patch application modifies the checkout.
 
-## Recommended Codex policy
+## Project instructions
 
-Keep the following distinction in `AGENTS.md`:
+Copy and adapt `examples/AGENTS.md`. Require Codex to:
 
-- Codex may inspect, plan, and run non-destructive validation directly.
-- Codex may delegate bounded mechanical work through explicit path allowlists.
-- The worker receives file tools only; Codex declares any deterministic validation commands before delegation.
-- Codex must review worker evidence, including validation output and any failed immutability checks.
-- Codex must not treat a completed run as proof that acceptance criteria passed.
-- Applying a patch requires a separate tool call.
-- Merging, pushing, deploying, migrating, or contacting users remains outside the harness.
+1. define explicit allowed and prohibited paths
+2. declare validation commands before delegation
+3. state routing constraints only when they are material
+4. preview routing for sensitive or expensive tasks
+5. inspect selected-worker and fallback evidence
+6. apply patches only through `apply_worker_patch`
+7. rerun validation in the real checkout
+
+## Verify
+
+From Codex, call:
+
+1. `health_check`
+2. `list_workers`
+3. `route_worker` for an implementation task
+4. `delegate_to_worker` against a disposable repository
+5. `get_worker_run`
+6. `apply_worker_patch` after reviewing the result

@@ -3,22 +3,64 @@ import { lstat, realpath } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import type { ExecutionBackend } from './domain/types.js'
+import type {
+	ExecutionBackend,
+	RoutingStrategy,
+	WorkerAdapter,
+	WorkerCapability,
+	WorkerCostTier,
+	WorkerLatencyTier,
+} from './domain/types.js'
 import { HarnessError } from './lib/errors.js'
-import { parseJsonObject } from './lib/json.js'
+import { isRecord, parseJsonObject } from './lib/json.js'
 import type { LogLevel } from './lib/logger.js'
 
+export type WorkerAuth = 'bearer' | 'api-key' | 'none'
+
+export type OpenAiMaxOutputTokensParameter =
+	| 'max_tokens'
+	| 'max_completion_tokens'
+	| 'none'
+
+export type WorkerPricing = {
+	inputPerMillion: number | null
+	outputPerMillion: number | null
+}
+
+export type WorkerConfig = {
+	id: string
+	enabled: boolean
+	adapter: WorkerAdapter
+	model: string
+	baseUrl: string
+	endpointUrl: string | null
+	apiKeyEnv: string | null
+	apiKey: string
+	auth: WorkerAuth
+	headers: Record<string, string>
+	headerEnvNames: Array<string>
+	capabilities: Array<WorkerCapability>
+	priority: number
+	costTier: WorkerCostTier
+	latencyTier: WorkerLatencyTier
+	timeoutMs: number
+	maxRetries: number
+	maxResponseBytes: number
+	maxOutputTokens: number
+	maxOutputTokensParameter: OpenAiMaxOutputTokensParameter
+	temperature: number | null
+	allowInsecureHttp: boolean
+	anthropicVersion: string
+	pricing: WorkerPricing
+	configurationIssues: Array<string>
+}
+
 export type HarnessConfig = {
-	provider: {
-		baseUrl: string
-		chatCompletionsUrl: string | null
-		apiKey: string
-		model: string
-		headers: Record<string, string>
-		timeoutMs: number
-		maxRetries: number
-		maxResponseBytes: number
-		allowInsecureHttp: boolean
+	workers: Array<WorkerConfig>
+	routing: {
+		defaultWorkerId: string | null
+		defaultStrategy: RoutingStrategy
+		maxAttempts: number
 	}
 	execution: {
 		backend: ExecutionBackend
@@ -48,49 +90,36 @@ export type HarnessConfig = {
 export function loadConfig(
 	environment: NodeJS.ProcessEnv = process.env,
 ): HarnessConfig {
-	const headers = parseStringHeaders(environment['QWEN_HEADERS_JSON'] ?? '{}')
 	const backend = parseExecutionBackend(
 		environment['AGENT_HARNESS_EXECUTION_BACKEND'] ?? 'local',
 	)
-	const allowInsecureHttp = parseBoolean(
-		environment['QWEN_ALLOW_INSECURE_HTTP'],
-		false,
-	)
-	const baseUrl = normalizeBaseUrl(
-		environment['QWEN_BASE_URL'] ?? '',
-		allowInsecureHttp,
-	)
-	const chatCompletionsUrl = normalizeChatCompletionsUrl(
-		environment['QWEN_CHAT_COMPLETIONS_URL'] ?? '',
-		allowInsecureHttp,
-	)
+	const workers = loadWorkers(environment)
+	const requestedDefaultWorkerId =
+		environment['AGENT_OS_DEFAULT_WORKER']?.trim() || null
+
+	if (
+		requestedDefaultWorkerId !== null &&
+		!workers.some(worker => worker.id === requestedDefaultWorkerId)
+	) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`AGENT_OS_DEFAULT_WORKER references an unknown worker: ${requestedDefaultWorkerId}`,
+		)
+	}
 
 	return {
-		provider: {
-			baseUrl,
-			chatCompletionsUrl,
-			apiKey: environment['QWEN_API_KEY']?.trim() ?? '',
-			model: environment['QWEN_MODEL']?.trim() ?? '',
-			headers,
-			timeoutMs: parseInteger(
-				environment['QWEN_TIMEOUT_MS'],
-				120_000,
-				1_000,
-				900_000,
+		workers,
+		routing: {
+			defaultWorkerId: requestedDefaultWorkerId,
+			defaultStrategy: parseRoutingStrategy(
+				environment['AGENT_OS_ROUTING_STRATEGY'] ?? 'balanced',
 			),
-			maxRetries: parseInteger(
-				environment['QWEN_MAX_RETRIES'],
+			maxAttempts: parseInteger(
+				environment['AGENT_OS_MAX_WORKER_ATTEMPTS'],
 				3,
-				0,
+				1,
 				8,
 			),
-			maxResponseBytes: parseInteger(
-				environment['QWEN_MAX_RESPONSE_BYTES'],
-				4_194_304,
-				65_536,
-				20_971_520,
-			),
-			allowInsecureHttp,
 		},
 		execution: {
 			backend,
@@ -188,30 +217,46 @@ export function loadConfig(
 	}
 }
 
-export function assertProviderConfigured(config: HarnessConfig): void {
-	const missing = [
-		config.provider.baseUrl === '' && config.provider.chatCompletionsUrl === null
-			? 'QWEN_BASE_URL or QWEN_CHAT_COMPLETIONS_URL'
-			: null,
-		config.provider.apiKey === '' ? 'QWEN_API_KEY' : null,
-		config.provider.model === '' ? 'QWEN_MODEL' : null,
-	].filter((value): value is string => value !== null)
+export function assertWorkersConfigured(config: HarnessConfig): void {
+	const configuredWorkers = config.workers.filter(isWorkerConfigured)
 
-	if (missing.length > 0) {
+	if (configuredWorkers.length === 0) {
+		const issues = config.workers.flatMap(worker =>
+			worker.configurationIssues.map(issue => `${worker.id}: ${issue}`),
+		)
 		throw new HarnessError(
-			'PROVIDER_NOT_CONFIGURED',
-			`Missing provider configuration: ${missing.join(', ')}`,
+			'WORKERS_NOT_CONFIGURED',
+			issues.length === 0
+				? 'No workers are configured. Set AGENT_OS_WORKERS_JSON or the legacy QWEN_* variables.'
+				: `No usable workers are configured: ${issues.join('; ')}`,
 		)
 	}
 }
 
-export function isProviderConfigured(config: HarnessConfig): boolean {
-	try {
-		assertProviderConfigured(config)
-		return true
-	} catch {
-		return false
+export function isWorkerConfigured(worker: WorkerConfig): boolean {
+	return worker.enabled && worker.configurationIssues.length === 0
+}
+
+export function getConfiguredWorkers(config: HarnessConfig): Array<WorkerConfig> {
+	return config.workers.filter(isWorkerConfigured)
+}
+
+export function getWorkerSecrets(config: HarnessConfig): {
+	namedSecrets: Record<string, string>
+	additionalSecrets: Array<string>
+} {
+	const namedSecrets: Record<string, string> = {}
+	const additionalSecrets: Array<string> = []
+
+	for (const worker of config.workers) {
+		if (worker.apiKey !== '') {
+			namedSecrets[worker.apiKeyEnv ?? `${worker.id.toUpperCase()}_API_KEY`] =
+				worker.apiKey
+		}
+		additionalSecrets.push(...Object.values(worker.headers))
 	}
+
+	return { namedSecrets, additionalSecrets }
 }
 
 export function resolveArtifactRoot(
@@ -256,6 +301,305 @@ export async function assertArtifactRootOutsideRepository(
 	}
 }
 
+function loadWorkers(environment: NodeJS.ProcessEnv): Array<WorkerConfig> {
+	const workersJson = environment['AGENT_OS_WORKERS_JSON']?.trim()
+	const workers = workersJson === undefined || workersJson === ''
+		? [parseLegacyQwenWorker(environment)]
+		: parseWorkerDefinitions(workersJson, environment)
+	const ids = new Set<string>()
+
+	for (const worker of workers) {
+		if (ids.has(worker.id)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`Worker IDs must be unique: ${worker.id}`,
+			)
+		}
+		ids.add(worker.id)
+	}
+
+	return workers
+}
+
+function parseLegacyQwenWorker(environment: NodeJS.ProcessEnv): WorkerConfig {
+	const allowInsecureHttp = parseBoolean(
+		environment['QWEN_ALLOW_INSECURE_HTTP'],
+		false,
+	)
+	const baseUrl = normalizeBaseUrl(
+		environment['QWEN_BASE_URL'] ?? '',
+		allowInsecureHttp,
+		'QWEN_BASE_URL',
+	)
+	const endpointUrl = normalizeEndpointUrl(
+		environment['QWEN_CHAT_COMPLETIONS_URL'] ?? '',
+		allowInsecureHttp,
+		'QWEN_CHAT_COMPLETIONS_URL',
+	)
+	const apiKey = environment['QWEN_API_KEY']?.trim() ?? ''
+	const model = environment['QWEN_MODEL']?.trim() ?? ''
+	const issues: Array<string> = []
+
+	if (baseUrl === '' && endpointUrl === null) {
+		issues.push('QWEN_BASE_URL or QWEN_CHAT_COMPLETIONS_URL is missing')
+	}
+	if (apiKey === '') {
+		issues.push('QWEN_API_KEY is missing')
+	}
+	if (model === '') {
+		issues.push('QWEN_MODEL is missing')
+	}
+
+	return {
+		id: 'qwen',
+		enabled: true,
+		adapter: 'openai-compatible',
+		model,
+		baseUrl,
+		endpointUrl,
+		apiKeyEnv: 'QWEN_API_KEY',
+		apiKey,
+		auth: 'bearer',
+		headers: parseStringHeaders(
+			environment['QWEN_HEADERS_JSON'] ?? '{}',
+			'QWEN_HEADERS_JSON',
+		),
+		headerEnvNames: [],
+		capabilities: [
+			'research',
+			'implementation',
+			'testing',
+			'review',
+			'tool-calling',
+		],
+		priority: 50,
+		costTier: 'low',
+		latencyTier: 'standard',
+		timeoutMs: parseInteger(
+			environment['QWEN_TIMEOUT_MS'],
+			120_000,
+			1_000,
+			900_000,
+		),
+		maxRetries: parseInteger(
+			environment['QWEN_MAX_RETRIES'],
+			3,
+			0,
+			8,
+		),
+		maxResponseBytes: parseInteger(
+			environment['QWEN_MAX_RESPONSE_BYTES'],
+			4_194_304,
+			65_536,
+			20_971_520,
+		),
+		maxOutputTokens: 8_192,
+		maxOutputTokensParameter: 'max_tokens',
+		temperature: 0.1,
+		allowInsecureHttp,
+		anthropicVersion: '2023-06-01',
+		pricing: { inputPerMillion: null, outputPerMillion: null },
+		configurationIssues: issues,
+	}
+}
+
+function parseWorkerDefinitions(
+	value: string,
+	environment: NodeJS.ProcessEnv,
+): Array<WorkerConfig> {
+	let parsed: unknown
+
+	try {
+		parsed = JSON.parse(value)
+	} catch {
+		throw new HarnessError(
+			'INVALID_JSON',
+			'AGENT_OS_WORKERS_JSON must contain valid JSON',
+		)
+	}
+
+	if (Buffer.byteLength(value, 'utf8') > 1_048_576) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'AGENT_OS_WORKERS_JSON may not exceed 1 MiB',
+		)
+	}
+
+	if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 32) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'AGENT_OS_WORKERS_JSON must be an array containing 1 to 32 workers',
+		)
+	}
+
+	return parsed.map((entry, index) =>
+		parseWorkerDefinition(entry, index, environment),
+	)
+}
+
+function parseWorkerDefinition(
+	value: unknown,
+	index: number,
+	environment: NodeJS.ProcessEnv,
+): WorkerConfig {
+	if (!isRecord(value)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`AGENT_OS_WORKERS_JSON[${index}] must be an object`,
+		)
+	}
+
+	const prefix = `AGENT_OS_WORKERS_JSON[${index}]`
+	const id = requireConfigString(value['id'], `${prefix}.id`)
+
+	if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${prefix}.id must contain only lowercase letters, digits, dots, underscores, and hyphens`,
+		)
+	}
+
+	const adapter = parseWorkerAdapter(value['adapter'], `${prefix}.adapter`)
+	const allowInsecureHttp = parseOptionalBoolean(
+		value['allowInsecureHttp'],
+		false,
+		`${prefix}.allowInsecureHttp`,
+	)
+	const baseUrl = normalizeBaseUrl(
+		optionalConfigString(value['baseUrl'], ''),
+		allowInsecureHttp,
+		`${prefix}.baseUrl`,
+	)
+	const endpointUrl = normalizeEndpointUrl(
+		optionalConfigString(value['endpointUrl'], ''),
+		allowInsecureHttp,
+		`${prefix}.endpointUrl`,
+	)
+	const apiKeyEnv = optionalNullableConfigString(value['apiKeyEnv'])
+	if (apiKeyEnv !== null) {
+		assertEnvironmentVariableName(apiKeyEnv, `${prefix}.apiKeyEnv`)
+	}
+	const apiKey = apiKeyEnv === null
+		? ''
+		: environment[apiKeyEnv]?.trim() ?? ''
+	const auth = parseWorkerAuth(value['auth'], adapter)
+	const staticHeaders = parseHeadersRecord(value['headers'], `${prefix}.headers`)
+	const environmentHeaderResult = parseEnvironmentHeaders(
+		value['headerEnv'],
+		`${prefix}.headerEnv`,
+		environment,
+	)
+	const model = requireConfigString(value['model'], `${prefix}.model`)
+	if (model.length > 512) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${prefix}.model may not exceed 512 characters`,
+		)
+	}
+	const capabilities = parseCapabilities(
+		value['capabilities'],
+		`${prefix}.capabilities`,
+	)
+	const issues: Array<string> = [
+		...environmentHeaderResult.missingEnvironmentNames.map(
+			(name: string) => `${name} is missing`,
+		),
+	]
+
+	if (baseUrl === '' && endpointUrl === null) {
+		issues.push('baseUrl or endpointUrl is missing')
+	}
+	if (auth !== 'none' && apiKey === '') {
+		issues.push(
+			apiKeyEnv === null
+				? 'apiKeyEnv is required for authenticated workers'
+				: `${apiKeyEnv} is missing`,
+		)
+	}
+	if (!capabilities.includes('tool-calling')) {
+		issues.push('tool-calling capability is required by this harness')
+	}
+
+	return {
+		id,
+		enabled: parseOptionalBoolean(
+			value['enabled'],
+			true,
+			`${prefix}.enabled`,
+		),
+		adapter,
+		model,
+		baseUrl,
+		endpointUrl,
+		apiKeyEnv,
+		apiKey,
+		auth,
+		headers: { ...staticHeaders, ...environmentHeaderResult.headers },
+		headerEnvNames: environmentHeaderResult.environmentNames,
+		capabilities,
+		priority: parseOptionalInteger(
+			value['priority'],
+			50,
+			0,
+			100,
+			`${prefix}.priority`,
+		),
+		costTier: parseCostTier(value['costTier'], `${prefix}.costTier`),
+		latencyTier: parseLatencyTier(
+			value['latencyTier'],
+			`${prefix}.latencyTier`,
+		),
+		timeoutMs: parseOptionalInteger(
+			value['timeoutMs'],
+			120_000,
+			1_000,
+			900_000,
+			`${prefix}.timeoutMs`,
+		),
+		maxRetries: parseOptionalInteger(
+			value['maxRetries'],
+			3,
+			0,
+			8,
+			`${prefix}.maxRetries`,
+		),
+		maxResponseBytes: parseOptionalInteger(
+			value['maxResponseBytes'],
+			4_194_304,
+			65_536,
+			20_971_520,
+			`${prefix}.maxResponseBytes`,
+		),
+		maxOutputTokens: parseOptionalInteger(
+			value['maxOutputTokens'],
+			8_192,
+			256,
+			131_072,
+			`${prefix}.maxOutputTokens`,
+		),
+		maxOutputTokensParameter: parseMaxOutputTokensParameter(
+			value['maxOutputTokensParameter'],
+			adapter,
+			`${prefix}.maxOutputTokensParameter`,
+		),
+		temperature: parseOptionalNullableNumberInRange(
+			value['temperature'],
+			`${prefix}.temperature`,
+			0,
+			2,
+		),
+		allowInsecureHttp,
+		anthropicVersion: boundedOptionalConfigString(
+			value['anthropicVersion'],
+			'2023-06-01',
+			`${prefix}.anthropicVersion`,
+			64,
+		),
+		pricing: parsePricing(value['pricing'], `${prefix}.pricing`),
+		configurationIssues: issues,
+	}
+}
+
 function repositoryKey(repositoryPath: string): string {
 	return createHash('sha256')
 		.update(path.resolve(repositoryPath))
@@ -263,44 +607,55 @@ function repositoryKey(repositoryPath: string): string {
 		.slice(0, 24)
 }
 
-function normalizeBaseUrl(value: string, allowInsecureHttp: boolean): string {
+function normalizeBaseUrl(
+	value: string,
+	allowInsecureHttp: boolean,
+	fieldName: string,
+): string {
 	const trimmed = value.trim().replace(/\/+$/, '')
+
+	if (Buffer.byteLength(trimmed, 'utf8') > 4_096) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may not exceed 4096 bytes`,
+		)
+	}
 
 	if (trimmed === '') {
 		return ''
 	}
 
-	const parsed = validateProviderUrl(
-		trimmed,
-		'QWEN_BASE_URL',
-		allowInsecureHttp,
-	)
+	const parsed = validateProviderUrl(trimmed, fieldName, allowInsecureHttp)
 
 	if (parsed.search !== '') {
 		throw new HarnessError(
 			'INVALID_CONFIGURATION',
-			'QWEN_BASE_URL may not contain a query string; use QWEN_CHAT_COMPLETIONS_URL for a full endpoint',
+			`${fieldName} may not contain a query string; use endpointUrl for a full endpoint`,
 		)
 	}
 
 	return trimmed
 }
 
-function normalizeChatCompletionsUrl(
+function normalizeEndpointUrl(
 	value: string,
 	allowInsecureHttp: boolean,
+	fieldName: string,
 ): string | null {
 	const trimmed = value.trim()
+
+	if (Buffer.byteLength(trimmed, 'utf8') > 4_096) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may not exceed 4096 bytes`,
+		)
+	}
 
 	if (trimmed === '') {
 		return null
 	}
 
-	validateProviderUrl(
-		trimmed,
-		'QWEN_CHAT_COMPLETIONS_URL',
-		allowInsecureHttp,
-	)
+	validateProviderUrl(trimmed, fieldName, allowInsecureHttp)
 	return trimmed
 }
 
@@ -341,6 +696,15 @@ function validateProviderUrl(
 		)
 	}
 
+	for (const key of parsed.searchParams.keys()) {
+		if (isSensitiveCredentialName(key)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${fieldName} may not contain credentials in query parameters; use apiKeyEnv or headerEnv`,
+			)
+		}
+	}
+
 	if (
 		parsed.protocol === 'http:' &&
 		!allowInsecureHttp &&
@@ -348,7 +712,7 @@ function validateProviderUrl(
 	) {
 		throw new HarnessError(
 			'INSECURE_PROVIDER_URL',
-			`${fieldName} must use HTTPS unless it targets loopback or QWEN_ALLOW_INSECURE_HTTP=true is explicitly set`,
+			`${fieldName} must use HTTPS unless it targets loopback or allowInsecureHttp=true is explicitly set`,
 		)
 	}
 
@@ -405,6 +769,341 @@ function isMissingFileError(error: unknown): boolean {
 	)
 }
 
+function parseWorkerAdapter(value: unknown, fieldName: string): WorkerAdapter {
+	if (value === 'openai-compatible' || value === 'anthropic') {
+		return value
+	}
+
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be openai-compatible or anthropic`,
+	)
+}
+
+function parseMaxOutputTokensParameter(
+	value: unknown,
+	adapter: WorkerAdapter,
+	fieldName: string,
+): OpenAiMaxOutputTokensParameter {
+	if (adapter === 'anthropic') {
+		return 'none'
+	}
+	if (value === undefined) {
+		return 'max_tokens'
+	}
+	if (
+		value === 'max_tokens' ||
+		value === 'max_completion_tokens' ||
+		value === 'none'
+	) {
+		return value
+	}
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be max_tokens, max_completion_tokens, or none`,
+	)
+}
+
+function parseWorkerAuth(value: unknown, adapter: WorkerAdapter): WorkerAuth {
+	if (adapter === 'anthropic') {
+		if (value === undefined || value === 'api-key') {
+			return 'api-key'
+		}
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'Anthropic workers must use api-key authentication',
+		)
+	}
+
+	if (value === undefined) {
+		return 'bearer'
+	}
+
+	if (value === 'bearer' || value === 'none') {
+		return value
+	}
+
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		'OpenAI-compatible worker auth must be bearer or none',
+	)
+}
+
+function parseCapabilities(
+	value: unknown,
+	fieldName: string,
+): Array<WorkerCapability> {
+	if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must contain 1 to 16 capabilities`,
+		)
+	}
+
+	const capabilities = value.map(item => {
+		if (!isWorkerCapability(item)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${fieldName} contains an unsupported capability: ${String(item)}`,
+			)
+		}
+		return item
+	})
+
+	return [...new Set(capabilities)]
+}
+
+function isWorkerCapability(value: unknown): value is WorkerCapability {
+	return (
+		value === 'research' ||
+		value === 'implementation' ||
+		value === 'testing' ||
+		value === 'review' ||
+		value === 'tool-calling' ||
+		value === 'long-context' ||
+		value === 'private'
+	)
+}
+
+function parseCostTier(value: unknown, fieldName: string): WorkerCostTier {
+	if (value === undefined) {
+		return 'medium'
+	}
+	if (value === 'low' || value === 'medium' || value === 'high') {
+		return value
+	}
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be low, medium, or high`,
+	)
+}
+
+function parseLatencyTier(
+	value: unknown,
+	fieldName: string,
+): WorkerLatencyTier {
+	if (value === undefined) {
+		return 'standard'
+	}
+	if (value === 'fast' || value === 'standard' || value === 'slow') {
+		return value
+	}
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be fast, standard, or slow`,
+	)
+}
+
+function parseRoutingStrategy(value: string): RoutingStrategy {
+	if (
+		value === 'balanced' ||
+		value === 'cost' ||
+		value === 'latency' ||
+		value === 'quality'
+	) {
+		return value
+	}
+
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		'AGENT_OS_ROUTING_STRATEGY must be balanced, cost, latency, or quality',
+	)
+}
+
+function parsePricing(value: unknown, fieldName: string): WorkerPricing {
+	if (value === undefined) {
+		return { inputPerMillion: null, outputPerMillion: null }
+	}
+	if (!isRecord(value)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be an object`,
+		)
+	}
+
+	return {
+		inputPerMillion: parseOptionalNullableNumber(
+			value['inputPerMillion'],
+			`${fieldName}.inputPerMillion`,
+		),
+		outputPerMillion: parseOptionalNullableNumber(
+			value['outputPerMillion'],
+			`${fieldName}.outputPerMillion`,
+		),
+	}
+}
+
+function parseOptionalNullableNumberInRange(
+	value: unknown,
+	fieldName: string,
+	min: number,
+	max: number,
+): number | null {
+	if (value === undefined || value === null) {
+		return null
+	}
+	if (
+		typeof value !== 'number' ||
+		!Number.isFinite(value) ||
+		value < min ||
+		value > max
+	) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be a number between ${min} and ${max}, or null`,
+		)
+	}
+	return value
+}
+
+function parseOptionalNullableNumber(
+	value: unknown,
+	fieldName: string,
+): number | null {
+	if (value === undefined || value === null) {
+		return null
+	}
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be a non-negative number or null`,
+		)
+	}
+	return value
+}
+
+function parseHeadersRecord(
+	value: unknown,
+	fieldName: string,
+): Record<string, string> {
+	if (value === undefined) {
+		return {}
+	}
+	if (!isRecord(value)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be an object`,
+		)
+	}
+
+	const entries = Object.entries(value)
+	if (entries.length > 32) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may contain at most 32 headers`,
+		)
+	}
+
+	const headers: Record<string, string> = {}
+	for (const [key, headerValue] of entries) {
+		if (
+			typeof headerValue !== 'string' ||
+			key.length === 0 ||
+			key.length > 128 ||
+			Buffer.byteLength(headerValue, 'utf8') > 4_096
+		) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${fieldName}.${key} must use a non-empty header name of at most 128 characters and a string value of at most 4096 bytes`,
+			)
+		}
+		if (isSensitiveCredentialName(key)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${fieldName}.${key} must be sourced through apiKeyEnv or headerEnv rather than embedded in AGENT_OS_WORKERS_JSON`,
+			)
+		}
+		headers[key] = headerValue
+	}
+	return headers
+}
+
+function parseEnvironmentHeaders(
+	value: unknown,
+	fieldName: string,
+	environment: NodeJS.ProcessEnv,
+): {
+	headers: Record<string, string>
+	missingEnvironmentNames: Array<string>
+	environmentNames: Array<string>
+} {
+	if (value === undefined) {
+		return { headers: {}, missingEnvironmentNames: [], environmentNames: [] }
+	}
+	if (!isRecord(value)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be an object mapping header names to environment variable names`,
+		)
+	}
+
+	const entries = Object.entries(value)
+	if (entries.length > 32) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may contain at most 32 headers`,
+		)
+	}
+
+	const headers: Record<string, string> = {}
+	const missingEnvironmentNames: Array<string> = []
+	const environmentNames: Array<string> = []
+	for (const [headerName, environmentName] of entries) {
+		if (headerName.length === 0 || headerName.length > 128) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${fieldName} header names must contain 1 to 128 characters`,
+			)
+		}
+		if (typeof environmentName !== 'string') {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${fieldName}.${headerName} must name an environment variable`,
+			)
+		}
+		assertEnvironmentVariableName(
+			environmentName,
+			`${fieldName}.${headerName}`,
+		)
+		environmentNames.push(environmentName)
+		const headerValue = environment[environmentName]?.trim()
+		if (headerValue === undefined || headerValue === '') {
+			missingEnvironmentNames.push(environmentName)
+			continue
+		}
+		if (Buffer.byteLength(headerValue, 'utf8') > 4_096) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${environmentName} may not exceed 4096 bytes`,
+			)
+		}
+		headers[headerName] = headerValue
+	}
+	return { headers, missingEnvironmentNames, environmentNames }
+}
+
+function assertEnvironmentVariableName(
+	value: string,
+	fieldName: string,
+): void {
+	if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(value)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be a valid environment-variable name of at most 128 characters`,
+		)
+	}
+}
+
+function isSensitiveCredentialName(value: string): boolean {
+	const normalized = value.toLowerCase().replaceAll('_', '-').trim()
+	return (
+		normalized === 'key' ||
+		/(?:authorization|credential|secret|token|password|cookie|signature|api-?key)/.test(
+			normalized,
+		)
+	)
+}
+
 function parseExecutionBackend(value: string): ExecutionBackend {
 	if (value === 'local' || value === 'docker') {
 		return value
@@ -447,6 +1146,25 @@ function parseInteger(
 	return parsed
 }
 
+function parseOptionalInteger(
+	value: unknown,
+	fallback: number,
+	min: number,
+	max: number,
+	fieldName: string,
+): number {
+	if (value === undefined) {
+		return fallback
+	}
+	if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be an integer between ${min} and ${max}`,
+		)
+	}
+	return value as number
+}
+
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 	if (value === undefined || value.trim() === '') {
 		return fallback
@@ -466,6 +1184,23 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 	)
 }
 
+function parseOptionalBoolean(
+	value: unknown,
+	fallback: boolean,
+	fieldName: string,
+): boolean {
+	if (value === undefined) {
+		return fallback
+	}
+	if (typeof value !== 'boolean') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be true or false`,
+		)
+	}
+	return value
+}
+
 function parseCsv(value: string): Array<string> {
 	return value
 		.split(',')
@@ -473,31 +1208,60 @@ function parseCsv(value: string): Array<string> {
 		.filter(item => item.length > 0)
 }
 
-function parseStringHeaders(value: string): Record<string, string> {
-	const parsed = parseJsonObject(value, 'QWEN_HEADERS_JSON')
-	const headers: Record<string, string> = {}
+function parseStringHeaders(
+	value: string,
+	fieldName: string,
+): Record<string, string> {
+	const parsed = parseJsonObject(value, fieldName)
+	return parseHeadersRecord(parsed, fieldName)
+}
 
-	for (const [key, headerValue] of Object.entries(parsed)) {
-		if (typeof headerValue !== 'string') {
-			throw new HarnessError(
-				'INVALID_CONFIGURATION',
-				'QWEN_HEADERS_JSON values must all be strings',
-			)
-		}
-
-		headers[key] = headerValue
+function requireConfigString(value: unknown, fieldName: string): string {
+	if (typeof value !== 'string' || value.trim() === '') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be a non-empty string`,
+		)
 	}
+	return value.trim()
+}
 
-	return headers
+function optionalConfigString(value: unknown, fallback: string): string {
+	if (value === undefined) {
+		return fallback
+	}
+	if (typeof value !== 'string') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'Optional worker string fields must be strings',
+		)
+	}
+	return value.trim()
+}
+
+function boundedOptionalConfigString(
+	value: unknown,
+	fallback: string,
+	fieldName: string,
+	maxLength: number,
+): string {
+	const parsed = optionalConfigString(value, fallback)
+	if (parsed.length > maxLength) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may not exceed ${maxLength} characters`,
+		)
+	}
+	return parsed
+}
+
+function optionalNullableConfigString(value: unknown): string | null {
+	const parsed = optionalConfigString(value, '')
+	return parsed === '' ? null : parsed
 }
 
 function parseLogLevel(value: string): LogLevel {
-	if (
-		value === 'debug' ||
-		value === 'info' ||
-		value === 'warn' ||
-		value === 'error'
-	) {
+	if (value === 'debug' || value === 'info' || value === 'warn' || value === 'error') {
 		return value
 	}
 
