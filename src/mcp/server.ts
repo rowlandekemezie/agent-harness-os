@@ -69,7 +69,7 @@ export async function startMcpServer(config: HarnessConfig): Promise<void> {
 			default:
 				throw new HarnessError('METHOD_NOT_FOUND', `Unsupported MCP method: ${method}`)
 		}
-	}, logger)
+	}, logger, config.limits.maxMcpMessageBytes, config.limits.maxMcpInFlight)
 
 	logger.info('Starting MCP server')
 	await server.listen()

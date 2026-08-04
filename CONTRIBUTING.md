@@ -5,7 +5,7 @@
 Use Node.js 22 or newer and a current Git release.
 
 ```bash
-npm install
+npm ci --ignore-scripts
 npm run check
 ```
 
@@ -30,4 +30,4 @@ npm run check
 
 ## Security-sensitive changes
 
-Changes to path handling, command execution, environment forwarding, provider errors, artifact storage, worktree behavior, patch application, or MCP approval metadata require explicit adversarial tests.
+Changes to path handling, command execution, environment forwarding, provider transport, response bounds, artifact storage, worktree behavior, Git configuration, patch generation, patch application, cancellation, concurrency, or MCP approval metadata require explicit adversarial tests.

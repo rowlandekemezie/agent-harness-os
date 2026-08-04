@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { access, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import type { CommandResult, CommandSpec, WorkerTask } from '../domain/types.js'
@@ -44,6 +45,13 @@ class LocalCommandRunner implements CommandRunner {
 			)
 		}
 
+		if (!context.task.allowNetwork) {
+			throw new HarnessError(
+				'LOCAL_NETWORK_ISOLATION_UNAVAILABLE',
+				'Local execution cannot enforce allowNetwork=false. Use Docker or explicitly allow network access for this trusted task.',
+			)
+		}
+
 		await mkdir(context.sandboxHome, { recursive: true, mode: 0o700 })
 		const environment = createSanitizedEnvironment({
 			HOME: context.sandboxHome,
@@ -83,18 +91,23 @@ class DockerCommandRunner implements CommandRunner {
 				'AGENT_HARNESS_DOCKER_IMAGE must use an immutable sha256 digest',
 			)
 		}
+		const containerName = `agent-harness-${randomUUID()}`
 		const network = context.task.allowNetwork
 			? this.config.execution.dockerNetwork
 			: 'none'
 		const args = [
 			'run',
 			'--rm',
+			'--name',
+			containerName,
 			'--init',
 			'--read-only',
 			'--cap-drop',
 			'ALL',
 			'--security-opt',
 			'no-new-privileges',
+			'--entrypoint',
+			'',
 			'--pids-limit',
 			'256',
 			'--memory',
@@ -121,6 +134,15 @@ class DockerCommandRunner implements CommandRunner {
 			args.push('--user', `${process.getuid()}:${process.getgid?.() ?? process.getuid()}`)
 		}
 
+		const gitMetadataPath = path.join(context.worktreePath, '.git')
+
+		if (await pathExists(gitMetadataPath)) {
+			args.push(
+				'--mount',
+				`type=bind,source=${gitMetadataPath},target=/workspace/.git,readonly`,
+			)
+		}
+
 		const nodeModulesPath = path.join(context.repositoryPath, 'node_modules')
 
 		if (await pathExists(nodeModulesPath)) {
@@ -136,15 +158,66 @@ class DockerCommandRunner implements CommandRunner {
 			...specification.args,
 		)
 
-		return await runProcess('docker', args, {
-			cwd: context.repositoryPath,
-			environment: createSanitizedEnvironment(),
-			timeoutMs:
-				specification.timeoutMs ?? this.config.execution.commandTimeoutMs,
-			maxOutputBytes: this.config.limits.maxToolOutputBytes,
-			signal: context.signal,
-		})
+		try {
+			const result = await runProcess('docker', args, {
+				cwd: context.repositoryPath,
+				environment: createSanitizedEnvironment(),
+				timeoutMs:
+					specification.timeoutMs ?? this.config.execution.commandTimeoutMs,
+				maxOutputBytes: this.config.limits.maxToolOutputBytes,
+				signal: context.signal,
+			})
+
+			return {
+				...result,
+				command: specification.command,
+				args: specification.args,
+			}
+		} finally {
+			await removeDockerContainer(containerName, context.repositoryPath)
+		}
 	}
+}
+
+async function removeDockerContainer(
+	containerName: string,
+	repositoryPath: string,
+): Promise<void> {
+	let lastFailure = ''
+
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			const result = await runProcess(
+				'docker',
+				['rm', '--force', containerName],
+				{
+					cwd: repositoryPath,
+					environment: createSanitizedEnvironment(),
+					timeoutMs: 15_000,
+					maxOutputBytes: 4_096,
+				},
+			)
+
+			if (
+				result.exitCode === 0 ||
+				/no such container|not found/i.test(result.stderr)
+			) {
+				return
+			}
+
+			lastFailure = result.stderr || result.stdout || `exit ${result.exitCode}`
+		} catch (error) {
+			lastFailure = error instanceof Error ? error.message : String(error)
+		}
+
+		await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)))
+	}
+
+	throw new HarnessError(
+		'DOCKER_CONTAINER_CLEANUP_FAILED',
+		`Unable to confirm removal of validation container ${containerName}`,
+		{ failure: lastFailure },
+	)
 }
 
 async function assertCommandAvailable(command: string): Promise<void> {

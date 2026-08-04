@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
-import { mkdir, open, readFile, unlink } from 'node:fs/promises'
+import {
+	mkdir,
+	open,
+	readFile,
+	rename,
+	rm,
+	stat,
+	unlink,
+} from 'node:fs/promises'
 import path from 'node:path'
 import { HarnessError } from './errors.js'
 
@@ -15,7 +23,14 @@ type LockRecord = {
 	createdAt: string
 }
 
+type LockState = {
+	record: LockRecord | null
+	modifiedAtMs: number
+}
+
 const staleLockMs = 24 * 60 * 60 * 1000
+const incompleteLockGraceMs = 30_000
+const maxAcquireAttempts = 5
 
 export async function acquireRepositoryLease(
 	artifactRoot: string,
@@ -29,10 +44,19 @@ export async function acquireRepositoryLease(
 		createdAt: new Date().toISOString(),
 	}
 
-	for (let attempt = 0; attempt < 2; attempt += 1) {
+	for (let attempt = 0; attempt < maxAcquireAttempts; attempt += 1) {
 		try {
 			const handle = await open(lockPath, 'wx', 0o600)
-			await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8')
+
+			try {
+				await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8')
+				await handle.sync()
+			} catch (error) {
+				await handle.close().catch(() => undefined)
+				await unlink(lockPath).catch(() => undefined)
+				throw error
+			}
+
 			await handle.close()
 
 			return {
@@ -45,32 +69,46 @@ export async function acquireRepositoryLease(
 				throw error
 			}
 
-			const existing = await readLockRecord(lockPath)
+			const existing = await readLockState(lockPath)
 
-			if (existing !== null && isLiveLock(existing)) {
+			if (isLiveLockState(existing)) {
 				throw new HarnessError(
 					'REPOSITORY_BUSY',
 					'Another agent-harness process is operating on this repository',
-					{
-						pid: existing.pid,
-						hostname: existing.hostname,
-						createdAt: existing.createdAt,
-					},
+					existing.record === null
+						? { state: 'initializing' }
+						: {
+							pid: existing.record.pid,
+							hostname: existing.record.hostname,
+							createdAt: existing.record.createdAt,
+						},
 				)
 			}
 
-			await unlink(lockPath).catch(unlinkError => {
-				if (!isMissingFileError(unlinkError)) {
-					throw unlinkError
-				}
-			})
+			await reclaimStaleLock(lockPath)
 		}
 	}
 
 	throw new HarnessError(
 		'REPOSITORY_BUSY',
-		'Unable to acquire the repository lease',
+		'Unable to acquire the repository lease after reclaim attempts',
 	)
+}
+
+async function reclaimStaleLock(lockPath: string): Promise<void> {
+	const quarantinePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`
+
+	try {
+		await rename(lockPath, quarantinePath)
+	} catch (error) {
+		if (isMissingFileError(error)) {
+			return
+		}
+
+		throw error
+	}
+
+	await rm(quarantinePath, { force: true })
 }
 
 async function releaseIfOwned(lockPath: string, token: string): Promise<void> {
@@ -85,6 +123,22 @@ async function releaseIfOwned(lockPath: string, token: string): Promise<void> {
 			throw error
 		}
 	})
+}
+
+async function readLockState(lockPath: string): Promise<LockState> {
+	try {
+		const [record, fileStats] = await Promise.all([
+			readLockRecord(lockPath),
+			stat(lockPath),
+		])
+		return { record, modifiedAtMs: fileStats.mtimeMs }
+	} catch (error) {
+		if (isMissingFileError(error)) {
+			return { record: null, modifiedAtMs: 0 }
+		}
+
+		throw error
+	}
 }
 
 async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
@@ -108,31 +162,37 @@ async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
 
 		return null
 	} catch (error) {
-		if (isMissingFileError(error)) {
+		if (isMissingFileError(error) || error instanceof SyntaxError) {
 			return null
 		}
 
-		return null
+		throw error
 	}
 }
 
+function isLiveLockState(state: LockState): boolean {
+	if (state.record === null) {
+		return Date.now() - state.modifiedAtMs <= incompleteLockGraceMs
+	}
+
+	return isLiveLock(state.record)
+}
+
 function isLiveLock(record: LockRecord): boolean {
+	if (record.hostname === hostname()) {
+		try {
+			process.kill(record.pid, 0)
+			return true
+		} catch (error) {
+			return !isNoSuchProcessError(error)
+		}
+	}
+
 	const createdAtMs = Date.parse(record.createdAt)
-
-	if (!Number.isFinite(createdAtMs) || Date.now() - createdAtMs > staleLockMs) {
-		return false
-	}
-
-	if (record.hostname !== hostname()) {
-		return true
-	}
-
-	try {
-		process.kill(record.pid, 0)
-		return true
-	} catch (error) {
-		return !isNoSuchProcessError(error)
-	}
+	return (
+		Number.isFinite(createdAtMs) &&
+		Date.now() - createdAtMs <= staleLockMs
+	)
 }
 
 function isAlreadyExistsError(error: unknown): boolean {

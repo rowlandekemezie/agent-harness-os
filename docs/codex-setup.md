@@ -45,8 +45,9 @@ codex mcp list
 Keep the following distinction in `AGENTS.md`:
 
 - Codex may inspect, plan, and run non-destructive validation directly.
-- Codex may delegate bounded mechanical work.
-- Codex must review worker evidence.
+- Codex may delegate bounded mechanical work through explicit path allowlists.
+- The worker receives file tools only; Codex declares any deterministic validation commands before delegation.
+- Codex must review worker evidence, including validation output and any failed immutability checks.
 - Codex must not treat a completed run as proof that acceptance criteria passed.
 - Applying a patch requires a separate tool call.
 - Merging, pushing, deploying, migrating, or contacting users remains outside the harness.

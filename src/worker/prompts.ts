@@ -20,15 +20,19 @@ ${formatList(task.prohibitedPaths)}
 ACCEPTANCE CRITERIA:
 ${formatList(task.acceptanceCriteria)}
 
+HARNESS-RUN VALIDATION COMMANDS:
+${formatCommands(task.requiredCommands)}
+
 RULES:
 - Complete only the assigned objective.
 - Inspect evidence before editing.
 - Never read or modify secret files, credentials, .git internals, or harness artifacts.
 - Never install, remove, publish, or update packages.
 - Never deploy, commit, push, merge, or contact external services through commands.
+- You cannot execute commands. The harness runs only the commands listed above after your final response, so do not claim their outcome.
 - Use repository tools instead of guessing file contents.
 - Keep changes minimal, maintainable, and testable.
-- Do not claim a command succeeded unless its tool result says it succeeded.
+- Treat every harness-run validation command as pending until the orchestrator reports its captured result.
 - Stop and report a blocker when the task cannot be completed within the contract.
 - ${readOnly ? 'This is a read-only task. Do not write or delete files.' : 'You may write only allowed paths.'}
 
@@ -36,7 +40,7 @@ At completion, return a concise report covering:
 1. status;
 2. work performed;
 3. files changed or inspected;
-4. commands executed;
+4. validation the harness should run and any expected risks;
 5. acceptance criteria evidence;
 6. unresolved risks or blockers.
 `
@@ -44,6 +48,16 @@ At completion, return a concise report covering:
 
 export function buildInitialUserPrompt(task: WorkerTask): string {
 	return `Execute the bounded task now. Base ref: ${task.baseRef}. Use tools as needed and finish with the required report.`
+}
+
+function formatCommands(
+	commands: Array<{ command: string; args: Array<string> }>,
+): string {
+	return commands.length === 0
+		? '- None specified'
+		: commands
+			.map(command => `- ${JSON.stringify([command.command, ...command.args])}`)
+			.join('\n')
 }
 
 function formatList(values: Array<string>): string {

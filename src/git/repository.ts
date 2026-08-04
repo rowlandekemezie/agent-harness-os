@@ -1,3 +1,4 @@
+import { realpath, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { HarnessError } from '../lib/errors.js'
@@ -6,6 +7,7 @@ import { createSanitizedEnvironment, runProcess } from '../lib/process.js'
 const gitOutputLimit = 20_000_000
 
 const prohibitedGitConfigPatterns: Array<RegExp> = [
+	/^core\.worktree$/i,
 	/^core\.hookspath$/i,
 	/^core\.fsmonitor$/i,
 	/^core\.attributesfile$/i,
@@ -17,34 +19,42 @@ const prohibitedGitConfigPatterns: Array<RegExp> = [
 export async function assertSafeRepositoryConfiguration(
 	repositoryPath: string,
 ): Promise<void> {
-	const result = await runGit(repositoryPath, [
-		'config',
-		'--local',
-		'--includes',
-		'--name-only',
-		'--null',
-		'--list',
-	])
+	const scopes = ['--local', '--worktree']
+	const prohibitedKeys = new Set<string>()
 
-	if (result.exitCode !== 0) {
-		throw new HarnessError(
-			'GIT_CONFIG_INSPECTION_FAILED',
-			'Unable to inspect repository-local Git configuration',
-			{ stderr: result.stderr },
-		)
+	for (const scope of scopes) {
+		const result = await runGit(repositoryPath, [
+			'config',
+			scope,
+			'--includes',
+			'--name-only',
+			'--null',
+			'--list',
+		])
+
+		if (result.exitCode !== 0) {
+			throw new HarnessError(
+				'GIT_CONFIG_INSPECTION_FAILED',
+				`Unable to inspect repository Git configuration for scope ${scope}`,
+				{ stderr: result.stderr },
+			)
+		}
+
+		for (const key of result.stdout
+			.split('\0')
+			.map(value => value.trim())
+			.filter(value => value.length > 0)) {
+			if (prohibitedGitConfigPatterns.some(pattern => pattern.test(key))) {
+				prohibitedKeys.add(key)
+			}
+		}
 	}
 
-	const prohibitedKeys = result.stdout
-		.split('\0')
-		.map(value => value.trim())
-		.filter(value => value.length > 0)
-		.filter(key => prohibitedGitConfigPatterns.some(pattern => pattern.test(key)))
-
-	if (prohibitedKeys.length > 0) {
+	if (prohibitedKeys.size > 0) {
 		throw new HarnessError(
 			'UNSAFE_GIT_CONFIGURATION',
 			'Repository-local Git configuration can execute external programs',
-			{ prohibitedKeys },
+			{ prohibitedKeys: [...prohibitedKeys].sort() },
 		)
 	}
 }
@@ -52,7 +62,30 @@ export async function assertSafeRepositoryConfiguration(
 export async function resolveRepositoryRoot(
 	repositoryPath: string,
 ): Promise<string> {
-	const resolvedPath = path.resolve(repositoryPath)
+	const requestedPath = path.resolve(repositoryPath)
+	let resolvedPath: string
+
+	try {
+		resolvedPath = await realpath(requestedPath)
+		const pathStats = await stat(resolvedPath)
+
+		if (!pathStats.isDirectory()) {
+			throw new HarnessError(
+				'NOT_A_DIRECTORY',
+				`Repository path must be a directory: ${requestedPath}`,
+			)
+		}
+	} catch (error) {
+		if (error instanceof HarnessError) {
+			throw error
+		}
+
+		throw new HarnessError(
+			'REPOSITORY_PATH_UNAVAILABLE',
+			`Repository path cannot be resolved: ${requestedPath}`,
+			{ cause: error instanceof Error ? error.message : String(error) },
+		)
+	}
 	const result = await runGit(resolvedPath, [
 		'rev-parse',
 		'--show-toplevel',
@@ -66,7 +99,18 @@ export async function resolveRepositoryRoot(
 		)
 	}
 
-	return result.stdout.trim()
+	const repositoryRoot = await realpath(result.stdout.trim())
+	const relative = path.relative(repositoryRoot, resolvedPath)
+
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		throw new HarnessError(
+			'REPOSITORY_ROOT_MISMATCH',
+			'Git resolved a worktree root that does not contain the requested path',
+			{ requestedPath: resolvedPath, repositoryRoot },
+		)
+	}
+
+	return repositoryRoot
 }
 
 export async function resolveCommit(
@@ -114,12 +158,16 @@ export async function isWorkingTreeClean(
 
 export async function getChangedFiles(
 	worktreePath: string,
+	baseCommit: string,
 ): Promise<Array<string>> {
+	await markUntrackedFilesIntentToAdd(worktreePath)
 	const result = await runGit(worktreePath, [
 		'diff',
 		'--name-only',
 		'-z',
 		'--no-ext-diff',
+		'--no-renames',
+		baseCommit,
 		'--',
 	])
 
@@ -138,23 +186,19 @@ export async function getChangedFiles(
 		.filter(value => value.length > 0)
 }
 
-export async function getBinaryPatch(worktreePath: string): Promise<string> {
-	const intentToAdd = await runGit(worktreePath, ['add', '-N', '--', '.'])
-
-	if (intentToAdd.exitCode !== 0) {
-		throw new HarnessError(
-			'GIT_INTENT_TO_ADD_FAILED',
-			'Unable to include untracked files in the worker patch',
-			{ stderr: intentToAdd.stderr },
-		)
-	}
-
+export async function getBinaryPatch(
+	worktreePath: string,
+	baseCommit: string,
+): Promise<string> {
+	await markUntrackedFilesIntentToAdd(worktreePath)
 	const result = await runGit(worktreePath, [
 		'diff',
 		'--binary',
 		'--no-ext-diff',
+		'--no-renames',
 		'--full-index',
 		'--no-textconv',
+		baseCommit,
 		'--',
 	])
 
@@ -169,6 +213,20 @@ export async function getBinaryPatch(worktreePath: string): Promise<string> {
 	}
 
 	return result.stdout
+}
+
+async function markUntrackedFilesIntentToAdd(
+	worktreePath: string,
+): Promise<void> {
+	const intentToAdd = await runGit(worktreePath, ['add', '-N', '--', '.'])
+
+	if (intentToAdd.exitCode !== 0) {
+		throw new HarnessError(
+			'GIT_INTENT_TO_ADD_FAILED',
+			'Unable to include untracked files in the worker patch',
+			{ stderr: intentToAdd.stderr },
+		)
+	}
 }
 
 export async function checkPatch(

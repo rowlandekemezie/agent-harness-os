@@ -4,11 +4,12 @@
 
 - Host credentials and environment variables
 - Files outside the assigned repository paths
+- Dependency manifests, CI configuration, editor/agent configuration, and other control-plane files
 - The caller's working tree and branch state
 - Git history and remote repositories
 - Production infrastructure and customer data
-- Provider credentials
-- Integrity of worker evidence
+- Provider credentials and source context in transit
+- Integrity of worker evidence and persisted artifacts
 - MCP protocol availability
 
 ## Threat actors and failure sources
@@ -16,73 +17,98 @@
 - A worker model that hallucinates, ignores instructions, or follows repository prompt injection
 - Malicious text, source code, tests, package scripts, and generated tool arguments in a repository
 - Accidental over-broad task contracts
-- A provider returning malformed, oversized, repeated, or hostile tool calls
-- A stale or tampered run artifact
-- Concurrent tasks targeting the same repository
-- Child processes that hang or emit excessive output
+- A provider returning malformed, oversized, repeated, redirected, or hostile tool calls
+- A stale, oversized, linked, or tampered run artifact
+- Concurrent tasks or external processes targeting the same repository
+- Child processes that hang, create descendants, mutate the worktree, or emit excessive output
+- Validation containers that outlive their Docker client
 
 ## Security controls
 
 ### Filesystem
 
+- Explicit non-empty repository path allowlist
 - Repository-relative paths only
-- Allowlist and denylist globs
-- Direct and nested `.git`, `.env`, private-key, credentials, npm, PyPI, and harness-artifact denial
-- Lexical path containment
-- Realpath containment
+- Allowlist and denylist globs with bounded pattern counts and lengths
+- Direct and nested `.git`, environment, private-key, credential, package-registry, infrastructure-state, and harness-artifact denial
+- Separate worker-write denial for manifests, lockfiles, CI, Docker, development-container, MCP, editor, and agent-control files
+- Lexical path containment and realpath containment
 - Symlink write denial and symlink escape detection
-- File-size and binary-read restrictions
+- Hard-link denial for worker file reads/writes and persisted artifact reads
+- Changed-file regular-type validation
+- File-size, artifact-size, and binary-read restrictions
 - Single-file deletion only
 
-### Commands
+### Model tool surface
 
+- No command-execution tool
+- Read-only modes expose no write or delete tool
+- Literal search only
+- Bounded file reads/writes, tool output, search bytes, traversal entries, changed files, provider context, assistant content, per-turn tool calls, total tool calls, iterations, and wall-clock time
+- Abort checks during traversal and search
+- Prohibited changed paths cannot be exposed through `get_diff`
+
+### Validation commands
+
+- Commands are declared by Codex before delegation and run only after the model loop
 - No shell
 - Executable allowlist
 - Argument-array invocation
 - Global installation flags denied
-- Package installation, removal, update, publication, login, config mutation, and remote execution helpers denied
-- Destructive package scripts denied
+- Package installation, removal, update, publication, login, configuration mutation, and remote execution helpers denied
+- Destructive or production-oriented package-script names denied
 - Sanitized environment
-- Output bounds
-- Timeouts, abort propagation, and forced termination
-- Docker image digest required by default; root filesystem read-only, all Linux capabilities dropped, no-new-privileges enabled, PID/CPU/memory bounds, and networking off by default
+- Output bounds, timeouts, abort propagation, and forced termination
+- Candidate patch captured before validation
+- Validation invalidates the run if it changes patch bytes, changed-file membership, `HEAD`, or executable Git configuration
+- Local execution disabled by default and rejected when a task requests network isolation
+- Docker image digest required by default; entrypoint reset, root filesystem read-only, all Linux capabilities dropped, no-new-privileges enabled, PID/CPU/memory bounds, `.git` read-only, and networking off by default
+- Named validation containers are forcibly removed after each command; unconfirmed cleanup fails closed and preserves the isolated worktree
 
 ### Git and patch handling
 
 - Detached worktree per run
-- Cross-process repository lease with stale-lock recovery
+- Cross-process repository lease with stale-lock quarantine and recovery
 - Sanitized Git environment with global/system configuration disabled
-- Hooks and fsmonitor overridden; executable local filters, textconv, merge drivers, and attributes configuration rejected
+- Hooks and fsmonitor overridden; `core.worktree`, executable local/worktree filters, textconv, merge drivers, and attributes configuration rejected
+- Patch and changed-file collection against the original base commit, including staged and worker-committed changes
+- Rename detection disabled so both deleted and added paths remain visible to policy
 - Binary-capable patch collection
-- Independent changed-path validation
+- Independent changed-path and file-type validation
 - Artifacts outside the checkout
 - Private filesystem modes
-- Exact artifact filenames, regular-file checks, realpath containment, and symlink rejection
+- Exact artifact filenames, regular-file checks, hard-link rejection, size bounds, realpath containment, and symlink rejection
 - Patch SHA-256
-- Patch bytes are passed to Git over standard input after verification, avoiding a second path lookup
+- Patch bytes passed to Git over standard input after verification, avoiding a second patch-path lookup
 - Clean caller working tree
-- Exact base-commit match
+- Exact base-commit match before and after patch verification
 - `git apply --check` before application
 - No automatic commit, push, merge, or deployment
 
 ### Provider and protocol
 
-- Provider credential is used only in the provider request
-- Child processes never inherit it
-- Provider error bodies and transcripts are redacted
-- Request retry, timeout, response-size, and tool-call fanout bounds
-- MCP request cancellation while tools are active
+- HTTPS required for non-loopback provider endpoints unless plaintext transport is explicitly enabled
+- Provider redirects are not followed
+- Provider credential used only in the provider request
+- Child processes never inherit provider credentials
+- Provider error bodies, command output, reports, transcripts, and logs are redacted
+- Request retry, timeout, response-size, context-size, and tool-call bounds
+- Byte-bounded MCP framing, concurrent-request limits, duplicate-request-ID rejection, and cancellation while tools are active
 - MCP standard output contains JSON-RPC only
 - Read-only and destructive MCP annotations support Codex approval policy
 
 ## Residual risks
 
-- A malicious package script can execute arbitrary code inside the selected execution environment. Use Docker for untrusted repositories and keep networking disabled.
-- Docker access is effectively privileged on many hosts. A compromised Docker daemon is outside this project's protection boundary.
-- A malicious or replaced `git`, `node`, or operating-system runtime can bypass controls.
-- Provider-side retention, training, and logging are governed by the selected provider, not this harness.
-- A user can intentionally supply an unsafe allowlist, enable local execution, permit networking, or configure a dangerous Docker image.
-- Artifacts may contain proprietary source code. Secure the host account and configure retention.
+- Repository prompt injection remains possible inside any file the model is legitimately allowed to read. The harness constrains authority and validates outputs; it cannot guarantee model obedience.
+- A Codex-declared validation script can execute arbitrary repository code inside the selected validation environment regardless of its benign name. Use Docker for untrusted repositories, keep networking disabled, and review validation commands.
+- Docker access is effectively privileged on many hosts. A compromised Docker daemon or container-runtime escape is outside this project's protection boundary.
+- Unsandboxed local validation may leave descendant processes and can access the host according to the invoking account. It is outside the recommended untrusted-repository path.
+- A malicious or replaced `git`, `docker`, `node`, operating-system runtime, or host account can bypass controls.
+- Provider-side retention, training, residency, and logging are governed by the selected provider, not this harness.
+- Provider requests necessarily leave the validation network boundary. `allowNetwork: false` applies to validation commands, not the configured model endpoint.
+- A user can intentionally supply a broad allowlist, enable plaintext provider transport, enable local execution, permit validation networking, disable image pinning, or configure a dangerous image.
+- Patches may contain proprietary source code or inline secrets from otherwise allowed paths. Secure the host account and artifact volume, and configure retention.
+- An external editor or process can still race the final patch application between the last precondition check and the operating-system write. Repeated checks narrow but cannot eliminate that host-level race.
 
 ## Out of scope
 
@@ -94,4 +120,4 @@
 - Secrets brokerage
 - Signed patch approval
 - Organization-wide audit retention
-- Defense against a compromised host account
+- Defense against a compromised host account, kernel, Docker daemon, or local toolchain
