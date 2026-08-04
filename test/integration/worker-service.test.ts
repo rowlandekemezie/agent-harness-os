@@ -131,3 +131,59 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		await provider.close()
 	}
 })
+
+test('invalidates a run when deterministic validation mutates the worker patch', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-validation-artifacts-'))
+	const provider = await startFakeProvider()
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_HARNESS_EXECUTION_BACKEND: 'local',
+			AGENT_HARNESS_ALLOW_UNSANDBOXED_LOCAL: 'true',
+			AGENT_HARNESS_ALLOWED_COMMANDS: 'node',
+		})
+		const service = new WorkerService(config)
+		const report = await service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: ['src/generated.ts exports generated'],
+			requiredCommands: [
+				{
+					command: 'node',
+					args: [
+						'-e',
+						"require('node:fs').appendFileSync('src/generated.ts', '// validation mutation\\n')",
+					],
+				},
+			],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: true,
+		})
+
+		assert.equal(report.status, 'failed')
+		assert.ok(
+			report.warnings.some(warning =>
+				warning.includes('Validation integrity check failed'),
+			),
+		)
+		assert.ok(report.patchPath)
+		const patch = await readFile(report.patchPath, 'utf8')
+		assert.equal(patch.includes('validation mutation'), false)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('RUN_NOT_APPLICABLE'),
+		)
+	} finally {
+		await provider.close()
+	}
+})
