@@ -1,0 +1,61 @@
+{
+  "name": "agent-harness-os",
+  "version": "0.1.0",
+  "description": "A secure MCP worker harness for delegating bounded coding tasks from Codex to OpenAI-compatible models such as Qwen.",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "agent-harness-os": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "docs",
+    "examples",
+    ".env.example",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node scripts/lint.mjs",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "test:unit": "npm run build && node --test dist/test/unit/**/*.test.js",
+    "test:integration": "npm run build && node --test dist/test/integration/**/*.test.js",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "start": "node dist/src/cli.js mcp",
+    "doctor": "node dist/src/cli.js doctor",
+    "codex-config": "node dist/src/cli.js codex-config",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "5.8.3"
+  },
+  "keywords": [
+    "codex",
+    "mcp",
+    "qwen",
+    "agent",
+    "coding-agent",
+    "worktree"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rowlandekemezie/agent-harness-os.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rowlandekemezie/agent-harness-os/issues"
+  },
+  "homepage": "https://github.com/rowlandekemezie/agent-harness-os#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "objective": "Add focused unit tests for the API-key rotation service without changing production code.",
+  "repositoryPath": "/absolute/path/to/repository",
+  "mode": "testing",
+  "allowedPaths": [
+    "test/api-keys/**"
+  ],
+  "prohibitedPaths": [
+    "src/**",
+    "db/**",
+    ".github/**"
+  ],
+  "acceptanceCriteria": [
+    "Tests cover successful rotation",
+    "Tests cover cross-organization denial",
+    "Tests cover concurrent rotation attempts"
+  ],
+  "requiredCommands": [
+    {
+      "command": "npm",
+      "args": [
+        "run",
+        "typecheck"
+      ]
+    },
+    {
+      "command": "npm",
+      "args": [
+        "test",
+        "--",
+        "api-key"
+      ],
+      "timeoutMs": 180000
+    }
+  ],
+  "baseRef": "HEAD",
+  "maxIterations": 24,
+  "timeoutSeconds": 900,
+  "allowNetwork": false
+}

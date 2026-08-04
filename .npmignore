@@ -1,0 +1,8 @@
+src/
+test/
+docs/
+examples/
+.github/
+scripts/
+tsconfig.json
+.env.example

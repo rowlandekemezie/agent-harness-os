@@ -1,9 +1,9 @@
 node_modules/
 dist/
+coverage/
+.agent-harness/
+*.log
+.DS_Store
 .env
 .env.*
 !.env.example
-.agent-harness/
-*.tgz
-.DS_Store
-coverage/
