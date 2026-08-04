@@ -22,7 +22,10 @@ export class OpenAiCompatibleProvider implements WorkerProvider {
 		this.logger = logger
 		this.redactor = new Redactor(
 			{ QWEN_API_KEY: config.apiKey },
-			Object.values(config.headers),
+			[
+				...Object.values(config.headers),
+				config.chatCompletionsUrl ?? config.baseUrl,
+			],
 		)
 	}
 
@@ -48,6 +51,7 @@ export class OpenAiCompatibleProvider implements WorkerProvider {
 							authorization: `Bearer ${this.config.apiKey}`,
 							...this.config.headers,
 						},
+						redirect: 'manual',
 						body: JSON.stringify({
 							model: this.config.model,
 							messages: request.messages.map(serializeMessage),
@@ -309,6 +313,10 @@ async function sleepWithJitter(
 	attempt: number,
 	signal: AbortSignal,
 ): Promise<void> {
+	if (signal.aborted) {
+		throw new DOMException('Retry delay aborted', 'AbortError')
+	}
+
 	const baseDelay = Math.min(8_000, 500 * 2 ** attempt)
 	const delay = baseDelay + Math.floor(Math.random() * 250)
 

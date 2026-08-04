@@ -62,6 +62,7 @@ export class WorktreeManager {
 					'worktree',
 					'remove',
 					'--force',
+					'--force',
 					worktreePath,
 				])
 
@@ -73,6 +74,23 @@ export class WorktreeManager {
 				}
 
 				await rm(parentPath, { recursive: true, force: true })
+
+				if (removal.exitCode !== 0) {
+					const prune = await runGit(repositoryPath, [
+						'worktree',
+						'prune',
+						'--expire',
+						'now',
+					])
+
+					if (prune.exitCode !== 0) {
+						this.logger.warn('Git worktree prune reported an error', {
+							runId,
+							stderr: prune.stderr,
+						})
+					}
+				}
 			},
 		}
+	}
 }

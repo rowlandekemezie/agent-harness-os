@@ -22,11 +22,13 @@ Maintain a secure MCP worker harness. Treat filesystem authority, command execut
 - `delegate_to_worker` must never modify the caller's checkout.
 - Worker writes occur only in a detached Git worktree.
 - Patch application remains a separate MCP tool.
-- Never trust a worker's statement that tests passed; use captured process results.
-- Never persist provider credentials or forward the host environment to child commands.
+- Never trust a worker's statement that tests passed; the worker has no command tool, and only harness-captured post-model validation results count as evidence.
+- Never persist provider credentials, permit plaintext remote provider transport by default, or forward the host environment to child commands.
 - Never redact or transform patch bytes; protect them with permissions and verify a digest.
-- Never permit shell command strings. Spawn an allowlisted executable with an argument array.
-- Never weaken traversal, symlink, secret-path, clean-tree, base-commit, or patch-integrity checks to make a test pass.
+- Never expose command execution to the worker. Harness-run validation must spawn an allowlisted executable with an argument array and no shell.
+- Capture and validate the model patch before validation; invalidate the run if validation changes patch bytes, changed files, `HEAD`, or executable Git configuration.
+- Keep dependency manifests, lockfiles, CI, Docker, development-container, editor, MCP, and agent-control files outside worker write authority.
+- Never weaken traversal, search, context, tool-call, symlink, hard-link, secret-path, control-plane-write, explicit-allowlist, clean-tree, base-commit, container-cleanup, or patch-integrity checks to make a test pass.
 
 ## Validation
 

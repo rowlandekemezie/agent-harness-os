@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { lstat, realpath } from 'node:fs/promises'
+import { isIP } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import type { ExecutionBackend } from './domain/types.js'
@@ -16,6 +18,7 @@ export type HarnessConfig = {
 		timeoutMs: number
 		maxRetries: number
 		maxResponseBytes: number
+		allowInsecureHttp: boolean
 	}
 	execution: {
 		backend: ExecutionBackend
@@ -30,6 +33,13 @@ export type HarnessConfig = {
 		maxConcurrency: number
 		maxFileBytes: number
 		maxToolOutputBytes: number
+		maxMcpMessageBytes: number
+		maxMcpInFlight: number
+		maxChangedFiles: number
+		maxSearchBytes: number
+		maxTraversalEntries: number
+		maxTotalToolCalls: number
+		maxProviderContextBytes: number
 	}
 	artifactRootOverride: string | null
 	logLevel: LogLevel
@@ -42,12 +52,23 @@ export function loadConfig(
 	const backend = parseExecutionBackend(
 		environment['AGENT_HARNESS_EXECUTION_BACKEND'] ?? 'local',
 	)
+	const allowInsecureHttp = parseBoolean(
+		environment['QWEN_ALLOW_INSECURE_HTTP'],
+		false,
+	)
+	const baseUrl = normalizeBaseUrl(
+		environment['QWEN_BASE_URL'] ?? '',
+		allowInsecureHttp,
+	)
+	const chatCompletionsUrl = normalizeChatCompletionsUrl(
+		environment['QWEN_CHAT_COMPLETIONS_URL'] ?? '',
+		allowInsecureHttp,
+	)
 
 	return {
 		provider: {
-			baseUrl: normalizeBaseUrl(environment['QWEN_BASE_URL'] ?? ''),
-			chatCompletionsUrl:
-				environment['QWEN_CHAT_COMPLETIONS_URL']?.trim() || null,
+			baseUrl,
+			chatCompletionsUrl,
 			apiKey: environment['QWEN_API_KEY']?.trim() ?? '',
 			model: environment['QWEN_MODEL']?.trim() ?? '',
 			headers,
@@ -69,6 +90,7 @@ export function loadConfig(
 				65_536,
 				20_971_520,
 			),
+			allowInsecureHttp,
 		},
 		execution: {
 			backend,
@@ -114,6 +136,48 @@ export function loadConfig(
 				65_536,
 				1_024,
 				1_048_576,
+			),
+			maxMcpMessageBytes: parseInteger(
+				environment['AGENT_HARNESS_MAX_MCP_MESSAGE_BYTES'],
+				1_048_576,
+				1_024,
+				16_777_216,
+			),
+			maxMcpInFlight: parseInteger(
+				environment['AGENT_HARNESS_MAX_MCP_IN_FLIGHT'],
+				64,
+				1,
+				1_024,
+			),
+			maxChangedFiles: parseInteger(
+				environment['AGENT_HARNESS_MAX_CHANGED_FILES'],
+				200,
+				1,
+				10_000,
+			),
+			maxSearchBytes: parseInteger(
+				environment['AGENT_HARNESS_MAX_SEARCH_BYTES'],
+				33_554_432,
+				1_048_576,
+				536_870_912,
+			),
+			maxTraversalEntries: parseInteger(
+				environment['AGENT_HARNESS_MAX_TRAVERSAL_ENTRIES'],
+				10_000,
+				100,
+				1_000_000,
+			),
+			maxTotalToolCalls: parseInteger(
+				environment['AGENT_HARNESS_MAX_TOTAL_TOOL_CALLS'],
+				128,
+				1,
+				1_024,
+			),
+			maxProviderContextBytes: parseInteger(
+				environment['AGENT_HARNESS_MAX_PROVIDER_CONTEXT_BYTES'],
+				8_388_608,
+				65_536,
+				134_217_728,
 			),
 		},
 		artifactRootOverride:
@@ -166,6 +230,32 @@ export function resolveArtifactRoot(
 	)
 }
 
+export async function assertArtifactRootOutsideRepository(
+	repositoryPath: string,
+	artifactRoot: string,
+): Promise<void> {
+	const repositoryRoot = await realpath(path.resolve(repositoryPath))
+	const resolvedArtifactRoot = path.resolve(artifactRoot)
+	const existingParent = await findExistingParent(resolvedArtifactRoot)
+	const resolvedParent = await realpath(existingParent)
+	const effectiveArtifactRoot = path.resolve(
+		resolvedParent,
+		path.relative(existingParent, resolvedArtifactRoot),
+	)
+	const relative = path.relative(repositoryRoot, effectiveArtifactRoot)
+
+	if (
+		relative === '' ||
+		(!relative.startsWith('..') && !path.isAbsolute(relative))
+	) {
+		throw new HarnessError(
+			'ARTIFACT_ROOT_INSIDE_REPOSITORY',
+			'Artifact storage must be outside the target repository',
+			{ repositoryPath: repositoryRoot, artifactRoot: effectiveArtifactRoot },
+		)
+	}
+}
+
 function repositoryKey(repositoryPath: string): string {
 	return createHash('sha256')
 		.update(path.resolve(repositoryPath))
@@ -173,8 +263,146 @@ function repositoryKey(repositoryPath: string): string {
 		.slice(0, 24)
 }
 
-function normalizeBaseUrl(value: string): string {
-	return value.trim().replace(/\/+$/, '')
+function normalizeBaseUrl(value: string, allowInsecureHttp: boolean): string {
+	const trimmed = value.trim().replace(/\/+$/, '')
+
+	if (trimmed === '') {
+		return ''
+	}
+
+	const parsed = validateProviderUrl(
+		trimmed,
+		'QWEN_BASE_URL',
+		allowInsecureHttp,
+	)
+
+	if (parsed.search !== '') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'QWEN_BASE_URL may not contain a query string; use QWEN_CHAT_COMPLETIONS_URL for a full endpoint',
+		)
+	}
+
+	return trimmed
+}
+
+function normalizeChatCompletionsUrl(
+	value: string,
+	allowInsecureHttp: boolean,
+): string | null {
+	const trimmed = value.trim()
+
+	if (trimmed === '') {
+		return null
+	}
+
+	validateProviderUrl(
+		trimmed,
+		'QWEN_CHAT_COMPLETIONS_URL',
+		allowInsecureHttp,
+	)
+	return trimmed
+}
+
+function validateProviderUrl(
+	value: string,
+	fieldName: string,
+	allowInsecureHttp: boolean,
+): URL {
+	let parsed: URL
+
+	try {
+		parsed = new URL(value)
+	} catch {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must be an absolute HTTP or HTTPS URL`,
+		)
+	}
+
+	if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must use HTTP or HTTPS`,
+		)
+	}
+
+	if (parsed.username !== '' || parsed.password !== '') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may not contain embedded credentials`,
+		)
+	}
+
+	if (parsed.hash !== '') {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} may not contain a URL fragment`,
+		)
+	}
+
+	if (
+		parsed.protocol === 'http:' &&
+		!allowInsecureHttp &&
+		!isLoopbackHostname(parsed.hostname)
+	) {
+		throw new HarnessError(
+			'INSECURE_PROVIDER_URL',
+			`${fieldName} must use HTTPS unless it targets loopback or QWEN_ALLOW_INSECURE_HTTP=true is explicitly set`,
+		)
+	}
+
+	return parsed
+}
+
+function isLoopbackHostname(value: string): boolean {
+	const hostname = value.toLowerCase().replace(/^\[|\]$/g, '')
+	const addressFamily = isIP(hostname)
+
+	if (addressFamily === 4) {
+		return hostname.split('.')[0] === '127'
+	}
+
+	if (addressFamily === 6) {
+		return hostname === '::1'
+	}
+
+	return hostname === 'localhost' || hostname.endsWith('.localhost')
+}
+
+async function findExistingParent(candidatePath: string): Promise<string> {
+	let current = candidatePath
+
+	while (true) {
+		try {
+			await lstat(current)
+			return current
+		} catch (error) {
+			if (!isMissingFileError(error)) {
+				throw error
+			}
+		}
+
+		const parent = path.dirname(current)
+
+		if (parent === current) {
+			throw new HarnessError(
+				'ARTIFACT_PATH_RESOLUTION_FAILED',
+				`Unable to resolve an existing parent for ${candidatePath}`,
+			)
+		}
+
+		current = parent
+	}
+}
+
+function isMissingFileError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		error.code === 'ENOENT'
+	)
 }
 
 function parseExecutionBackend(value: string): ExecutionBackend {
@@ -198,9 +426,18 @@ function parseInteger(
 		return fallback
 	}
 
-	const parsed = Number.parseInt(value, 10)
+	const normalized = value.trim()
 
-	if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+	if (!/^-?\d+$/.test(normalized)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`Expected an integer between ${min} and ${max}, received ${value}`,
+		)
+	}
+
+	const parsed = Number(normalized)
+
+	if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
 		throw new HarnessError(
 			'INVALID_CONFIGURATION',
 			`Expected an integer between ${min} and ${max}, received ${value}`,

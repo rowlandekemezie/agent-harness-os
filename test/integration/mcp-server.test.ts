@@ -155,3 +155,54 @@ async function waitForLength(values: Array<unknown>, expected: number): Promise<
 		await new Promise(resolve => setTimeout(resolve, 10))
 	}
 }
+
+test('bounds MCP input lines and recovers after an oversized request', async function () {
+	const cliPath = path.resolve('dist/src/cli.js')
+	const child = spawn(process.execPath, [cliPath, 'mcp'], {
+		cwd: process.cwd(),
+		stdio: ['pipe', 'pipe', 'pipe'],
+		env: {
+			...process.env,
+			AGENT_HARNESS_LOG_LEVEL: 'error',
+			AGENT_HARNESS_MAX_MCP_MESSAGE_BYTES: '1024',
+		},
+	})
+	const output = createInterface({ input: child.stdout })
+	const lines: Array<Record<string, unknown>> = []
+	output.on('line', line => lines.push(JSON.parse(line) as Record<string, unknown>))
+
+	try {
+		child.stdin.write(`${JSON.stringify({
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'ping',
+			params: { padding: 'x'.repeat(2_000) },
+		})}\n`)
+		await waitForLength(lines, 1)
+		const oversizedResponse = lines[0]
+		assert.ok(oversizedResponse)
+		const oversizedError = oversizedResponse['error'] as { code: number }
+		assert.equal(oversizedError.code, -32600)
+
+		child.stdin.write(`${JSON.stringify({
+			jsonrpc: '2.0',
+			id: 2,
+			method: 'initialize',
+			params: {
+				protocolVersion: '2025-11-25',
+				capabilities: {},
+				clientInfo: { name: 'test', version: '1' },
+			},
+		})}\n`)
+		await waitForLength(lines, 2)
+		const initializeResponse = lines[1]
+		assert.ok(initializeResponse)
+		const initializeResult = initializeResponse['result'] as {
+			protocolVersion: string
+		}
+		assert.equal(initializeResult.protocolVersion, '2025-11-25')
+	} finally {
+		child.kill('SIGTERM')
+		await new Promise<void>(resolve => child.once('close', () => resolve()))
+	}
+})

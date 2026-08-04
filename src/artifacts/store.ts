@@ -20,6 +20,9 @@ import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
 
+const maxReportBytes = 4_194_304
+const maxPatchBytes = 20_000_000
+
 export type PersistRunInput = {
 	artifactRoot: string
 	report: WorkerRunReport
@@ -53,6 +56,13 @@ export class ArtifactStore {
 		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
 
 		if (input.patch !== '') {
+			if (Buffer.byteLength(input.patch, 'utf8') > maxPatchBytes) {
+				throw new HarnessError(
+					'ARTIFACT_FILE_TOO_LARGE',
+					`Worker patch exceeds the ${maxPatchBytes}-byte artifact limit`,
+				)
+			}
+
 			// Patches must remain byte-faithful. Access is restricted by file mode.
 			await atomicWrite(patchPath, input.patch, 0o600)
 		}
@@ -89,7 +99,11 @@ export class ArtifactStore {
 		let contents: Buffer
 
 		try {
-			contents = await readSecureArtifactFile(artifactRoot, reportPath)
+			contents = await readSecureArtifactFile(
+				artifactRoot,
+				reportPath,
+				maxReportBytes,
+			)
 		} catch (error) {
 			if (error instanceof HarnessError) {
 				throw error
@@ -145,7 +159,11 @@ export class ArtifactStore {
 			)
 		}
 
-		return await readSecureArtifactFile(artifactRoot, expectedPatchPath)
+		return await readSecureArtifactFile(
+			artifactRoot,
+			expectedPatchPath,
+			maxPatchBytes,
+		)
 	}
 }
 
@@ -330,6 +348,7 @@ function invalidReport(): HarnessError {
 async function readSecureArtifactFile(
 	artifactRoot: string,
 	filePath: string,
+	maxBytes: number,
 ): Promise<Buffer> {
 	assertPathInside(artifactRoot, filePath)
 	const fileStats = await lstat(filePath)
@@ -338,6 +357,20 @@ async function readSecureArtifactFile(
 		throw new HarnessError(
 			'ARTIFACT_FILE_INVALID',
 			'Artifact must be a regular file and cannot be a symbolic link',
+		)
+	}
+
+	if (fileStats.nlink > 1) {
+		throw new HarnessError(
+			'ARTIFACT_HARD_LINK_DENIED',
+			'Artifact files may not have multiple hard links',
+		)
+	}
+
+	if (fileStats.size > maxBytes) {
+		throw new HarnessError(
+			'ARTIFACT_FILE_TOO_LARGE',
+			`Artifact exceeds the ${maxBytes}-byte read limit`,
 		)
 	}
 

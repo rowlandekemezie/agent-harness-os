@@ -10,22 +10,12 @@ const prohibitedArgumentPatterns: Array<RegExp> = [
 
 const prohibitedScriptPattern = /(?:^|:)(?:deploy|publish|release|migrate|migration|seed|destroy|production|prod)(?:$|:)/i
 
-const prohibitedPackageManagerActions = new Set([
-	'add',
-	'install',
-	'i',
-	'remove',
-	'uninstall',
-	'update',
-	'upgrade',
-	'publish',
-	'login',
-	'logout',
-	'config',
-	'set',
-	'exec',
-	'dlx',
-])
+const allowedPackageManagerActions: Record<string, Set<string>> = {
+	npm: new Set(['run', 'run-script', 'test', 't']),
+	pnpm: new Set(['run', 'test']),
+	yarn: new Set(['run', 'test']),
+	bun: new Set(['run', 'test']),
+}
 
 export class CommandPolicy {
 	private readonly allowedCommands: Set<string>
@@ -54,18 +44,28 @@ export class CommandPolicy {
 		}
 
 		if (isPackageManager(specification.command)) {
-			const action = getPackageManagerAction(specification)
+			this.assertPackageManagerAction(specification)
+		}
+	}
 
-			if (action !== null && prohibitedPackageManagerActions.has(action)) {
-				throw new HarnessError(
-					'PACKAGE_MUTATION_DENIED',
-					`Package manager action is prohibited: ${specification.command} ${action}`,
-				)
-			}
+	private assertPackageManagerAction(specification: CommandSpec): void {
+		const action = getPackageManagerAction(specification)
 
-			const scriptName = getRunScriptName(specification)
+		if (action === null) {
+			return
+		}
 
-			if (scriptName !== null && prohibitedScriptPattern.test(scriptName)) {
+		const allowedActions = allowedPackageManagerActions[specification.command]
+
+		if (allowedActions?.has(action) !== true) {
+			throw new HarnessError(
+				'PACKAGE_MUTATION_DENIED',
+				`Package manager action is prohibited: ${specification.command} ${action}`,
+			)
+		}
+
+		for (const scriptName of getRunScriptCandidates(specification, action)) {
+			if (prohibitedScriptPattern.test(scriptName)) {
 				throw new HarnessError(
 					'COMMAND_SCRIPT_DENIED',
 					`Potentially destructive package script is prohibited: ${scriptName}`,
@@ -80,34 +80,24 @@ function isPackageManager(command: string): boolean {
 }
 
 function getPackageManagerAction(specification: CommandSpec): string | null {
-	const firstArgument = specification.args.find(argument => !argument.startsWith('-'))
-
-	if (firstArgument === undefined) {
-		return null
-	}
-
-	if (specification.command === 'npm' && firstArgument === 'run') {
-		return null
-	}
-
-	if (
-		(specification.command === 'pnpm' ||
-			specification.command === 'yarn' ||
-			specification.command === 'bun') &&
-		firstArgument === 'run'
-	) {
-		return null
-	}
-
-	return firstArgument
+	return specification.args.find(argument => !argument.startsWith('-')) ?? null
 }
 
-function getRunScriptName(specification: CommandSpec): string | null {
-	const runIndex = specification.args.findIndex(argument => argument === 'run' || argument === 'run-script')
-
-	if (runIndex < 0) {
-		return null
+function getRunScriptCandidates(
+	specification: CommandSpec,
+	action: string,
+): Array<string> {
+	if (action === 'test' || action === 't') {
+		return ['test']
 	}
 
-	return specification.args[runIndex + 1] ?? null
+	const actionIndex = specification.args.indexOf(action)
+
+	if (actionIndex < 0) {
+		return []
+	}
+
+	return specification.args
+		.slice(actionIndex + 1)
+		.filter(argument => argument !== '--' && !argument.startsWith('-'))
 }

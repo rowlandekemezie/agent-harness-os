@@ -8,11 +8,10 @@ import {
 	optionalBoolean,
 	optionalInteger,
 	optionalString,
-	optionalStringArray,
 	requireRecord,
 	requireString,
 } from '../lib/json.js'
-import { runProcess } from '../lib/process.js'
+import { createSanitizedEnvironment, runProcess } from '../lib/process.js'
 import { WorkerService } from '../worker/service.js'
 
 export type McpToolDefinition = {
@@ -48,33 +47,57 @@ const toolDefinitions: Array<McpToolDefinition> = [
 			type: 'object',
 			properties: {
 				objective: { type: 'string', minLength: 1, maxLength: 4000 },
-				repositoryPath: { type: 'string', minLength: 1 },
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
 				mode: { enum: ['research', 'implementation', 'testing', 'review'] },
-				allowedPaths: { type: 'array', items: { type: 'string' } },
-				prohibitedPaths: { type: 'array', items: { type: 'string' } },
-				acceptanceCriteria: { type: 'array', items: { type: 'string' } },
+				allowedPaths: {
+					type: 'array',
+					items: { type: 'string', minLength: 1, maxLength: 1024 },
+					minItems: 1,
+					maxItems: 100,
+				},
+				prohibitedPaths: {
+					type: 'array',
+					items: { type: 'string', minLength: 1, maxLength: 1024 },
+					maxItems: 100,
+				},
+				acceptanceCriteria: {
+					type: 'array',
+					items: { type: 'string', minLength: 1, maxLength: 2000 },
+					maxItems: 100,
+				},
 				requiredCommands: {
 					type: 'array',
+					maxItems: 20,
 					items: {
 						type: 'object',
 						properties: {
 							command: { type: 'string' },
-							args: { type: 'array', items: { type: 'string' } },
+							args: {
+								type: 'array',
+								items: { type: 'string', maxLength: 2000 },
+								maxItems: 100,
+							},
 							timeoutMs: { type: 'integer', minimum: 1000, maximum: 900000 },
 						},
 						required: ['command', 'args'],
 						additionalProperties: false,
 					},
 				},
-				baseRef: { type: 'string' },
+				baseRef: { type: 'string', minLength: 1, maxLength: 1024 },
 				maxIterations: { type: 'integer', minimum: 1, maximum: 64 },
 				timeoutSeconds: { type: 'integer', minimum: 30, maximum: 3600 },
 				allowNetwork: { type: 'boolean' },
 			},
-			required: ['objective', 'repositoryPath'],
+			required: ['objective', 'repositoryPath', 'allowedPaths'],
 			additionalProperties: false,
 		},
-		annotations: annotation('Delegate bounded worker task', false, false, false),
+		annotations: annotation(
+			'Delegate bounded worker task',
+			false,
+			false,
+			false,
+			true,
+		),
 	},
 	{
 		name: 'get_worker_run',
@@ -82,7 +105,7 @@ const toolDefinitions: Array<McpToolDefinition> = [
 		inputSchema: {
 			type: 'object',
 			properties: {
-				repositoryPath: { type: 'string', minLength: 1 },
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
 				runId: { type: 'string', minLength: 36, maxLength: 36 },
 			},
 			required: ['repositoryPath', 'runId'],
@@ -96,7 +119,7 @@ const toolDefinitions: Array<McpToolDefinition> = [
 		inputSchema: {
 			type: 'object',
 			properties: {
-				repositoryPath: { type: 'string', minLength: 1 },
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
 				runId: { type: 'string', minLength: 36, maxLength: 36 },
 			},
 			required: ['repositoryPath', 'runId'],
@@ -139,7 +162,7 @@ export class McpTools {
 					const argumentsRecord = requireRecord(rawArguments, 'arguments')
 					return result(
 						await this.workerService.getRun(
-							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1 }),
+							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1, maxLength: 4_096 }),
 							requireString(argumentsRecord['runId'], 'runId', { minLength: 36, maxLength: 36 }),
 						),
 					)
@@ -148,7 +171,7 @@ export class McpTools {
 					const argumentsRecord = requireRecord(rawArguments, 'arguments')
 					return result(
 						await this.workerService.applyRun(
-							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1 }),
+							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1, maxLength: 4_096 }),
 							requireString(argumentsRecord['runId'], 'runId', { minLength: 36, maxLength: 36 }),
 						),
 					)
@@ -198,10 +221,20 @@ export class McpTools {
 			git,
 			docker,
 			artifactRootExample: resolveArtifactRoot(process.cwd(), this.config),
+			limits: this.config.limits,
 			warnings: [
-				...(this.config.execution.backend === 'local' && !this.config.execution.allowUnsandboxedLocal
-					? ['Worker command execution is disabled until Docker is selected or unsandboxed local execution is explicitly enabled. File tools still work.']
+				...(this.config.provider.allowInsecureHttp
+					? ['Insecure HTTP provider endpoints are explicitly enabled. Provider credentials and source context may cross the network without transport encryption.']
 					: []),
+				...(this.config.execution.backend === 'local' && !this.config.execution.allowUnsandboxedLocal
+					? ['Deterministic validation commands are disabled until Docker is selected or unsandboxed local execution is explicitly enabled. Worker file tools still work.']
+					: []),
+				...(
+					this.config.execution.backend === 'local' &&
+					this.config.execution.allowUnsandboxedLocal
+						? ['Local validation is unsandboxed and requires task allowNetwork=true because local network isolation cannot be enforced.']
+						: []
+				),
 				...(this.config.execution.backend === 'docker' && !docker.available
 					? ['Docker backend is selected but Docker is unavailable.']
 					: []),
@@ -220,17 +253,45 @@ export class McpTools {
 function parseWorkerTask(value: unknown): WorkerTask {
 	const input = requireRecord(value, 'arguments')
 	const repositoryPath = path.resolve(
-		requireString(input['repositoryPath'], 'repositoryPath', { minLength: 1 }),
+		requireString(input['repositoryPath'], 'repositoryPath', {
+			minLength: 1,
+			maxLength: 4_096,
+		}),
 	)
+	const mode = parseMode(input['mode'])
+	const requiredCommands = parseCommandSpecs(input['requiredCommands'])
+
+	if (
+		(mode === 'research' || mode === 'review') &&
+		requiredCommands.length > 0
+	) {
+		throw new HarnessError(
+			'INVALID_ARGUMENT',
+			`${mode} tasks are read-only and cannot execute validation commands`,
+		)
+	}
 
 	return {
 		objective: requireString(input['objective'], 'objective', { minLength: 1, maxLength: 4000 }),
 		repositoryPath,
-		mode: parseMode(input['mode']),
-		allowedPaths: optionalStringArray(input['allowedPaths'], 'allowedPaths', ['**/*']),
-		prohibitedPaths: optionalStringArray(input['prohibitedPaths'], 'prohibitedPaths', []),
-		acceptanceCriteria: optionalStringArray(input['acceptanceCriteria'], 'acceptanceCriteria', []),
-		requiredCommands: parseCommandSpecs(input['requiredCommands']),
+		mode,
+		allowedPaths: parseBoundedStringArray(input['allowedPaths'], 'allowedPaths', {
+			required: true,
+			minItems: 1,
+			maxItems: 100,
+			maxItemLength: 1_024,
+		}),
+		prohibitedPaths: parseBoundedStringArray(
+			input['prohibitedPaths'],
+			'prohibitedPaths',
+			{ maxItems: 100, maxItemLength: 1_024 },
+		),
+		acceptanceCriteria: parseBoundedStringArray(
+			input['acceptanceCriteria'],
+			'acceptanceCriteria',
+			{ maxItems: 100, maxItemLength: 2_000 },
+		),
+		requiredCommands,
 		baseRef: optionalString(input['baseRef'], 'baseRef', 'HEAD'),
 		maxIterations: optionalInteger(input['maxIterations'], 'maxIterations', 24, { min: 1, max: 64 }),
 		timeoutSeconds: optionalInteger(input['timeoutSeconds'], 'timeoutSeconds', 900, { min: 30, max: 3600 }),
@@ -250,6 +311,49 @@ function parseMode(value: unknown): WorkerMode {
 	throw new HarnessError('INVALID_ARGUMENT', 'mode must be research, implementation, testing, or review')
 }
 
+type BoundedStringArrayOptions = {
+	required?: boolean
+	minItems?: number
+	maxItems: number
+	maxItemLength: number
+}
+
+function parseBoundedStringArray(
+	value: unknown,
+	fieldName: string,
+	options: BoundedStringArrayOptions,
+): Array<string> {
+	if (value === undefined) {
+		if (options.required === true) {
+			throw new HarnessError(
+				'INVALID_ARGUMENT',
+				`${fieldName} is required`,
+			)
+		}
+
+		return []
+	}
+
+	if (
+		!Array.isArray(value) ||
+		value.length < (options.minItems ?? 0) ||
+		value.length > options.maxItems ||
+		value.some(
+			item =>
+				typeof item !== 'string' ||
+				item.length === 0 ||
+				item.length > options.maxItemLength,
+		)
+	) {
+		throw new HarnessError(
+			'INVALID_ARGUMENT',
+			`${fieldName} must contain between ${options.minItems ?? 0} and ${options.maxItems} non-empty strings of at most ${options.maxItemLength} characters`,
+		)
+	}
+
+	return [...value] as Array<string>
+}
+
 function parseCommandSpecs(value: unknown): Array<CommandSpec> {
 	if (value === undefined) {
 		return []
@@ -259,12 +363,25 @@ function parseCommandSpecs(value: unknown): Array<CommandSpec> {
 		throw new HarnessError('INVALID_ARGUMENT', 'requiredCommands must be an array')
 	}
 
+	if (value.length > 20) {
+		throw new HarnessError(
+			'INVALID_ARGUMENT',
+			'requiredCommands may contain at most 20 commands',
+		)
+	}
+
 	return value.map((item, index) => {
 		const record = requireRecord(item, `requiredCommands[${index}]`)
 		const rawArgs = record['args']
 
-		if (!Array.isArray(rawArgs) || rawArgs.some(argument => typeof argument !== 'string')) {
-			throw new HarnessError('INVALID_ARGUMENT', `requiredCommands[${index}].args must be an array of strings`)
+		if (
+			!Array.isArray(rawArgs) ||
+			rawArgs.length > 100 ||
+			rawArgs.some(
+				argument => typeof argument !== 'string' || argument.length > 2_000,
+			)
+		) {
+			throw new HarnessError('INVALID_ARGUMENT', `requiredCommands[${index}].args must contain at most 100 strings of at most 2000 characters`)
 		}
 
 		return {
@@ -292,8 +409,9 @@ function annotation(
 	readOnlyHint: boolean,
 	destructiveHint: boolean,
 	idempotentHint: boolean,
+	openWorldHint = false,
 ): McpToolDefinition['annotations'] {
-	return { title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint: false }
+	return { title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint }
 }
 
 function result(value: unknown): McpToolResult {
@@ -308,6 +426,7 @@ async function checkCommand(command: string, args: Array<string>): Promise<Recor
 	try {
 		const result = await runProcess(command, args, {
 			cwd: process.cwd(),
+			environment: createSanitizedEnvironment(),
 			timeoutMs: 5000,
 			maxOutputBytes: 4096,
 		})

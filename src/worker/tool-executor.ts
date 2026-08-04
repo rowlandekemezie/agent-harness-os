@@ -1,7 +1,7 @@
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { mkdir, opendir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type {
-	CommandResult,
 	JsonObject,
 	ProviderToolDefinition,
 	ToolExecutionResult,
@@ -17,19 +17,15 @@ import {
 	optionalString,
 	requireString,
 } from '../lib/json.js'
-import { getBinaryPatch } from '../git/repository.js'
-import { CommandPolicy } from '../security/command-policy.js'
+import { getBinaryPatch, getChangedFiles } from '../git/repository.js'
 import { PathPolicy } from '../security/path-policy.js'
-import type { CommandRunner } from './command-runner.js'
 
 export type ToolExecutorContext = {
 	task: WorkerTask
 	worktreePath: string
-	repositoryPath: string
-	sandboxHome: string
+	repositoryPath?: string
 	config: HarnessConfig
-	commandRunner: CommandRunner
-	commandResults: Array<CommandResult>
+	baseCommit: string
 	policyViolations: Array<string>
 	signal: AbortSignal
 }
@@ -37,7 +33,6 @@ export type ToolExecutorContext = {
 export class WorkerToolExecutor {
 	private readonly context: ToolExecutorContext
 	private readonly pathPolicy: PathPolicy
-	private readonly commandPolicy: CommandPolicy
 
 	constructor(context: ToolExecutorContext) {
 		this.context = context
@@ -45,9 +40,6 @@ export class WorkerToolExecutor {
 			context.worktreePath,
 			context.task.allowedPaths,
 			context.task.prohibitedPaths,
-		)
-		this.commandPolicy = new CommandPolicy(
-			context.config.execution.allowedCommands,
 		)
 	}
 
@@ -132,24 +124,6 @@ export class WorkerToolExecutor {
 						additionalProperties: false,
 					},
 				),
-				defineTool(
-					'run_command',
-					'Run an allowlisted validation command without a shell.',
-					{
-						type: 'object',
-						properties: {
-							command: { type: 'string' },
-							args: { type: 'array', items: { type: 'string' } },
-							timeoutMs: {
-								type: 'integer',
-								minimum: 1000,
-								maximum: 900000,
-							},
-						},
-						required: ['command', 'args'],
-						additionalProperties: false,
-					},
-				),
 			)
 		}
 
@@ -163,42 +137,36 @@ export class WorkerToolExecutor {
 			switch (name) {
 				case 'list_files':
 					return success(limitToolOutput(
-					await this.listFiles(argumentsRecord),
-					this.context.config.limits.maxToolOutputBytes,
-				))
+						await this.listFiles(argumentsRecord),
+						this.context.config.limits.maxToolOutputBytes,
+					))
 				case 'read_file':
 					return success(limitToolOutput(
-					await this.readFile(argumentsRecord),
-					this.context.config.limits.maxToolOutputBytes,
-				))
+						await this.readFile(argumentsRecord),
+						this.context.config.limits.maxToolOutputBytes,
+					))
 				case 'search_files':
 					return success(limitToolOutput(
-					await this.searchFiles(argumentsRecord),
-					this.context.config.limits.maxToolOutputBytes,
-				))
+						await this.searchFiles(argumentsRecord),
+						this.context.config.limits.maxToolOutputBytes,
+					))
 				case 'get_diff':
 					return success(limitToolOutput(
-					await this.getDiff(),
-					this.context.config.limits.maxToolOutputBytes,
-				))
+						await this.getDiff(),
+						this.context.config.limits.maxToolOutputBytes,
+					))
 				case 'write_file':
 					this.assertWritableMode()
 					return success(limitToolOutput(
-					await this.writeFile(argumentsRecord),
-					this.context.config.limits.maxToolOutputBytes,
-				))
+						await this.writeFile(argumentsRecord),
+						this.context.config.limits.maxToolOutputBytes,
+					))
 				case 'delete_file':
 					this.assertWritableMode()
 					return success(limitToolOutput(
-					await this.deleteFile(argumentsRecord),
-					this.context.config.limits.maxToolOutputBytes,
-				))
-				case 'run_command':
-					this.assertWritableMode()
-					return success(limitToolOutput(
-					await this.runCommand(argumentsRecord),
-					this.context.config.limits.maxToolOutputBytes,
-				))
+						await this.deleteFile(argumentsRecord),
+						this.context.config.limits.maxToolOutputBytes,
+					))
 				default:
 					throw new HarnessError('UNKNOWN_WORKER_TOOL', `Unknown worker tool: ${name}`)
 			}
@@ -227,7 +195,14 @@ export class WorkerToolExecutor {
 			? this.context.worktreePath
 			: await this.pathPolicy.resolveForRead(requestedPath)
 		const entries: Array<string> = []
-		await walkFiles(startPath, this.context.worktreePath, depth, entries, this.pathPolicy)
+		await walkFiles(
+			startPath,
+			this.context.worktreePath,
+			depth,
+			entries,
+			this.pathPolicy,
+			createTraversalState(this.context),
+		)
 
 		return entries.slice(0, 500).join('\n') || '[no allowed files found]'
 	}
@@ -297,10 +272,20 @@ export class WorkerToolExecutor {
 			? this.context.worktreePath
 			: await this.pathPolicy.resolveForRead(requestedPath)
 		const files: Array<string> = []
-		await walkFiles(startPath, this.context.worktreePath, 8, files, this.pathPolicy)
+		await walkFiles(
+			startPath,
+			this.context.worktreePath,
+			8,
+			files,
+			this.pathPolicy,
+			createTraversalState(this.context),
+		)
 		const results: Array<string> = []
+		let scannedBytes = 0
 
 		for (const relativePath of files) {
+			throwIfAborted(this.context.signal)
+
 			if (results.length >= maxResults) {
 				break
 			}
@@ -313,6 +298,17 @@ export class WorkerToolExecutor {
 					continue
 				}
 
+				if (
+					scannedBytes + fileStats.size >
+					this.context.config.limits.maxSearchBytes
+				) {
+					throw new HarnessError(
+						'SEARCH_BYTE_LIMIT',
+						`Search exceeded the ${this.context.config.limits.maxSearchBytes}-byte scan limit`,
+					)
+				}
+
+				scannedBytes += fileStats.size
 				const contents = await readFile(filePath)
 
 				if (contents.includes(0)) {
@@ -330,7 +326,11 @@ export class WorkerToolExecutor {
 						break
 					}
 				}
-			} catch {
+			} catch (error) {
+				if (error instanceof HarnessError) {
+					throw error
+				}
+
 				// Skip files that become unreadable during traversal.
 			}
 		}
@@ -375,46 +375,27 @@ export class WorkerToolExecutor {
 		return JSON.stringify({ path: requestedPath, deleted: true })
 	}
 
-	private async runCommand(argumentsRecord: JsonObject): Promise<string> {
-		const command = requireString(argumentsRecord.command, 'command', {
-			minLength: 1,
-			maxLength: 100,
-		})
-		const rawArgs = argumentsRecord.args
-
-		if (!Array.isArray(rawArgs) || rawArgs.some(argument => typeof argument !== 'string')) {
-			throw new HarnessError('INVALID_ARGUMENT', 'args must be an array of strings')
-		}
-
-		const specification = {
-			command,
-			args: rawArgs as Array<string>,
-			...(argumentsRecord.timeoutMs === undefined
-				? {}
-				: {
-					timeoutMs: optionalInteger(
-						argumentsRecord.timeoutMs,
-						'timeoutMs',
-						this.context.config.execution.commandTimeoutMs,
-						{ min: 1_000, max: 900_000 },
-					),
-				}),
-		}
-		this.commandPolicy.assertAllowed(specification)
-		const result = await this.context.commandRunner.run(specification, {
-			worktreePath: this.context.worktreePath,
-			repositoryPath: this.context.repositoryPath,
-			sandboxHome: this.context.sandboxHome,
-			task: this.context.task,
-			signal: this.context.signal,
-		})
-		this.context.commandResults.push(result)
-
-		return JSON.stringify(result)
-	}
-
 	private async getDiff(): Promise<string> {
-		const patch = await getBinaryPatch(this.context.worktreePath)
+		const changedFiles = await getChangedFiles(
+			this.context.worktreePath,
+			this.context.baseCommit,
+		)
+
+		if (changedFiles.length > this.context.config.limits.maxChangedFiles) {
+			throw new HarnessError(
+				'CHANGED_FILE_LIMIT',
+				`Worker changed ${changedFiles.length} files, exceeding the limit of ${this.context.config.limits.maxChangedFiles}`,
+			)
+		}
+
+		for (const changedFile of changedFiles) {
+			await this.pathPolicy.assertSafeChangedPath(changedFile)
+		}
+
+		const patch = await getBinaryPatch(
+			this.context.worktreePath,
+			this.context.baseCommit,
+		)
 
 		if (Buffer.byteLength(patch) <= this.context.config.limits.maxToolOutputBytes) {
 			return patch || '[no changes]'
@@ -432,7 +413,6 @@ export class WorkerToolExecutor {
 		}
 	}
 }
-
 
 function limitToolOutput(value: string, maxBytes: number): string {
 	const valueBuffer = Buffer.from(value, 'utf8')
@@ -470,13 +450,30 @@ function isPolicyError(code: string): boolean {
 	)
 }
 
+type TraversalState = {
+	visitedEntries: number
+	maxEntries: number
+	signal: AbortSignal
+}
+
+function createTraversalState(context: ToolExecutorContext): TraversalState {
+	return {
+		visitedEntries: 0,
+		maxEntries: context.config.limits.maxTraversalEntries,
+		signal: context.signal,
+	}
+}
+
 async function walkFiles(
 	currentPath: string,
 	rootPath: string,
 	depth: number,
 	entries: Array<string>,
 	policy: PathPolicy,
+	state: TraversalState,
 ): Promise<void> {
+	throwIfAborted(state.signal)
+
 	if (entries.length >= 500) {
 		return
 	}
@@ -497,9 +494,25 @@ async function walkFiles(
 		return
 	}
 
-	const directoryEntries = await readdir(currentPath, { withFileTypes: true })
+	const directory = await opendir(currentPath)
+	const directoryEntries: Array<Dirent> = []
+
+	for await (const entry of directory) {
+		throwIfAborted(state.signal)
+		state.visitedEntries += 1
+
+		if (state.visitedEntries > state.maxEntries) {
+			throw new HarnessError(
+				'FILE_TRAVERSAL_LIMIT',
+				`File traversal exceeded the ${state.maxEntries}-entry limit`,
+			)
+		}
+
+		directoryEntries.push(entry)
+	}
 
 	for (const entry of directoryEntries.sort((left, right) => left.name.localeCompare(right.name))) {
+		throwIfAborted(state.signal)
 		if (entry.name === '.git' || entry.name === 'node_modules') {
 			continue
 		}
@@ -512,8 +525,19 @@ async function walkFiles(
 		}
 
 		if (entry.isDirectory()) {
+			if (policy.isProhibited(relativePath)) {
+				continue
+			}
+
 			if (depth > 0) {
-				await walkFiles(absolutePath, rootPath, depth - 1, entries, policy)
+				await walkFiles(
+					absolutePath,
+					rootPath,
+					depth - 1,
+					entries,
+					policy,
+					state,
+				)
 			}
 			continue
 		}
@@ -521,6 +545,12 @@ async function walkFiles(
 		if (entry.isFile() && policy.isAllowed(relativePath)) {
 			entries.push(relativePath)
 		}
+	}
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+	if (signal.aborted) {
+		throw new DOMException('Worker tool operation aborted', 'AbortError')
 	}
 }
 
