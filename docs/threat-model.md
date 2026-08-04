@@ -18,12 +18,30 @@
 - Malicious text, source code, tests, package scripts, and generated tool arguments in a repository
 - Accidental over-broad task contracts
 - A provider returning malformed, oversized, repeated, redirected, or hostile tool calls
+- Incorrect or malicious worker capability, cost, latency, priority, endpoint, or pricing configuration
+- A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
 - Concurrent tasks or external processes targeting the same repository
 - Child processes that hang, create descendants, mutate the worktree, or emit excessive output
 - Validation containers that outlive their Docker client
 
 ## Security controls
+
+### Worker registry and routing
+
+- Worker IDs are unique and configuration is bounded to thirty-two entries
+- Provider credentials are sourced from named environment variables
+- Sensitive static headers and credential-shaped URL query parameters are rejected
+- Non-loopback plaintext endpoints require explicit opt-in
+- Registry inspection omits credentials and redacts query values
+- Capabilities and budget tiers are explicit operator claims
+- Routing is deterministic and does not call an LLM
+- Required capabilities and cost/latency ceilings are enforced before scoring
+- Explicit worker preference fails closed when the worker cannot satisfy the contract
+- Fallback is limited to eligible provider/model-loop failures and bounded attempts
+- Every fallback attempt starts from the original base in a fresh worktree
+- Failed attempts are persisted for audit but cannot be applied
+
 
 ### Filesystem
 

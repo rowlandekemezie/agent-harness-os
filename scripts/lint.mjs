@@ -44,6 +44,24 @@ for (const root of roots) {
 	await walk(root)
 }
 
+
+const jsonFiles = [
+	'package.json',
+	'package-lock.json',
+	'tsconfig.json',
+	'.prettierrc.json',
+	'examples/task.json',
+	'examples/workers.json',
+]
+
+for (const jsonFile of jsonFiles) {
+	try {
+		JSON.parse(await readFile(jsonFile, 'utf8'))
+	} catch (error) {
+		errors.push(`${jsonFile}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`)
+	}
+}
+
 if (errors.length > 0) {
 	console.error(errors.join('\n'))
 	process.exitCode = 1

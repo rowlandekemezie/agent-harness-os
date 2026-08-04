@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Maintain a secure MCP worker harness. Treat filesystem authority, command execution, model output, Git patches, provider responses, and persisted artifacts as hostile inputs until deterministic validation succeeds.
+Maintain a secure, model-agnostic Agent OS for bounded coding workers. Treat filesystem authority, command execution, model output, Git patches, provider responses, and persisted artifacts as hostile inputs until deterministic validation succeeds.
 
 ## Code style
 
@@ -18,7 +18,11 @@ Maintain a secure MCP worker harness. Treat filesystem authority, command execut
 
 ## Architecture invariants
 
-- Codex is the orchestrator; the worker is bounded execution.
+- Codex is the orchestrator; workers are bounded execution.
+- Provider adapters must depend on the internal provider contract, never leak provider-specific response shapes into the execution kernel.
+- Routing must remain deterministic, inspectable, and based only on explicit worker metadata and task policy.
+- Every fallback attempt must start in a fresh worktree at the same verified base commit.
+- Never fall back after policy, repository-safety, deterministic-validation, or cancellation failures.
 - `delegate_to_worker` must never modify the caller's checkout.
 - Worker writes occur only in a detached Git worktree.
 - Patch application remains a separate MCP tool.
@@ -42,4 +46,4 @@ Add a regression test for every security or correctness bug.
 
 ## Change discipline
 
-Keep changes small and reviewable. Document new environment variables, MCP tools, trust assumptions, provider behavior, and operational consequences. Do not add deployment, publishing, or automatic merge behavior without an explicit design review.
+Keep changes small and reviewable. Document new environment variables, MCP tools, worker metadata, routing behavior, fallback semantics, trust assumptions, provider behavior, and operational consequences. Do not add deployment, publishing, or automatic merge behavior without an explicit design review.

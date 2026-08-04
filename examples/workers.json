@@ -1,0 +1,75 @@
+[
+  {
+    "id": "openai-quality",
+    "adapter": "openai-compatible",
+    "model": "replace-with-openai-model-id",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "capabilities": [
+      "research",
+      "implementation",
+      "testing",
+      "review",
+      "tool-calling",
+      "long-context"
+    ],
+    "priority": 90,
+    "costTier": "high",
+    "latencyTier": "standard",
+    "maxOutputTokensParameter": "max_completion_tokens"
+  },
+  {
+    "id": "anthropic-review",
+    "adapter": "anthropic",
+    "model": "replace-with-anthropic-model-id",
+    "baseUrl": "https://api.anthropic.com/v1",
+    "apiKeyEnv": "ANTHROPIC_API_KEY",
+    "capabilities": [
+      "research",
+      "implementation",
+      "testing",
+      "review",
+      "tool-calling",
+      "long-context"
+    ],
+    "priority": 95,
+    "costTier": "high",
+    "latencyTier": "standard"
+  },
+  {
+    "id": "gemini-fast",
+    "adapter": "openai-compatible",
+    "model": "replace-with-gemini-model-id",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "apiKeyEnv": "GEMINI_API_KEY",
+    "capabilities": [
+      "research",
+      "implementation",
+      "testing",
+      "review",
+      "tool-calling",
+      "long-context"
+    ],
+    "priority": 75,
+    "costTier": "medium",
+    "latencyTier": "fast"
+  },
+  {
+    "id": "ollama-private",
+    "adapter": "openai-compatible",
+    "model": "replace-with-local-model-id",
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "auth": "none",
+    "capabilities": [
+      "research",
+      "implementation",
+      "testing",
+      "review",
+      "tool-calling",
+      "private"
+    ],
+    "priority": 60,
+    "costTier": "low",
+    "latencyTier": "standard"
+  }
+]

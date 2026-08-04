@@ -228,6 +228,8 @@ function validateReport(value: unknown, expectedPath: string): WorkerRunReport {
 		!isCommandResults(value['commandResults']) ||
 		!isAcceptanceResults(value['acceptanceCriteria']) ||
 		!isProviderMetadata(value['provider']) ||
+		!isOptionalRoutingMetadata(value['routing']) ||
+		!isOptionalNullableString(value['failureCode']) ||
 		(patchPath === null) !== (patchSha256 === null) ||
 		(patchSha256 !== null && !/^[a-f0-9]{64}$/i.test(patchSha256))
 	) {
@@ -285,12 +287,99 @@ function isAcceptanceResults(
 }
 
 function isProviderMetadata(value: unknown): boolean {
+	if (
+		!isRecord(value) ||
+		typeof value['baseUrl'] !== 'string' ||
+		typeof value['model'] !== 'string' ||
+		!isNonNegativeInteger(value['requestCount'])
+	) {
+		return false
+	}
+
+	return (
+		isOptionalString(value['workerId']) &&
+		(value['adapter'] === undefined ||
+			value['adapter'] === 'openai-compatible' ||
+			value['adapter'] === 'anthropic') &&
+		isOptionalNonNegativeInteger(value['inputTokens']) &&
+		isOptionalNonNegativeInteger(value['outputTokens']) &&
+		isOptionalNonNegativeInteger(value['totalTokens']) &&
+		isOptionalNonNegativeInteger(value['totalLatencyMs']) &&
+		(value['estimatedCostUsd'] === undefined ||
+			value['estimatedCostUsd'] === null ||
+			(typeof value['estimatedCostUsd'] === 'number' &&
+				Number.isFinite(value['estimatedCostUsd']) &&
+				value['estimatedCostUsd'] >= 0))
+	)
+}
+
+function isOptionalRoutingMetadata(value: unknown): boolean {
+	if (value === undefined) {
+		return true
+	}
+	if (!isRecord(value)) {
+		return false
+	}
+
+	return (
+		(value['strategy'] === 'balanced' ||
+			value['strategy'] === 'cost' ||
+			value['strategy'] === 'latency' ||
+			value['strategy'] === 'quality') &&
+		isWorkerCapabilities(value['requiredCapabilities']) &&
+		isStringArray(value['candidateWorkerIds']) &&
+		typeof value['selectedWorkerId'] === 'string' &&
+		isPositiveInteger(value['attemptNumber']) &&
+		isPositiveInteger(value['maxAttempts']) &&
+		typeof value['fallbackEnabled'] === 'boolean' &&
+		Array.isArray(value['previousAttempts']) &&
+		value['previousAttempts'].every(isWorkerAttempt) &&
+		(value['attemptNumber'] as number) <= (value['maxAttempts'] as number) &&
+		(value['previousAttempts'] as Array<unknown>).length ===
+			(value['attemptNumber'] as number) - 1 &&
+		(value['candidateWorkerIds'] as Array<string>).includes(
+			value['selectedWorkerId'] as string,
+		)
+	)
+}
+
+function isWorkerAttempt(value: unknown): boolean {
 	return (
 		isRecord(value) &&
-		typeof value['baseUrl'] === 'string' &&
-		typeof value['model'] === 'string' &&
-		isNonNegativeInteger(value['requestCount'])
+		typeof value['runId'] === 'string' &&
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value['runId']) &&
+		typeof value['workerId'] === 'string' &&
+		isRunStatus(value['status']) &&
+		(value['failureCode'] === null || typeof value['failureCode'] === 'string')
 	)
+}
+
+function isWorkerCapabilities(value: unknown): boolean {
+	return Array.isArray(value) && value.every(item =>
+		item === 'research' ||
+		item === 'implementation' ||
+		item === 'testing' ||
+		item === 'review' ||
+		item === 'tool-calling' ||
+		item === 'long-context' ||
+		item === 'private',
+	)
+}
+
+function isOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === 'string'
+}
+
+function isOptionalNullableString(value: unknown): boolean {
+	return value === undefined || value === null || typeof value === 'string'
+}
+
+function isOptionalNonNegativeInteger(value: unknown): boolean {
+	return value === undefined || isNonNegativeInteger(value)
+}
+
+function isPositiveInteger(value: unknown): boolean {
+	return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
 function isRunStatus(value: unknown): value is RunStatus {

@@ -50,7 +50,7 @@ function createProvider(baseUrl: string, overrides: NodeJS.ProcessEnv = {}): Ope
 		...overrides,
 	})
 	return new OpenAiCompatibleProvider(
-		config.provider,
+		config.workers[0]!,
 		new Logger('provider-test', 'error'),
 	)
 }
@@ -136,5 +136,100 @@ test('rejects excessive tool-call fanout', async function () {
 		})
 	} finally {
 		await fixture.close()
+	}
+})
+
+test('does not follow provider redirects with credentials or source context', async function () {
+	let redirectedRequestCount = 0
+	const redirectedServer = createServer(request => {
+		redirectedRequestCount += 1
+		request.resume()
+	})
+	await new Promise<void>(resolve =>
+		redirectedServer.listen(0, '127.0.0.1', resolve),
+	)
+	const redirectedAddress = redirectedServer.address()
+
+	if (redirectedAddress === null || typeof redirectedAddress === 'string') {
+		throw new Error('Redirect target did not bind to a TCP port')
+	}
+
+	const fixture = await startProvider(response => {
+		response.statusCode = 307
+		response.setHeader(
+			'location',
+			`http://127.0.0.1:${redirectedAddress.port}/capture`,
+		)
+		response.end()
+	})
+
+	try {
+		const provider = createProvider(fixture.baseUrl)
+		await assert.rejects(provider.complete(createRequest()), error => {
+			return (
+				typeof error === 'object' &&
+				error !== null &&
+				'code' in error &&
+				error.code === 'PROVIDER_HTTP_ERROR'
+			)
+		})
+		assert.equal(redirectedRequestCount, 0)
+	} finally {
+		await fixture.close()
+		await new Promise<void>((resolve, reject) => {
+			redirectedServer.close(error =>
+				error === undefined ? resolve() : reject(error),
+			)
+		})
+	}
+})
+
+test('uses the configured max completion token parameter without sending deprecated aliases', async function () {
+	let requestBody: Record<string, unknown> | null = null
+	const server = createServer((request, response) => {
+		const chunks: Array<Buffer> = []
+		request.on('data', chunk => chunks.push(Buffer.from(chunk)))
+		request.on('end', () => {
+			requestBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+			response.setHeader('content-type', 'application/json')
+			response.end(JSON.stringify({
+				choices: [{ message: { content: 'done' } }],
+			}))
+		})
+	})
+	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+	const address = server.address()
+	if (address === null || typeof address === 'string') {
+		throw new Error('Provider fixture did not bind')
+	}
+
+	try {
+		const config = loadConfig({
+			API_KEY: 'secret',
+			AGENT_OS_WORKERS_JSON: JSON.stringify([{
+				id: 'openai',
+				adapter: 'openai-compatible',
+				model: 'reasoning-model',
+				baseUrl: `http://127.0.0.1:${address.port}/v1`,
+				apiKeyEnv: 'API_KEY',
+				capabilities: ['implementation', 'tool-calling'],
+				maxOutputTokens: 4096,
+				maxOutputTokensParameter: 'max_completion_tokens',
+				temperature: null,
+				maxRetries: 0,
+			}]),
+		})
+		const provider = new OpenAiCompatibleProvider(
+			config.workers[0]!,
+			new Logger('provider-test', 'error'),
+		)
+		await provider.complete(createRequest())
+		assert.equal(requestBody?.['max_completion_tokens'], 4096)
+		assert.equal('max_tokens' in (requestBody ?? {}), false)
+		assert.equal('temperature' in (requestBody ?? {}), false)
+	} finally {
+		await new Promise<void>((resolve, reject) => {
+			server.close(error => error === undefined ? resolve() : reject(error))
+		})
 	}
 })
