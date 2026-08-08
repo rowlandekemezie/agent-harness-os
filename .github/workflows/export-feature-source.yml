@@ -1,16 +1,16 @@
 name: Export feature source
 
 on:
-  push:
+  pull_request:
     branches:
-      - feature/codex-subscription-worker
+      - main
 
 permissions:
   contents: read
 
 jobs:
   export:
-    if: github.event.head_commit.message == 'chore: export feature source for local verification'
+    if: github.head_ref == 'feature/codex-subscription-worker'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
