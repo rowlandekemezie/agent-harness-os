@@ -110,6 +110,7 @@
 - Codex login state is checked before the first delegated turn
 - Nested Codex runs in a newly created scratch directory, not the repository worktree
 - `codex exec` is invoked ephemerally with a read-only sandbox, approvals disabled, user config/rules disabled, and structured output validation
+- Built-in shell, unified exec, shell snapshot, and code-mode execution features are explicitly disabled so the nested Codex turn cannot use its own execution tools to inspect the host
 - Repository context is supplied only through the bounded conversation and Agent OS tool definitions; repository file authority remains in `WorkerToolExecutor`
 - `OPENAI_API_KEY`, `OPENAI_ORG_ID`, and `OPENAI_PROJECT_ID` are removed from the Codex subprocess environment
 - Only auth-location, platform, proxy, and TLS variables needed by the Codex CLI are forwarded
