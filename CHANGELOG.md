@@ -2,6 +2,21 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Added
+
+- ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
+- ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
+- Fail-closed ChatGPT auth enforcement with explicit `authMode: any` opt-in for other saved Codex auth
+- Codex worker isolation in a read-only scratch workspace while Agent OS retains repository tool authority
+- Codex adapter tests for auth, environment isolation, structured tool calls, and end-to-end patch application
+
+### Security
+
+- Strip OpenAI API credential environment variables from delegated Codex subprocesses
+- Reject provider-only API configuration on subscription-backed Codex workers
+
 ## 0.2.0 - 2026-08-04
 
 ### Added

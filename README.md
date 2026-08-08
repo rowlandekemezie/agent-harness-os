@@ -12,6 +12,7 @@ Codex authenticated with ChatGPT
 Agent Harness OS
         |
         +--> worker registry
+        |      Subscription-backed: local Codex CLI via ChatGPT sign-in
         |      OpenAI-compatible: GPT, Qwen, Gemini, OpenRouter, Ollama
         |      Native: Anthropic Messages API
         |
@@ -26,10 +27,10 @@ Agent Harness OS
 your clean checkout
 ```
 
-## What version 0.2 provides
+## What Agent Harness OS provides
 
 - A worker registry configured through `AGENT_OS_WORKERS_JSON`
-- OpenAI-compatible and native Anthropic adapters
+- ChatGPT-authenticated Codex CLI, OpenAI-compatible, and native Anthropic adapters
 - Capability-based routing for research, implementation, testing, review, tool calling, long context, and private execution
 - Deterministic `balanced`, `cost`, `latency`, and `quality` strategies
 - Optional worker preference, cost ceiling, latency ceiling, and required capabilities per task
@@ -64,10 +65,10 @@ See [Architecture](docs/architecture.md) and [Threat model](docs/threat-model.md
 - Node.js 22 or newer
 - Git 2.30 or newer
 - Codex CLI, IDE extension, or another local MCP client
-- At least one compatible worker endpoint
+- At least one worker: a logged-in Codex CLI or a compatible provider endpoint
 - Docker for the recommended isolated validation backend
 
-Your ChatGPT subscription can authenticate Codex through its supported sign-in flow. Calls made to configured workers use those providers' own credentials and billing.
+A `codex` worker can reuse the local Codex CLI's ChatGPT sign-in and therefore consumes the Codex allowance of that ChatGPT plan rather than requiring an OpenAI API key. External provider workers keep their own credentials and billing. The Codex adapter defaults to `authMode: "chatgpt"` and fails closed if the CLI is authenticated with an API key instead.
 
 ## Install
 
@@ -81,29 +82,46 @@ npm link
 
 ## Configure workers
 
+### Use your ChatGPT-authenticated Codex CLI
+
+This is the default path when you want delegation without a separate OpenAI API bill:
+
+```bash
+codex login
+codex login status
+
+export AGENT_OS_WORKERS_JSON='[
+  {
+    "id": "codex-subscription",
+    "adapter": "codex",
+    "capabilities": ["research", "implementation", "testing", "review", "tool-calling", "long-context"],
+    "priority": 100,
+    "costTier": "low",
+    "latencyTier": "standard"
+  }
+]'
+export AGENT_OS_DEFAULT_WORKER='codex-subscription'
+```
+
+The adapter invokes `codex exec` with an ephemeral, read-only scratch workspace. It does not give nested Codex direct repository authority. Repository reads and writes still happen through Agent Harness OS tools, path policy, detached worktrees, validation, and the separate patch-application gate.
+
+By default, `authMode` is `chatgpt`. If `codex login status` reports API-key authentication, the worker refuses to run so an API-billed Codex session is not used accidentally. `authMode: "any"` is an explicit opt-in for either saved auth mode.
+
+### Add external workers or fallbacks
+
 Worker metadata is JSON. Credentials stay in separately named environment variables.
 
 ```bash
-export OPENAI_API_KEY='...'
 export ANTHROPIC_API_KEY='...'
 
 export AGENT_OS_WORKERS_JSON="$(cat <<'JSON'
 [
   {
-    "id": "gpt-implementation",
-    "adapter": "openai-compatible",
-    "model": "your-openai-model-id",
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKeyEnv": "OPENAI_API_KEY",
+    "id": "codex-subscription",
+    "adapter": "codex",
     "capabilities": ["research", "implementation", "testing", "review", "tool-calling", "long-context"],
-    "priority": 90,
-    "costTier": "high",
-    "latencyTier": "standard",
-    "maxOutputTokensParameter": "max_completion_tokens",
-    "pricing": {
-      "inputPerMillion": null,
-      "outputPerMillion": null
-    }
+    "priority": 100,
+    "costTier": "low"
   },
   {
     "id": "claude-review",
@@ -121,9 +139,9 @@ JSON
 )"
 ```
 
-The values under `capabilities`, `costTier`, `latencyTier`, `priority`, and `pricing` are operator assertions. The router does not infer provider quality or silently rewrite them.
+The values under `capabilities`, `costTier`, `latencyTier`, `priority`, and `pricing` are operator assertions. For a subscription-backed Codex worker, `costTier` represents incremental out-of-pocket routing preference, not a claim that the ChatGPT plan has unlimited usage.
 
-More examples, including Qwen, Gemini, OpenRouter, and Ollama, are in [Worker registry](docs/worker-registry.md) and [`examples/workers.json`](examples/workers.json).
+More examples, including OpenAI API, Qwen, Gemini, OpenRouter, and Ollama, are in [Worker registry](docs/worker-registry.md) and [`examples/workers.json`](examples/workers.json).
 
 ### Legacy Qwen configuration
 

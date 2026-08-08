@@ -174,3 +174,76 @@ test('rejects uppercase worker IDs and oversized registry configuration', functi
 		hasCode('INVALID_CONFIGURATION'),
 	)
 })
+
+test('loads a ChatGPT-authenticated Codex CLI worker without API credentials', function () {
+	const config = loadConfig({
+		AGENT_OS_WORKERS_JSON: JSON.stringify([{
+			id: 'codex-subscription',
+			adapter: 'codex',
+			capabilities: ['implementation', 'tool-calling', 'long-context'],
+			command: '/opt/bin/codex',
+			costTier: 'low',
+		}]),
+	})
+
+	const worker = config.workers[0]
+	assert.equal(worker?.adapter, 'codex')
+	assert.equal(worker?.model, '')
+	assert.equal(worker?.baseUrl, '')
+	assert.equal(worker?.apiKeyEnv, null)
+	assert.equal(worker?.apiKey, '')
+	assert.equal(worker?.auth, 'none')
+	assert.equal(worker?.codexCommand, '/opt/bin/codex')
+	assert.equal(worker?.codexAuthMode, 'chatgpt')
+	assert.deepEqual(getWorkerSecrets(config).namedSecrets, {})
+	assert.doesNotThrow(() => assertWorkersConfigured(config))
+})
+
+test('rejects provider credentials and endpoints on Codex CLI workers', function () {
+	const baseWorker = {
+		id: 'codex-subscription',
+		adapter: 'codex',
+		capabilities: ['implementation', 'tool-calling'],
+	}
+
+	for (const invalid of [
+		{ baseUrl: 'https://api.openai.com/v1' },
+		{ apiKeyEnv: 'OPENAI_API_KEY' },
+		{ headers: { Authorization: 'secret' } },
+	]) {
+		assert.throws(
+			() => loadConfig({
+				OPENAI_API_KEY: 'would-be-billed-separately',
+				AGENT_OS_WORKERS_JSON: JSON.stringify([{
+					...baseWorker,
+					...invalid,
+				}]),
+			}),
+			hasCode('INVALID_CONFIGURATION'),
+		)
+	}
+})
+
+test('requires explicit opt-in before allowing non-ChatGPT Codex authentication', function () {
+	const config = loadConfig({
+		AGENT_OS_WORKERS_JSON: JSON.stringify([{
+			id: 'codex-any-auth',
+			adapter: 'codex',
+			authMode: 'any',
+			capabilities: ['review', 'tool-calling'],
+		}]),
+	})
+
+	assert.equal(config.workers[0]?.codexAuthMode, 'any')
+	assert.throws(
+		() => loadConfig({
+			AGENT_OS_WORKERS_JSON: JSON.stringify([{
+				id: 'codex-invalid-auth',
+				adapter: 'codex',
+				authMode: 'api-key',
+				capabilities: ['review', 'tool-calling'],
+			}]),
+		}),
+		hasCode('INVALID_CONFIGURATION'),
+	)
+})

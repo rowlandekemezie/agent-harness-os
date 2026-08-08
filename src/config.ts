@@ -17,6 +17,8 @@ import type { LogLevel } from './lib/logger.js'
 
 export type WorkerAuth = 'bearer' | 'api-key' | 'none'
 
+export type CodexAuthMode = 'chatgpt' | 'any'
+
 export type OpenAiMaxOutputTokensParameter =
 	| 'max_tokens'
 	| 'max_completion_tokens'
@@ -52,6 +54,8 @@ export type WorkerConfig = {
 	allowInsecureHttp: boolean
 	anthropicVersion: string
 	pricing: WorkerPricing
+	codexCommand: string | null
+	codexAuthMode: CodexAuthMode | null
 	configurationIssues: Array<string>
 }
 
@@ -399,6 +403,8 @@ function parseLegacyQwenWorker(environment: NodeJS.ProcessEnv): WorkerConfig {
 		allowInsecureHttp,
 		anthropicVersion: '2023-06-01',
 		pricing: { inputPerMillion: null, outputPerMillion: null },
+		codexCommand: null,
+		codexAuthMode: null,
 		configurationIssues: issues,
 	}
 }
@@ -460,6 +466,10 @@ function parseWorkerDefinition(
 	}
 
 	const adapter = parseWorkerAdapter(value['adapter'], `${prefix}.adapter`)
+
+	if (adapter === 'codex') {
+		return parseCodexWorkerDefinition(value, prefix, id)
+	}
 	const allowInsecureHttp = parseOptionalBoolean(
 		value['allowInsecureHttp'],
 		false,
@@ -596,6 +606,118 @@ function parseWorkerDefinition(
 			64,
 		),
 		pricing: parsePricing(value['pricing'], `${prefix}.pricing`),
+		codexCommand: null,
+		codexAuthMode: null,
+		configurationIssues: issues,
+	}
+}
+
+function parseCodexWorkerDefinition(
+	value: Record<string, unknown>,
+	prefix: string,
+	id: string,
+): WorkerConfig {
+	const unsupportedFields = [
+		'baseUrl',
+		'endpointUrl',
+		'apiKeyEnv',
+		'auth',
+		'headers',
+		'headerEnv',
+		'allowInsecureHttp',
+		'anthropicVersion',
+		'pricing',
+		'maxRetries',
+		'maxOutputTokens',
+		'maxOutputTokensParameter',
+		'temperature',
+	]
+	const suppliedUnsupportedFields = unsupportedFields.filter(
+		field => value[field] !== undefined,
+	)
+
+	if (suppliedUnsupportedFields.length > 0) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${prefix} uses provider fields that are not valid for the codex adapter: ${suppliedUnsupportedFields.join(', ')}`,
+		)
+	}
+
+	const capabilities = parseCapabilities(
+		value['capabilities'],
+		`${prefix}.capabilities`,
+	)
+	const issues: Array<string> = []
+
+	if (!capabilities.includes('tool-calling')) {
+		issues.push('tool-calling capability is required by this harness')
+	}
+
+	return {
+		id,
+		enabled: parseOptionalBoolean(
+			value['enabled'],
+			true,
+			`${prefix}.enabled`,
+		),
+		adapter: 'codex',
+		model: boundedOptionalConfigString(
+			value['model'],
+			'',
+			`${prefix}.model`,
+			512,
+		),
+		baseUrl: '',
+		endpointUrl: null,
+		apiKeyEnv: null,
+		apiKey: '',
+		auth: 'none',
+		headers: {},
+		headerEnvNames: [],
+		capabilities,
+		priority: parseOptionalInteger(
+			value['priority'],
+			90,
+			0,
+			100,
+			`${prefix}.priority`,
+		),
+		costTier: parseCostTier(value['costTier'] ?? 'low', `${prefix}.costTier`),
+		latencyTier: parseLatencyTier(
+			value['latencyTier'],
+			`${prefix}.latencyTier`,
+		),
+		timeoutMs: parseOptionalInteger(
+			value['timeoutMs'],
+			180_000,
+			1_000,
+			900_000,
+			`${prefix}.timeoutMs`,
+		),
+		maxRetries: 0,
+		maxResponseBytes: parseOptionalInteger(
+			value['maxResponseBytes'],
+			1_048_576,
+			65_536,
+			20_971_520,
+			`${prefix}.maxResponseBytes`,
+		),
+		maxOutputTokens: 8_192,
+		maxOutputTokensParameter: 'none',
+		temperature: null,
+		allowInsecureHttp: false,
+		anthropicVersion: '2023-06-01',
+		pricing: { inputPerMillion: null, outputPerMillion: null },
+		codexCommand: boundedOptionalConfigString(
+			value['command'],
+			'codex',
+			`${prefix}.command`,
+			4_096,
+		),
+		codexAuthMode: parseCodexAuthMode(
+			value['authMode'],
+			`${prefix}.authMode`,
+		),
 		configurationIssues: issues,
 	}
 }
@@ -770,13 +892,17 @@ function isMissingFileError(error: unknown): boolean {
 }
 
 function parseWorkerAdapter(value: unknown, fieldName: string): WorkerAdapter {
-	if (value === 'openai-compatible' || value === 'anthropic') {
+	if (
+		value === 'openai-compatible' ||
+		value === 'anthropic' ||
+		value === 'codex'
+	) {
 		return value
 	}
 
 	throw new HarnessError(
 		'INVALID_CONFIGURATION',
-		`${fieldName} must be openai-compatible or anthropic`,
+		`${fieldName} must be openai-compatible, anthropic, or codex`,
 	)
 }
 
@@ -785,7 +911,7 @@ function parseMaxOutputTokensParameter(
 	adapter: WorkerAdapter,
 	fieldName: string,
 ): OpenAiMaxOutputTokensParameter {
-	if (adapter === 'anthropic') {
+	if (adapter === 'anthropic' || adapter === 'codex') {
 		return 'none'
 	}
 	if (value === undefined) {
@@ -805,6 +931,16 @@ function parseMaxOutputTokensParameter(
 }
 
 function parseWorkerAuth(value: unknown, adapter: WorkerAdapter): WorkerAuth {
+	if (adapter === 'codex') {
+		if (value === undefined || value === 'none') {
+			return 'none'
+		}
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'Codex workers reuse Codex CLI authentication and must use auth none',
+		)
+	}
+
 	if (adapter === 'anthropic') {
 		if (value === undefined || value === 'api-key') {
 			return 'api-key'
@@ -826,6 +962,19 @@ function parseWorkerAuth(value: unknown, adapter: WorkerAdapter): WorkerAuth {
 	throw new HarnessError(
 		'INVALID_CONFIGURATION',
 		'OpenAI-compatible worker auth must be bearer or none',
+	)
+}
+
+function parseCodexAuthMode(value: unknown, fieldName: string): CodexAuthMode {
+	if (value === undefined || value === 'chatgpt') {
+		return 'chatgpt'
+	}
+	if (value === 'any') {
+		return 'any'
+	}
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be chatgpt or any`,
 	)
 }
 
