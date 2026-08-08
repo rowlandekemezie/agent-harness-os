@@ -1,0 +1,25 @@
+name: Export feature source
+
+on:
+  push:
+    branches:
+      - feature/codex-subscription-worker
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: github.event.head_commit.message == 'chore: export feature source for local verification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Create source archive
+        run: tar --exclude=.git --exclude=.github/workflows/export-feature-source.yml -czf /tmp/agent-harness-os-source.tar.gz .
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: agent-harness-os-source
+          path: /tmp/agent-harness-os-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
