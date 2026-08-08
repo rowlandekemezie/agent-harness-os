@@ -1,21 +1,22 @@
 name: Apply verified Codex worker patch
 
 on:
-  push:
+  pull_request:
     branches:
-      - feature/codex-subscription-worker-v2
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.event.head_commit.message == 'chore: apply verified codex worker patch'
+    if: github.head_ref == 'feature/codex-subscription-worker-v2'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: feature/codex-subscription-worker-v2
           fetch-depth: 0
           persist-credentials: true
       - name: Reconstruct and verify patch
@@ -54,5 +55,3 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'feat: add ChatGPT-authenticated Codex worker adapter'
           git push origin HEAD:feature/codex-subscription-worker-v2
-
-# contents-api trigger
