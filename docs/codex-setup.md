@@ -9,17 +9,35 @@ npm link
 agent-harness-os doctor
 ```
 
-## Configure workers
+## Zero-additional-OpenAI-API-bill worker path
 
-Export provider credentials and `AGENT_OS_WORKERS_JSON` in the shell that starts Codex. A complete registry example is in `examples/workers.json`.
+Authenticate the local Codex CLI with ChatGPT, then register it as a worker:
 
 ```bash
-export OPENAI_API_KEY='...'
-export ANTHROPIC_API_KEY='...'
-export AGENT_OS_WORKERS_JSON="$(cat examples/workers.json)"
+codex login
+codex login status
+
+export AGENT_OS_WORKERS_JSON='[
+  {
+    "id": "codex-subscription",
+    "adapter": "codex",
+    "capabilities": ["research", "implementation", "testing", "review", "tool-calling", "long-context"],
+    "priority": 100,
+    "costTier": "low"
+  }
+]'
+export AGENT_OS_DEFAULT_WORKER='codex-subscription'
 ```
 
-The example file contains placeholder model IDs; replace or remove workers before use.
+`authMode` defaults to `chatgpt`. Agent Harness OS runs `codex login status` before the first delegated turn and refuses API-key-authenticated Codex sessions by default. Set `authMode: "any"` only when API-key-backed Codex usage is intentionally acceptable.
+
+The nested Codex process runs with `codex exec`, `--ephemeral`, a read-only scratch workspace, no approvals, and user configuration/rules disabled. It receives the bounded conversation and Agent OS tool schemas. It does not receive the target repository as its working directory. Agent OS remains the component that reads or writes repository files.
+
+Each provider turn currently starts a fresh `codex exec` process and replays the bounded conversation. That prioritizes isolation and compatibility over latency. A persistent Codex app-server transport can be added later without changing the worker contract.
+
+## Optional external workers
+
+External providers can be added as fallbacks or specialist workers. Export their credentials and include them in `AGENT_OS_WORKERS_JSON`. A complete registry example is in `examples/workers.json`.
 
 ## Generate MCP configuration
 
@@ -29,7 +47,7 @@ agent-harness-os codex-config
 
 Add the generated block to Codex configuration. The server is named `agent_os`.
 
-Run this command with `AGENT_OS_WORKERS_JSON` set. The generated `env_vars` list includes common provider credentials and every custom `apiKeyEnv` and `headerEnv` name declared by the loaded registry. Regenerate the block whenever those names change.
+Run this command with `AGENT_OS_WORKERS_JSON` set. The generated `env_vars` list includes Codex auth-location variables plus every custom `apiKeyEnv` and `headerEnv` name declared by the loaded registry. The Codex worker subprocess deliberately strips `OPENAI_API_KEY`, `OPENAI_ORG_ID`, and `OPENAI_PROJECT_ID`; it relies on saved Codex CLI authentication instead.
 
 ## Approval model
 
@@ -42,7 +60,7 @@ Recommended approvals:
 - `delegate_to_worker`: prompt
 - `apply_worker_patch`: prompt
 
-Delegation is non-destructive to the caller's checkout but sends bounded repository context to a selected external worker. Patch application modifies the checkout.
+Delegation is non-destructive to the caller's checkout. A Codex worker consumes the local Codex account allowance; external workers send bounded repository context to their configured provider. Patch application modifies the checkout.
 
 ## Project instructions
 

@@ -36,6 +36,33 @@
 
 ## Adapters
 
+### `codex`
+
+Uses the locally installed Codex CLI as a worker by invoking non-interactive `codex exec`. It reuses saved Codex authentication instead of accepting a provider API key.
+
+Minimal worker definition:
+
+```json
+{
+  "id": "codex-subscription",
+  "adapter": "codex",
+  "capabilities": ["research", "implementation", "testing", "review", "tool-calling", "long-context"],
+  "priority": 100,
+  "costTier": "low"
+}
+```
+
+Codex-specific fields:
+
+- `command`: executable path or command name; defaults to `codex`
+- `authMode`: `chatgpt` or `any`; defaults to `chatgpt`
+- `model`: optional CLI model override; omitted by default so Codex chooses its supported default
+- `timeoutMs` and `maxResponseBytes`: execution and structured-response bounds
+
+Provider endpoint, API-key, header, pricing, retry, temperature, and output-token fields are rejected for this adapter. `authMode: "chatgpt"` fails closed unless `codex login status` reports ChatGPT authentication. `authMode: "any"` explicitly permits whatever saved Codex auth is active, including API-key auth that may be billed separately.
+
+Each turn uses an ephemeral read-only scratch workspace with user config and rules disabled. The Codex process is not pointed at the repository. It returns either a bounded tool call or final content, and Agent Harness OS executes repository tools through the existing path and patch policies.
+
 ### `openai-compatible`
 
 Uses `POST /chat/completions`, OpenAI-style messages, function tools, and tool-call results. This adapter covers providers that implement that contract, including OpenAI, many Qwen hosts, Gemini's compatibility endpoint, OpenRouter, and Ollama's compatibility endpoint.
@@ -65,7 +92,7 @@ Uses the native Anthropic Messages API. It translates internal function definiti
 - Non-loopback HTTP endpoints are rejected unless `allowInsecureHttp` is explicitly true.
 - Registry inspection never returns credentials and redacts query values.
 
-When using Codex, run `agent-harness-os codex-config` with the registry loaded. The generated MCP block includes every custom `apiKeyEnv` and `headerEnv` variable name declared by that registry. Regenerate it whenever secret-variable names change.
+When using Codex, run `agent-harness-os codex-config` with the registry loaded. The generated MCP block includes Codex auth-location variables plus every custom `apiKeyEnv` and `headerEnv` variable name declared by that registry. Regenerate it whenever those names change.
 
 ## Capabilities
 
@@ -88,7 +115,8 @@ The current coding runtime requires `tool-calling`. A task's mode is automatical
 - `priority`: zero to one hundred; higher is preferred for quality-oriented routing
 - `costTier`: `low`, `medium`, or `high`
 - `latencyTier`: `fast`, `standard`, or `slow`
-- `pricing`: optional input/output USD per million tokens for run-level cost estimates
+- `pricing`: optional input/output USD per million tokens for API-worker run-level cost estimates
+- for `codex`, `costTier` is an operator routing preference for incremental spend; the harness does not meter ChatGPT plan usage
 
 Pricing and tiers are configuration, not live market data. Update them when provider terms change.
 

@@ -300,7 +300,8 @@ function isProviderMetadata(value: unknown): boolean {
 		isOptionalString(value['workerId']) &&
 		(value['adapter'] === undefined ||
 			value['adapter'] === 'openai-compatible' ||
-			value['adapter'] === 'anthropic') &&
+			value['adapter'] === 'anthropic' ||
+			value['adapter'] === 'codex') &&
 		isOptionalNonNegativeInteger(value['inputTokens']) &&
 		isOptionalNonNegativeInteger(value['outputTokens']) &&
 		isOptionalNonNegativeInteger(value['totalTokens']) &&

@@ -18,6 +18,7 @@
 - Malicious text, source code, tests, package scripts, and generated tool arguments in a repository
 - Accidental over-broad task contracts
 - A provider returning malformed, oversized, repeated, redirected, or hostile tool calls
+- A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
 - Incorrect or malicious worker capability, cost, latency, priority, endpoint, or pricing configuration
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
@@ -103,6 +104,17 @@
 - `git apply --check` before application
 - No automatic commit, push, merge, or deployment
 
+### Codex CLI worker
+
+- ChatGPT authentication is the default required auth mode; API-key-backed Codex use requires explicit `authMode: any` opt-in
+- Codex login state is checked before the first delegated turn
+- Nested Codex runs in a newly created scratch directory, not the repository worktree
+- `codex exec` is invoked ephemerally with a read-only sandbox, approvals disabled, user config/rules disabled, and structured output validation
+- Repository context is supplied only through the bounded conversation and Agent OS tool definitions; repository file authority remains in `WorkerToolExecutor`
+- `OPENAI_API_KEY`, `OPENAI_ORG_ID`, and `OPENAI_PROJECT_ID` are removed from the Codex subprocess environment
+- Only auth-location, platform, proxy, and TLS variables needed by the Codex CLI are forwarded
+- Codex subprocess output, response file size, execution time, cancellation, tool-call count, and tool names are bounded and validated
+
 ### Provider and protocol
 
 - HTTPS required for non-loopback provider endpoints unless plaintext transport is explicitly enabled
@@ -122,7 +134,9 @@
 - Docker access is effectively privileged on many hosts. A compromised Docker daemon or container-runtime escape is outside this project's protection boundary.
 - Unsandboxed local validation may leave descendant processes and can access the host according to the invoking account. It is outside the recommended untrusted-repository path.
 - A malicious or replaced `git`, `docker`, `node`, operating-system runtime, or host account can bypass controls.
-- Provider-side retention, training, residency, and logging are governed by the selected provider, not this harness.
+- Provider-side retention, training, residency, and logging are governed by the selected provider, not this harness. ChatGPT-authenticated Codex workers are governed by the active ChatGPT/Codex account terms and limits.
+- The nested Codex CLI is a local executable with access to its own authentication material. Agent OS isolates it from the repository and strips API environment credentials, but a compromised Codex binary or host account is outside the protection boundary.
+- A subscription-backed Codex worker consumes Codex plan allowance and may be throttled or unavailable when plan limits are reached; the harness does not treat subscription allowance as unlimited capacity.
 - Provider requests necessarily leave the validation network boundary. `allowNetwork: false` applies to validation commands, not the configured model endpoint.
 - A user can intentionally supply a broad allowlist, enable plaintext provider transport, enable local execution, permit validation networking, disable image pinning, or configure a dangerous image.
 - Patches may contain proprietary source code or inline secrets from otherwise allowed paths. Secure the host account and artifact volume, and configure retention.

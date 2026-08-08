@@ -1,5 +1,20 @@
 [
   {
+    "id": "codex-subscription",
+    "adapter": "codex",
+    "capabilities": [
+      "research",
+      "implementation",
+      "testing",
+      "review",
+      "tool-calling",
+      "long-context"
+    ],
+    "priority": 100,
+    "costTier": "low",
+    "latencyTier": "standard"
+  },
+  {
     "id": "openai-quality",
     "adapter": "openai-compatible",
     "model": "replace-with-openai-model-id",

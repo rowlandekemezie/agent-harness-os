@@ -8,6 +8,7 @@ import type {
 import { HarnessError } from '../lib/errors.js'
 import { Logger } from '../lib/logger.js'
 import { AnthropicProvider } from './anthropic.js'
+import { CodexCliProvider } from './codex-cli.js'
 import { OpenAiCompatibleProvider } from './openai-compatible.js'
 import {
 	describeWorker,
@@ -68,6 +69,8 @@ export class WorkerRegistry {
 				return new OpenAiCompatibleProvider(worker, logger)
 			case 'anthropic':
 				return new AnthropicProvider(worker, logger)
+			case 'codex':
+				return new CodexCliProvider(worker, logger)
 			default:
 				throw new HarnessError(
 					'UNSUPPORTED_WORKER_ADAPTER',

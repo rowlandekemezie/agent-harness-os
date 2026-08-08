@@ -2,7 +2,7 @@ export type WorkerMode = 'research' | 'implementation' | 'testing' | 'review'
 
 export type ExecutionBackend = 'local' | 'docker'
 
-export type WorkerAdapter = 'openai-compatible' | 'anthropic'
+export type WorkerAdapter = 'openai-compatible' | 'anthropic' | 'codex'
 
 export type WorkerCapability =
 	| WorkerMode
