@@ -121,6 +121,17 @@ test('delegates a provider turn through ephemeral read-only Codex exec', async f
 		)
 		assert.equal(invocation.args.includes('--ignore-user-config'), true)
 		assert.equal(invocation.args.includes('--ignore-rules'), true)
+		for (const feature of [
+			'shell_tool',
+			'unified_exec',
+			'shell_snapshot',
+			'code_mode',
+			'code_mode_only',
+		]) {
+			const featureIndex = invocation.args.indexOf(feature)
+			assert.ok(featureIndex > 0)
+			assert.equal(invocation.args[featureIndex - 1], '--disable')
+		}
 		assert.equal(invocation.args.includes('--skip-git-repo-check'), true)
 		assert.equal(invocation.args.includes('--output-schema'), true)
 		assert.equal(invocation.args.includes('--output-last-message'), true)
