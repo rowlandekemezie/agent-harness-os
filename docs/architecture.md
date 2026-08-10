@@ -8,7 +8,7 @@ Codex
         |
         v
 MCP tools
-  health, registry inspection, route preview, delegation, report, apply
+  health, registry inspection, route preview, delegation, history, report, apply
         |
         v
 Worker registry and deterministic router
@@ -74,13 +74,34 @@ Each attempt receives:
 
 The kernel captures the candidate patch before deterministic validation. It persists the patch, transcript, selected worker, route, prior attempts, provider usage, and validation evidence.
 
+### Task journal
+
+`src/artifacts/task-journal.ts` owns task identity, event storage, bounded
+queries, and report-to-history linkage. `src/artifacts/task-event-model.ts` owns
+exact schemas and the replay state machine. A task spans all fallback attempts;
+each attempt keeps its own run ID and report.
+
+Events are the history seam, while run reports remain patch authority. Event
+filenames include their content digest and each event links to its predecessor.
+The journal projects summaries from the validated chain instead of trusting a
+mutable summary file.
+
+### Secure artifact I/O
+
+`src/artifacts/secure-io.ts` verifies handle identity and containment for reads.
+For writes, a sanitized Node helper starts in the verified destination
+directory inode, rechecks containment around mutation, stages and syncs content,
+publishes it with a no-replace hard link, and syncs the directory. Task
+directories use exclusive creation plus a final readiness marker. Both run
+artifacts and task events use this module.
+
 ### Fallback
 
 Fallback occurs outside an attempt. The repository lease remains held, while the failed worktree is cleaned and a new worktree is created for the next candidate. This prevents one model's partial edits or Git state from contaminating another model's attempt.
 
 ### Artifact and apply boundary
 
-Every attempt has its own immutable audit record. Only a completed run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, and patch deterministically.
+Every attempt has its own immutable audit record. Only a completed run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, and patch deterministically. History events are recorded only after report-to-task linkage succeeds, but history failure cannot grant or revoke patch authority.
 
 ## Why this remains one package
 

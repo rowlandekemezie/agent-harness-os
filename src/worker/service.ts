@@ -4,6 +4,9 @@ import type {
 	CommandResult,
 	ProviderUsage,
 	RunStatus,
+	TaskListQuery,
+	TaskPage,
+	TaskTimeline,
 	WorkerAttemptSummary,
 	WorkerProvider,
 	WorkerRunReport,
@@ -17,6 +20,7 @@ import {
 	resolveArtifactRoot,
 } from '../config.js'
 import { ArtifactStore, sha256 } from '../artifacts/store.js'
+import { TaskJournal } from '../artifacts/task-journal.js'
 import {
 	applyPatch,
 	assertSafeRepositoryConfiguration,
@@ -46,6 +50,24 @@ export type ApplyPatchResult = {
 	repositoryPath: string
 	changedFiles: Array<string>
 	applied: true
+	historyRecorded: boolean
+	warnings: Array<string>
+}
+
+type PatchHistoryContext = {
+	taskId: string | null
+	recording: boolean
+	warnings: Array<string>
+}
+
+type AttemptContext = {
+	route: WorkerRoute
+	attemptNumber: number
+	previousAttempts: Array<WorkerAttemptSummary>
+	deadlineMs: number
+	artifactRoot: string
+	taskId: string
+	externalSignal: AbortSignal | undefined
 }
 
 export class WorkerService {
@@ -53,6 +75,7 @@ export class WorkerService {
 	private readonly logger: Logger
 	private readonly worktreeManager: WorktreeManager
 	private readonly artifactStore: ArtifactStore
+	private readonly taskJournal: TaskJournal
 	private readonly workerRegistry: WorkerRegistry
 	private readonly semaphore: Semaphore
 	private readonly activeRepositories = new Set<string>()
@@ -62,12 +85,12 @@ export class WorkerService {
 		this.logger = new Logger('worker-service', config.logLevel)
 		this.worktreeManager = new WorktreeManager(this.logger)
 		const workerSecrets = getWorkerSecrets(config)
-		this.artifactStore = new ArtifactStore(
-			new Redactor(
-				workerSecrets.namedSecrets,
-				workerSecrets.additionalSecrets,
-			),
+		const redactor = new Redactor(
+			workerSecrets.namedSecrets,
+			workerSecrets.additionalSecrets,
 		)
+		this.artifactStore = new ArtifactStore(redactor)
+		this.taskJournal = new TaskJournal(redactor)
 		this.workerRegistry = new WorkerRegistry(config, this.logger)
 		this.semaphore = new Semaphore(config.limits.maxConcurrency)
 	}
@@ -91,6 +114,29 @@ export class WorkerService {
 			this.activeRepositories.add(repositoryPath)
 
 			try {
+				const baseCommit = await resolveCommit(repositoryPath, task.baseRef)
+				const resolvedTask = {
+					...task,
+					repositoryPath,
+					baseRef: baseCommit,
+				}
+				const taskSummary = await this.taskJournal.create({
+					artifactRoot,
+					objective: resolvedTask.objective,
+					mode: resolvedTask.mode,
+					repositoryPath,
+					baseCommit,
+				})
+				await this.taskJournal.append(artifactRoot, taskSummary.taskId, {
+					type: 'RouteSelected',
+					data: {
+						strategy: route.strategy,
+						candidateWorkerIds: route.candidates.map(
+							candidate => candidate.worker.id,
+						),
+						maxAttempts: route.maxAttempts,
+					},
+				})
 				let lastReport: WorkerRunReport | null = null
 
 				for (let index = 0; index < route.maxAttempts; index += 1) {
@@ -105,17 +151,29 @@ export class WorkerService {
 					}
 
 					const report = await this.executeInWorktree(
-						{ ...task, repositoryPath },
+						resolvedTask,
 						candidate.worker,
-						route,
-						index + 1,
-						previousAttempts,
-						deadlineMs,
-						externalSignal,
+						{
+							route,
+							attemptNumber: index + 1,
+							previousAttempts,
+							deadlineMs,
+							artifactRoot,
+							taskId: taskSummary.taskId,
+							externalSignal,
+						},
 					)
 					lastReport = report
 
 					if (!shouldFallback(report, route, index)) {
+						await this.taskJournal.append(
+							artifactRoot,
+							taskSummary.taskId,
+							{
+								type: 'TaskCompleted',
+								data: { runId: report.runId, status: report.status },
+							},
+						)
 						return report
 					}
 
@@ -128,8 +186,24 @@ export class WorkerService {
 				}
 
 				if (lastReport !== null) {
+					await this.taskJournal.append(
+						artifactRoot,
+						taskSummary.taskId,
+						{
+							type: 'TaskCompleted',
+							data: {
+								runId: lastReport.runId,
+								status: lastReport.status,
+							},
+						},
+					)
 					return lastReport
 				}
+
+				await this.taskJournal.append(artifactRoot, taskSummary.taskId, {
+					type: 'TaskCompleted',
+					data: { runId: null, status: 'timed_out' },
+				})
 
 				throw new HarnessError(
 					'WORKER_ROUTE_TIMED_OUT',
@@ -147,6 +221,28 @@ export class WorkerService {
 		return await this.artifactStore.loadReport(
 			await this.getArtifactRoot(repositoryRoot),
 			runId,
+		)
+	}
+
+	async getTaskTimeline(
+		repositoryPath: string,
+		taskId: string,
+	): Promise<TaskTimeline> {
+		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+		return await this.taskJournal.timeline(
+			await this.getArtifactRoot(repositoryRoot),
+			taskId,
+		)
+	}
+
+	async listTasks(
+		repositoryPath: string,
+		query: TaskListQuery,
+	): Promise<TaskPage> {
+		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+		return await this.taskJournal.list(
+			await this.getArtifactRoot(repositoryRoot),
+			query,
 		)
 	}
 
@@ -173,7 +269,34 @@ export class WorkerService {
 	): Promise<ApplyPatchResult> {
 		const artifactRoot = await this.getArtifactRoot(repositoryRoot)
 		const report = await this.artifactStore.loadReport(artifactRoot, runId)
+		const history = await this.preparePatchHistory(artifactRoot, report)
 
+		try {
+			return await this.applyReport(
+				repositoryRoot,
+				runId,
+				artifactRoot,
+				report,
+				history,
+			)
+		} catch (error) {
+			await this.recordPatchRejection(
+				artifactRoot,
+				history,
+				runId,
+				getFailureCode(error),
+			)
+			throw error
+		}
+	}
+
+	private async applyReport(
+		repositoryRoot: string,
+		runId: string,
+		artifactRoot: string,
+		report: WorkerRunReport,
+		history: PatchHistoryContext,
+	): Promise<ApplyPatchResult> {
 		if (path.resolve(report.repositoryPath) !== repositoryRoot) {
 			throw new HarnessError(
 				'RUN_REPOSITORY_MISMATCH',
@@ -252,25 +375,126 @@ export class WorkerService {
 			)
 		}
 
+		if (history.recording && history.taskId !== null) {
+			try {
+				await this.taskJournal.append(artifactRoot, history.taskId, {
+					type: 'PatchApproved',
+					data: { runId, source: 'mcp_call' },
+				})
+			} catch (error) {
+				history.recording = false
+				history.warnings.push(historyWarning('PatchApproved', error))
+			}
+		}
+
 		await applyPatch(repositoryRoot, patchContents)
 		this.logger.info('Applied worker patch', { runId, repositoryRoot })
+		let historyRecorded = false
+
+		if (history.recording && history.taskId !== null) {
+			try {
+				await this.taskJournal.append(artifactRoot, history.taskId, {
+					type: 'PatchApplied',
+					data: {
+						runId,
+						changedFileCount: report.changedFiles.length,
+					},
+				})
+				historyRecorded = true
+			} catch (error) {
+				history.warnings.push(historyWarning('PatchApplied', error))
+			}
+		}
 
 		return {
 			runId,
 			repositoryPath: repositoryRoot,
 			changedFiles: report.changedFiles,
 			applied: true,
+			historyRecorded,
+			warnings: history.warnings,
+		}
+	}
+
+	private async preparePatchHistory(
+		artifactRoot: string,
+		report: WorkerRunReport,
+	): Promise<PatchHistoryContext> {
+		const taskId = report.schemaVersion === 2 ? report.taskId ?? null : null
+		const context: PatchHistoryContext = {
+			taskId,
+			recording: false,
+			warnings: [],
+		}
+		const workerId = report.provider.workerId
+		if (
+			taskId === null ||
+			report.status !== 'completed' ||
+			report.patchSha256 === null ||
+			workerId === undefined
+		) {
+			return context
+		}
+
+		try {
+			const linked = await this.taskJournal.isRunLinked({
+				artifactRoot,
+				taskId,
+				runId: report.runId,
+				repositoryPath: report.repositoryPath,
+				baseCommit: report.baseRef,
+				status: report.status,
+				patchSha256: report.patchSha256,
+				changedFileCount: report.changedFiles.length,
+				workerId,
+			})
+			if (!linked) {
+				context.warnings.push(
+					'Task history does not match the authoritative run report; patch lifecycle events were not recorded.',
+				)
+				return context
+			}
+
+			await this.taskJournal.append(artifactRoot, taskId, {
+				type: 'PatchApplicationRequested',
+				data: { runId: report.runId },
+			})
+			context.recording = true
+		} catch (error) {
+			context.warnings.push(
+				historyWarning('PatchApplicationRequested', error),
+			)
+		}
+		return context
+	}
+
+	private async recordPatchRejection(
+		artifactRoot: string,
+		history: PatchHistoryContext,
+		runId: string,
+		failureCode: string,
+	): Promise<void> {
+		if (!history.recording || history.taskId === null) {
+			return
+		}
+
+		try {
+			await this.taskJournal.append(artifactRoot, history.taskId, {
+				type: 'PatchApplicationRejected',
+				data: { runId, failureCode },
+			})
+		} catch (error) {
+			this.logger.warn(
+				'Patch application failed and rejection history could not be recorded',
+				{ runId, cause: getErrorMessage(error) },
+			)
 		}
 	}
 
 	private async executeInWorktree(
 		task: WorkerTask,
 		worker: WorkerConfig,
-		route: WorkerRoute,
-		attemptNumber: number,
-		previousAttempts: Array<WorkerAttemptSummary>,
-		deadlineMs: number,
-		externalSignal?: AbortSignal,
+		context: AttemptContext,
 	): Promise<WorkerRunReport> {
 		const startedAtMs = Date.now()
 		const startedAt = new Date(startedAtMs).toISOString()
@@ -278,236 +502,320 @@ export class WorkerService {
 			task.repositoryPath,
 			task.baseRef,
 		)
-		const commandResults: Array<CommandResult> = []
-		const policyViolations: Array<string> = []
-		const warnings: Array<string> = []
-		const timeoutController = new AbortController()
-		const signal = externalSignal === undefined
-			? timeoutController.signal
-			: AbortSignal.any([externalSignal, timeoutController.signal])
-		const timeout = setTimeout(
-			() => timeoutController.abort(),
-			Math.max(1, deadlineMs - Date.now()),
-		)
-		const sandboxHome = path.join(worktree.parentPath, 'home')
-		let provider: WorkerProvider
-		let commandRunner: ReturnType<typeof createCommandRunner>
-		let toolExecutor: WorkerToolExecutor
-
 		try {
-			provider = this.workerRegistry.createProvider(worker)
-			commandRunner = createCommandRunner(this.config)
-			toolExecutor = new WorkerToolExecutor({
-				task,
-				worktreePath: worktree.path,
-				config: this.config,
-				baseCommit: worktree.baseCommit,
-				policyViolations,
-				signal,
+			await this.taskJournal.append(context.artifactRoot, context.taskId, {
+				type: 'WorkerStarted',
+				data: {
+					runId: worktree.runId,
+					workerId: worker.id,
+					attemptNumber: context.attemptNumber,
+				},
 			})
 		} catch (error) {
-			clearTimeout(timeout)
 			await worktree.cleanup()
 			throw error
 		}
-		let workerSummary = ''
-		let transcript = ''
-		let status: RunStatus = 'completed'
-		let failureCode: string | null = null
-		let patch = ''
-		let changedFiles: Array<string> = []
 		let preserveWorktree = false
-
-		if (
-			this.config.execution.backend === 'local' &&
-			this.config.execution.allowUnsandboxedLocal &&
-			task.requiredCommands.length > 0
-		) {
-			warnings.push(
-				'Commands ran locally without OS-level isolation. Use the Docker backend for untrusted repositories.',
-			)
-		}
+		let timeout: ReturnType<typeof setTimeout> | null = null
 
 		try {
-			const loopResult = await runAgentLoop(
-				task,
-				provider,
-				toolExecutor,
+			const commandResults: Array<CommandResult> = []
+			const policyViolations: Array<string> = []
+			const warnings: Array<string> = []
+			const timeoutController = new AbortController()
+			const signal = context.externalSignal === undefined
+				? timeoutController.signal
+				: AbortSignal.any([context.externalSignal, timeoutController.signal])
+			timeout = setTimeout(
+				() => timeoutController.abort(),
+				Math.max(1, context.deadlineMs - Date.now()),
+			)
+			const sandboxHome = path.join(worktree.parentPath, 'home')
+			let provider: WorkerProvider
+			let commandRunner: ReturnType<typeof createCommandRunner>
+			let toolExecutor: WorkerToolExecutor
+
+			try {
+				provider = this.workerRegistry.createProvider(worker)
+				commandRunner = createCommandRunner(this.config)
+				toolExecutor = new WorkerToolExecutor({
+					task,
+					worktreePath: worktree.path,
+					config: this.config,
+					baseCommit: worktree.baseCommit,
+					policyViolations,
+					signal,
+				})
+			} catch (error) {
+				clearTimeout(timeout)
+				throw error
+			}
+			let workerSummary = ''
+			let transcript = ''
+			let status: RunStatus = 'completed'
+			let failureCode: string | null = null
+			let patch = ''
+			let changedFiles: Array<string> = []
+
+			if (
+				this.config.execution.backend === 'local' &&
+				this.config.execution.allowUnsandboxedLocal &&
+				task.requiredCommands.length > 0
+			) {
+				warnings.push(
+					'Commands ran locally without OS-level isolation. Use the Docker backend for untrusted repositories.',
+				)
+			}
+
+			try {
+				const loopResult = await runAgentLoop(
+					task,
+					provider,
+					toolExecutor,
 					{
 						maxTotalToolCalls: this.config.limits.maxTotalToolCalls,
 						maxContextBytes: this.config.limits.maxProviderContextBytes,
 						maxAssistantContentBytes:
 							this.config.limits.maxToolOutputBytes,
 					},
-				signal,
-			)
-			workerSummary = loopResult.finalResponse
-			transcript = loopResult.transcript
-		} catch (error) {
-			workerSummary = getErrorMessage(error)
-			transcript = `${transcript}\n\nerror: ${workerSummary}`.trim()
-			failureCode = getFailureCode(error)
-			status = classifyRunError(
-				error,
-				externalSignal,
-				timeoutController.signal,
-			)
-		}
-
-		try {
-			const candidate = await this.collectPatchCandidate(
-				task,
-				worktree.path,
-				worktree.baseCommit,
-			)
-			changedFiles = candidate.changedFiles
-			patch = candidate.patch
-			policyViolations.push(...candidate.policyViolations)
-		} catch (error) {
-			status = 'failed'
-			failureCode = failureCode ?? getFailureCode(error)
-			warnings.push(`Patch collection failed: ${getErrorMessage(error)}`)
-		}
-
-		if (policyViolations.length > 0) {
-			status = 'policy_violation'
-			failureCode = failureCode ?? 'WORKER_POLICY_VIOLATION'
-		}
-
-		if (status === 'completed') {
-			try {
-				await this.runRequiredCommands(
-					task,
-					commandRunner,
-					commandResults,
-					worktree.path,
-					sandboxHome,
 					signal,
+					async observation => {
+						try {
+							await this.taskJournal.append(
+								context.artifactRoot,
+								context.taskId,
+								{
+									type: 'ToolCalled',
+									data: { runId: worktree.runId, ...observation },
+								},
+							)
+						} catch (error) {
+							throw new HarnessError(
+								'TASK_HISTORY_RECORDING_FAILED',
+								'Tool-call history could not be recorded',
+								{ cause: getErrorMessage(error) },
+							)
+						}
+					},
 				)
-
-				if (externalSignal?.aborted === true) {
-					status = 'cancelled'
-				} else if (timeoutController.signal.aborted) {
-					status = 'timed_out'
-				}
+				workerSummary = loopResult.finalResponse
+				transcript = loopResult.transcript
 			} catch (error) {
-				failureCode = failureCode ?? getFailureCode(error)
+				if (isTaskHistoryError(error)) {
+					throw error
+				}
+				workerSummary = getErrorMessage(error)
+				transcript = `${transcript}\n\nerror: ${workerSummary}`.trim()
+				failureCode = getFailureCode(error)
 				status = classifyRunError(
 					error,
-					externalSignal,
+					context.externalSignal,
 					timeoutController.signal,
 				)
-				if (
-					error instanceof HarnessError &&
-					error.code === 'DOCKER_CONTAINER_CLEANUP_FAILED'
-				) {
-					preserveWorktree = true
-					patch = ''
-					warnings.push(
-						`The isolated worktree was preserved at ${worktree.path} because Docker cleanup could not be confirmed. Remove the named container, then run git worktree prune.`,
-					)
-				}
-				warnings.push(`Validation command failed: ${getErrorMessage(error)}`)
 			}
 
-			if (task.requiredCommands.length > 0 && !preserveWorktree) {
+			const completedUsage = getProviderUsage(provider)
+			await this.taskJournal.append(context.artifactRoot, context.taskId, {
+				type: 'WorkerCompleted',
+				data: {
+					runId: worktree.runId,
+					outcome: status === 'completed' ? 'succeeded' : 'failed',
+					failureCode,
+					requestCount: completedUsage.requestCount,
+				},
+			})
+
+			try {
+				const candidate = await this.collectPatchCandidate(
+					task,
+					worktree.path,
+					worktree.baseCommit,
+				)
+				changedFiles = candidate.changedFiles
+				patch = candidate.patch
+				policyViolations.push(...candidate.policyViolations)
+				if (patch !== '') {
+					await this.taskJournal.append(context.artifactRoot, context.taskId, {
+						type: 'PatchProduced',
+						data: {
+							runId: worktree.runId,
+							patchSha256: sha256(patch),
+							patchBytes: Buffer.byteLength(patch, 'utf8'),
+							changedFileCount: changedFiles.length,
+						},
+					})
+				}
+			} catch (error) {
+				status = 'failed'
+				failureCode = failureCode ?? getFailureCode(error)
+				warnings.push(`Patch collection failed: ${getErrorMessage(error)}`)
+			}
+
+			if (policyViolations.length > 0) {
+				status = 'policy_violation'
+				failureCode = failureCode ?? 'WORKER_POLICY_VIOLATION'
+			}
+
+			if (status === 'completed') {
 				try {
-					await this.assertValidationPreservedCandidate(
+					await this.runRequiredCommands(
 						task,
+						commandRunner,
+						commandResults,
 						worktree.path,
-						worktree.baseCommit,
-						changedFiles,
-						patch,
+						sandboxHome,
+						signal,
 					)
+
+					if (context.externalSignal?.aborted === true) {
+						status = 'cancelled'
+					} else if (timeoutController.signal.aborted) {
+						status = 'timed_out'
+					}
 				} catch (error) {
-					status = 'failed'
 					failureCode = failureCode ?? getFailureCode(error)
-					warnings.push(
-						`Validation integrity check failed: ${getErrorMessage(error)}`,
+					status = classifyRunError(
+						error,
+						context.externalSignal,
+						timeoutController.signal,
 					)
+					if (
+						error instanceof HarnessError &&
+						error.code === 'DOCKER_CONTAINER_CLEANUP_FAILED'
+					) {
+						preserveWorktree = true
+						patch = ''
+						warnings.push(
+							`The isolated worktree was preserved at ${worktree.path} because Docker cleanup could not be confirmed. Remove the named container, then run git worktree prune.`,
+						)
+					}
+					warnings.push(`Validation command failed: ${getErrorMessage(error)}`)
+				}
+
+				if (task.requiredCommands.length > 0 && !preserveWorktree) {
+					try {
+						await this.assertValidationPreservedCandidate(
+							task,
+							worktree.path,
+							worktree.baseCommit,
+							changedFiles,
+							patch,
+						)
+					} catch (error) {
+						status = 'failed'
+						failureCode = failureCode ?? getFailureCode(error)
+						warnings.push(
+							`Validation integrity check failed: ${getErrorMessage(error)}`,
+						)
+					}
 				}
 			}
-		}
 
-		clearTimeout(timeout)
+			clearTimeout(timeout)
+			timeout = null
 
-		if (
-			status === 'completed' &&
-			commandResults.some(result => result.exitCode !== 0 || result.timedOut)
-		) {
-			status = 'failed'
-			failureCode = failureCode ?? 'VALIDATION_COMMAND_FAILED'
-		}
+			if (
+				status === 'completed' &&
+				commandResults.some(result => result.exitCode !== 0 || result.timedOut)
+			) {
+				status = 'failed'
+				failureCode = failureCode ?? 'VALIDATION_COMMAND_FAILED'
+			}
 
-		if (
-			task.mode === 'implementation' &&
-			changedFiles.length === 0 &&
-			status === 'completed'
-		) {
-			status = 'blocked'
-			failureCode = failureCode ?? 'WORKER_NO_CHANGES'
-			warnings.push('Implementation task completed without producing file changes.')
-		}
+			await this.taskJournal.append(context.artifactRoot, context.taskId, {
+				type: 'ValidationCompleted',
+				data: {
+					runId: worktree.runId,
+					outcome: task.requiredCommands.length === 0
+						? 'skipped'
+						: status === 'completed'
+							? 'passed'
+							: 'failed',
+					commandCount: commandResults.length,
+				},
+			})
 
-		const completedAtMs = Date.now()
-		const usage = getProviderUsage(provider)
-		const initialReport: WorkerRunReport = {
-			schemaVersion: 1,
-			runId: worktree.runId,
-			status,
-			failureCode,
-			objective: task.objective,
-			mode: task.mode,
-			repositoryPath: task.repositoryPath,
-			baseRef: worktree.baseCommit,
-			startedAt,
-			completedAt: new Date(completedAtMs).toISOString(),
-			durationMs: completedAtMs - startedAtMs,
-			workerSummary,
-			changedFiles,
-			patchPath: null,
-			patchSha256: null,
-			reportPath: '',
-			commandResults,
-			acceptanceCriteria: buildAcceptanceResults(
-				task.acceptanceCriteria,
-				commandResults,
+			if (
+				task.mode === 'implementation' &&
+				changedFiles.length === 0 &&
+				status === 'completed'
+			) {
+				status = 'blocked'
+				failureCode = failureCode ?? 'WORKER_NO_CHANGES'
+				warnings.push('Implementation task completed without producing file changes.')
+			}
+
+			const completedAtMs = Date.now()
+			const usage = getProviderUsage(provider)
+			const initialReport: WorkerRunReport = {
+				schemaVersion: 2,
+				taskId: context.taskId,
+				runId: worktree.runId,
 				status,
-			),
-			policyViolations,
-			warnings,
-			provider: {
-				workerId: worker.id,
-				adapter: worker.adapter,
-				baseUrl: worker.endpointUrl ?? worker.baseUrl,
-				model: worker.model,
-				requestCount: usage.requestCount,
-				inputTokens: usage.inputTokens,
-				outputTokens: usage.outputTokens,
-				totalTokens: usage.totalTokens,
-				totalLatencyMs: usage.totalLatencyMs,
-				estimatedCostUsd: usage.estimatedCostUsd,
-			},
-			routing: {
-				strategy: route.strategy,
-				requiredCapabilities: route.requiredCapabilities,
-				candidateWorkerIds: route.candidates.map(candidate => candidate.worker.id),
-				selectedWorkerId: worker.id,
-				attemptNumber,
-				maxAttempts: route.maxAttempts,
-				fallbackEnabled: route.fallbackEnabled,
-				previousAttempts: [...previousAttempts],
-			},
-		}
+				failureCode,
+				objective: task.objective,
+				mode: task.mode,
+				repositoryPath: task.repositoryPath,
+				baseRef: worktree.baseCommit,
+				startedAt,
+				completedAt: new Date(completedAtMs).toISOString(),
+				durationMs: completedAtMs - startedAtMs,
+				workerSummary,
+				changedFiles,
+				patchPath: null,
+				patchSha256: null,
+				reportPath: '',
+				commandResults,
+				acceptanceCriteria: buildAcceptanceResults(
+					task.acceptanceCriteria,
+					commandResults,
+					status,
+				),
+				policyViolations,
+				warnings,
+				provider: {
+					workerId: worker.id,
+					adapter: worker.adapter,
+					baseUrl: worker.endpointUrl ?? worker.baseUrl,
+					model: worker.model,
+					requestCount: usage.requestCount,
+					inputTokens: usage.inputTokens,
+					outputTokens: usage.outputTokens,
+					totalTokens: usage.totalTokens,
+					totalLatencyMs: usage.totalLatencyMs,
+					estimatedCostUsd: usage.estimatedCostUsd,
+				},
+				routing: {
+					strategy: context.route.strategy,
+					requiredCapabilities: context.route.requiredCapabilities,
+					candidateWorkerIds: context.route.candidates.map(candidate => candidate.worker.id),
+					selectedWorkerId: worker.id,
+					attemptNumber: context.attemptNumber,
+					maxAttempts: context.route.maxAttempts,
+					fallbackEnabled: context.route.fallbackEnabled,
+					previousAttempts: [...context.previousAttempts],
+				},
+			}
 
-		try {
-			return await this.artifactStore.persist({
-				artifactRoot: await this.getArtifactRoot(task.repositoryPath),
+			const persistedReport = await this.artifactStore.persist({
+				artifactRoot: context.artifactRoot,
 				report: initialReport,
 				patch,
 				workerTranscript: transcript,
 			})
+			await this.taskJournal.append(context.artifactRoot, context.taskId, {
+				type: 'AttemptCompleted',
+				data: {
+					runId: persistedReport.runId,
+					status: persistedReport.status,
+					failureCode: persistedReport.failureCode ?? null,
+				},
+			})
+			return persistedReport
 		} finally {
+			if (timeout !== null) {
+				clearTimeout(timeout)
+			}
 			if (!preserveWorktree) {
 				await worktree.cleanup()
 			} else {
@@ -768,6 +1076,11 @@ function isPolicyCode(code: string): boolean {
 	)
 }
 
+function isTaskHistoryError(error: unknown): boolean {
+	return error instanceof HarnessError &&
+		error.code === 'TASK_HISTORY_RECORDING_FAILED'
+}
+
 function classifyRunError(
 	error: unknown,
 	externalSignal: AbortSignal | undefined,
@@ -833,6 +1146,9 @@ function getFailureCode(error: unknown): string {
 	return 'WORKER_FAILED'
 }
 
+function historyWarning(eventType: string, error: unknown): string {
+	return `Task history event ${eventType} could not be recorded: ${getErrorMessage(error)}`
+}
 
 function isPinnedDockerImage(image: string): boolean {
 	return (

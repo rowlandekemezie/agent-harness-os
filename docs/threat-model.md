@@ -97,6 +97,8 @@
 - Artifacts outside the checkout
 - Private filesystem modes
 - Exact artifact filenames, regular-file checks, hard-link rejection, size bounds, realpath containment, and symlink rejection
+- Handle-bound artifact reads and helper-confined atomic writes that verify the destination directory inode before mutation
+- Digest-named, chained task events; task summaries are projected from the validated chain
 - Patch SHA-256
 - Patch bytes passed to Git over standard input after verification, avoiding a second patch-path lookup
 - Clean caller working tree
@@ -141,6 +143,7 @@
 - Provider requests necessarily leave the validation network boundary. `allowNetwork: false` applies to validation commands, not the configured model endpoint.
 - A user can intentionally supply a broad allowlist, enable plaintext provider transport, enable local execution, permit validation networking, disable image pinning, or configure a dangerous image.
 - Patches may contain proprietary source code or inline secrets from otherwise allowed paths. Secure the host account and artifact volume, and configure retention.
+- Task-event digests detect partial or accidental mutation but are not signed or externally anchored; a compromised host account can rewrite an entire chain.
 - An external editor or process can still race the final patch application between the last precondition check and the operating-system write. Repeated checks narrow but cannot eliminate that host-level race.
 
 ## Out of scope

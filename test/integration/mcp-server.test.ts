@@ -36,6 +36,8 @@ test('speaks newline-delimited MCP JSON-RPC over stdio', async function () {
 			'route_worker',
 			'delegate_to_worker',
 			'get_worker_run',
+			'list_tasks',
+			'get_task_timeline',
 			'apply_worker_patch',
 		],
 	)
@@ -97,6 +99,8 @@ test('supports stateless MCP 2026-07-28 discovery and tool calls', async functio
 			'route_worker',
 			'delegate_to_worker',
 			'get_worker_run',
+			'list_tasks',
+			'get_task_timeline',
 			'apply_worker_patch',
 		],
 		)

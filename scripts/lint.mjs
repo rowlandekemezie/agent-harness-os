@@ -62,6 +62,12 @@ for (const jsonFile of jsonFiles) {
 	}
 }
 
+const packageManifest = JSON.parse(await readFile('package.json', 'utf8'))
+
+if (packageManifest.scripts?.build !== 'npm run clean && tsc -p tsconfig.json') {
+	errors.push('package.json: build must clean dist before compiling tests')
+}
+
 if (errors.length > 0) {
 	console.error(errors.join('\n'))
 	process.exitCode = 1

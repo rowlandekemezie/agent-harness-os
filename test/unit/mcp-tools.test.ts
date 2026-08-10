@@ -43,6 +43,17 @@ test('rejects validation commands for read-only worker modes', async function ()
 	)
 })
 
+test('rejects unsupported task-history filters before reading artifacts', async function () {
+	const tools = new McpTools(loadConfig({}))
+	const result = await tools.call('list_tasks', {
+		repositoryPath: process.cwd(),
+		status: 'unknown',
+	})
+
+	assert.equal(result.isError, true)
+	assert.equal(result.structuredContent?.['error'], 'INVALID_ARGUMENT')
+})
+
 test('exposes the worker registry and deterministic route preview without invoking providers', async function () {
 	const tools = new McpTools(loadConfig({
 		AGENT_OS_WORKERS_JSON: JSON.stringify([
@@ -77,6 +88,8 @@ test('exposes the worker registry and deterministic route preview without invoki
 			'route_worker',
 			'delegate_to_worker',
 			'get_worker_run',
+			'list_tasks',
+			'get_task_timeline',
 			'apply_worker_patch',
 		],
 	)
