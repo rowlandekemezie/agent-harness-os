@@ -6,6 +6,10 @@ All notable changes are documented here.
 
 ### Added
 
+- Durable task IDs and digest-chained execution timelines across fallback attempts
+- Bounded `list_tasks` and `get_task_timeline` MCP tools
+- Explicit patch-request, approval, rejection, and application events
+
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
 - ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
 - Fail-closed ChatGPT auth enforcement with explicit `authMode: any` opt-in for other saved Codex auth
@@ -13,6 +17,10 @@ All notable changes are documented here.
 - Codex adapter tests for auth, environment isolation, structured tool calls, and end-to-end patch application
 
 ### Security
+
+- Atomically publish private artifacts from verified directory inodes and fsync files and directories
+- Reject unknown report and event fields, invalid lifecycle order, mismatched run links, and aggregate history traversal
+- Keep run reports and deterministic patch gates authoritative when history is unavailable
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

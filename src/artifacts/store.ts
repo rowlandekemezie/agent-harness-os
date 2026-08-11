@@ -1,13 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
-import {
-	chmod,
-	lstat,
-	mkdir,
-	readFile,
-	realpath,
-	rename,
-	writeFile,
-} from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type {
 	AcceptanceCriterionResult,
@@ -19,6 +10,12 @@ import type {
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
+import {
+	createPrivateDirectory,
+	ensurePrivateDirectory,
+	readBoundedRegularFile,
+	writeExclusiveRegularFile,
+} from './secure-io.js'
 
 const maxReportBytes = 4_194_304
 const maxPatchBytes = 20_000_000
@@ -39,10 +36,11 @@ export class ArtifactStore {
 
 	async persist(input: PersistRunInput): Promise<WorkerRunReport> {
 		const runDirectory = path.join(input.artifactRoot, input.report.runId)
-		await mkdir(input.artifactRoot, { recursive: true, mode: 0o700 })
-		await chmod(input.artifactRoot, 0o700)
+		await ensurePrivateDirectory(input.artifactRoot, input.artifactRoot, {
+			recursive: true,
+		})
 		try {
-			await mkdir(runDirectory, { mode: 0o700 })
+			await createPrivateDirectory(input.artifactRoot, runDirectory)
 		} catch (error) {
 			throw new HarnessError(
 				'ARTIFACT_RUN_COLLISION',
@@ -50,7 +48,6 @@ export class ArtifactStore {
 				{ cause: error instanceof Error ? error.message : String(error) },
 			)
 		}
-		await chmod(runDirectory, 0o700)
 		const patchPath = path.join(runDirectory, 'changes.patch')
 		const reportPath = path.join(runDirectory, 'report.json')
 		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
@@ -64,13 +61,17 @@ export class ArtifactStore {
 			}
 
 			// Patches must remain byte-faithful. Access is restricted by file mode.
-			await atomicWrite(patchPath, input.patch, 0o600)
+			await writeExclusiveRegularFile(
+				input.artifactRoot,
+				patchPath,
+				input.patch,
+			)
 		}
 
-		await atomicWrite(
+		await writeExclusiveRegularFile(
+			input.artifactRoot,
 			transcriptPath,
 			this.redactor.redact(input.workerTranscript),
-			0o600,
 		)
 
 		const persistedReport: WorkerRunReport = {
@@ -80,10 +81,10 @@ export class ArtifactStore {
 			reportPath,
 		}
 
-		await atomicWrite(
+		await writeExclusiveRegularFile(
+			input.artifactRoot,
 			reportPath,
 			`${JSON.stringify(persistedReport, null, 2)}\n`,
-			0o600,
 		)
 
 		return persistedReport
@@ -99,7 +100,7 @@ export class ArtifactStore {
 		let contents: Buffer
 
 		try {
-			contents = await readSecureArtifactFile(
+			contents = await readBoundedRegularFile(
 				artifactRoot,
 				reportPath,
 				maxReportBytes,
@@ -125,7 +126,7 @@ export class ArtifactStore {
 
 		try {
 			const parsed: unknown = JSON.parse(contents.toString('utf8'))
-			return validateReport(parsed, reportPath)
+			return validateReport(parsed, reportPath, runId)
 		} catch (error) {
 			if (error instanceof HarnessError) {
 				throw error
@@ -159,7 +160,7 @@ export class ArtifactStore {
 			)
 		}
 
-		return await readSecureArtifactFile(
+		return await readBoundedRegularFile(
 			artifactRoot,
 			expectedPatchPath,
 			maxPatchBytes,
@@ -204,18 +205,53 @@ function validateRunId(runId: string): void {
 	}
 }
 
-function validateReport(value: unknown, expectedPath: string): WorkerRunReport {
+function validateReport(
+	value: unknown,
+	expectedPath: string,
+	expectedRunId: string,
+): WorkerRunReport {
 	if (!isRecord(value)) {
 		throw invalidReport()
 	}
 
 	const runId = requireReportString(value['runId'])
 	validateRunId(runId)
+	const schemaVersion = value['schemaVersion']
 	const patchPath = nullableString(value['patchPath'])
 	const patchSha256 = nullableString(value['patchSha256'])
+	const requiredKeys = [
+		'schemaVersion',
+		'runId',
+		'status',
+		'objective',
+		'mode',
+		'repositoryPath',
+		'baseRef',
+		'startedAt',
+		'completedAt',
+		'durationMs',
+		'workerSummary',
+		'changedFiles',
+		'patchPath',
+		'patchSha256',
+		'reportPath',
+		'commandResults',
+		'acceptanceCriteria',
+		'policyViolations',
+		'warnings',
+		'provider',
+	]
 
 	if (
-		value['schemaVersion'] !== 1 ||
+		runId !== expectedRunId ||
+		(schemaVersion !== 1 && schemaVersion !== 2) ||
+		!hasExpectedKeys(
+			value,
+			schemaVersion === 2 ? [...requiredKeys, 'taskId'] : requiredKeys,
+			['failureCode', 'routing'],
+		) ||
+		(schemaVersion === 1 && value['taskId'] !== undefined) ||
+		(schemaVersion === 2 && !isUuid(value['taskId'])) ||
 		!isRunStatus(value['status']) ||
 		!isWorkerMode(value['mode']) ||
 		requireReportString(value['reportPath']) !== expectedPath ||
@@ -248,6 +284,11 @@ function validateReport(value: unknown, expectedPath: string): WorkerRunReport {
 	return value as WorkerRunReport
 }
 
+function isUuid(value: unknown): value is string {
+	return typeof value === 'string' &&
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
 function isCommandResults(value: unknown): value is Array<CommandResult> {
 	return Array.isArray(value) && value.every(item => {
 		if (!isRecord(item)) {
@@ -255,6 +296,17 @@ function isCommandResults(value: unknown): value is Array<CommandResult> {
 		}
 
 		return (
+			hasExpectedKeys(item, [
+				'command',
+				'args',
+				'exitCode',
+				'signal',
+				'stdout',
+				'stderr',
+				'durationMs',
+				'timedOut',
+				'outputTruncated',
+			], []) &&
 			typeof item['command'] === 'string' &&
 			isStringArray(item['args']) &&
 			(item['exitCode'] === null || Number.isInteger(item['exitCode'])) &&
@@ -277,6 +329,7 @@ function isAcceptanceResults(
 		}
 
 		return (
+			hasExpectedKeys(item, ['criterion', 'status', 'evidence'], []) &&
 			typeof item['criterion'] === 'string' &&
 			(item['status'] === 'passed' ||
 				item['status'] === 'failed' ||
@@ -289,6 +342,19 @@ function isAcceptanceResults(
 function isProviderMetadata(value: unknown): boolean {
 	if (
 		!isRecord(value) ||
+		!hasExpectedKeys(
+			value,
+			['baseUrl', 'model', 'requestCount'],
+			[
+				'workerId',
+				'adapter',
+				'inputTokens',
+				'outputTokens',
+				'totalTokens',
+				'totalLatencyMs',
+				'estimatedCostUsd',
+			],
+		) ||
 		typeof value['baseUrl'] !== 'string' ||
 		typeof value['model'] !== 'string' ||
 		!isNonNegativeInteger(value['requestCount'])
@@ -323,6 +389,16 @@ function isOptionalRoutingMetadata(value: unknown): boolean {
 	}
 
 	return (
+		hasExpectedKeys(value, [
+			'strategy',
+			'requiredCapabilities',
+			'candidateWorkerIds',
+			'selectedWorkerId',
+			'attemptNumber',
+			'maxAttempts',
+			'fallbackEnabled',
+			'previousAttempts',
+		], []) &&
 		(value['strategy'] === 'balanced' ||
 			value['strategy'] === 'cost' ||
 			value['strategy'] === 'latency' ||
@@ -347,6 +423,11 @@ function isOptionalRoutingMetadata(value: unknown): boolean {
 function isWorkerAttempt(value: unknown): boolean {
 	return (
 		isRecord(value) &&
+		hasExpectedKeys(
+			value,
+			['runId', 'workerId', 'status', 'failureCode'],
+			[],
+		) &&
 		typeof value['runId'] === 'string' &&
 		/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value['runId']) &&
 		typeof value['workerId'] === 'string' &&
@@ -431,65 +512,17 @@ function isIsoDate(value: unknown): value is string {
 	return typeof value === 'string' && !Number.isNaN(Date.parse(value))
 }
 
+function hasExpectedKeys(
+	value: Record<string, unknown>,
+	requiredKeys: Array<string>,
+	optionalKeys: Array<string>,
+): boolean {
+	const keys = Object.keys(value)
+	const allowedKeys = new Set([...requiredKeys, ...optionalKeys])
+	return requiredKeys.every(key => Object.hasOwn(value, key)) &&
+		keys.every(key => allowedKeys.has(key))
+}
+
 function invalidReport(): HarnessError {
 	return new HarnessError('INVALID_RUN_REPORT', 'Run report has an invalid shape')
-}
-
-async function readSecureArtifactFile(
-	artifactRoot: string,
-	filePath: string,
-	maxBytes: number,
-): Promise<Buffer> {
-	assertPathInside(artifactRoot, filePath)
-	const fileStats = await lstat(filePath)
-
-	if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
-		throw new HarnessError(
-			'ARTIFACT_FILE_INVALID',
-			'Artifact must be a regular file and cannot be a symbolic link',
-		)
-	}
-
-	if (fileStats.nlink > 1) {
-		throw new HarnessError(
-			'ARTIFACT_HARD_LINK_DENIED',
-			'Artifact files may not have multiple hard links',
-		)
-	}
-
-	if (fileStats.size > maxBytes) {
-		throw new HarnessError(
-			'ARTIFACT_FILE_TOO_LARGE',
-			`Artifact exceeds the ${maxBytes}-byte read limit`,
-		)
-	}
-
-	const [resolvedRoot, resolvedFile] = await Promise.all([
-		realpath(artifactRoot),
-		realpath(filePath),
-	])
-	assertPathInside(resolvedRoot, resolvedFile)
-
-	return await readFile(resolvedFile)
-}
-
-function assertPathInside(rootPath: string, candidatePath: string): void {
-	const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath))
-
-	if (relative.startsWith('..') || path.isAbsolute(relative)) {
-		throw new HarnessError(
-			'ARTIFACT_PATH_INVALID',
-			'Artifact path escapes the configured artifact root',
-		)
-	}
-}
-
-async function atomicWrite(
-	filePath: string,
-	contents: string,
-	mode: number,
-): Promise<void> {
-	const temporaryPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`
-	await writeFile(temporaryPath, contents, { encoding: 'utf8', mode, flag: 'wx' })
-	await rename(temporaryPath, filePath)
 }

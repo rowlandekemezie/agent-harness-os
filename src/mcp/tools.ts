@@ -150,6 +150,48 @@ const toolDefinitions: Array<McpToolDefinition> = [
 		annotations: annotation('Read worker run', true, false, true),
 	},
 	{
+		name: 'list_tasks',
+		description: 'List durable task history for one repository with bounded filters and cursor pagination.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				limit: { type: 'integer', minimum: 1, maximum: 100 },
+				cursor: { type: 'string', minLength: 36, maxLength: 36 },
+				status: {
+					enum: [
+						'in_progress',
+						'completed',
+						'failed',
+						'blocked',
+						'policy_violation',
+						'timed_out',
+						'cancelled',
+					],
+				},
+				mode: { enum: ['research', 'implementation', 'testing', 'review'] },
+				workerId: { type: 'string', minLength: 1, maxLength: 64 },
+			},
+			required: ['repositoryPath'],
+			additionalProperties: false,
+		},
+		annotations: annotation('List task history', true, false, true),
+	},
+	{
+		name: 'get_task_timeline',
+		description: 'Load a task summary and its validated append-only event timeline.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				taskId: { type: 'string', minLength: 36, maxLength: 36 },
+			},
+			required: ['repositoryPath', 'taskId'],
+			additionalProperties: false,
+		},
+		annotations: annotation('Read task timeline', true, false, true),
+	},
+	{
 		name: 'apply_worker_patch',
 		description: 'Apply a completed worker patch to a clean checkout after integrity, base-commit, and git-apply checks.',
 		inputSchema: {
@@ -218,6 +260,39 @@ export class McpTools {
 						await this.workerService.getRun(
 							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1, maxLength: 4_096 }),
 							requireString(argumentsRecord['runId'], 'runId', { minLength: 36, maxLength: 36 }),
+						),
+					)
+				}
+				case 'list_tasks': {
+					const argumentsRecord = requireRecord(rawArguments, 'arguments')
+					return result(
+						await this.workerService.listTasks(
+							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1, maxLength: 4_096 }),
+							{
+								limit: optionalInteger(
+									argumentsRecord['limit'],
+									'limit',
+									50,
+									{ min: 1, max: 100 },
+								),
+								cursor: argumentsRecord['cursor'] === undefined
+									? null
+									: requireString(argumentsRecord['cursor'], 'cursor', { minLength: 36, maxLength: 36 }),
+								status: parseTaskStatus(argumentsRecord['status']),
+								mode: parseOptionalMode(argumentsRecord['mode']),
+								workerId: argumentsRecord['workerId'] === undefined
+									? null
+									: requireString(argumentsRecord['workerId'], 'workerId', { minLength: 1, maxLength: 64 }),
+							},
+						),
+					)
+				}
+				case 'get_task_timeline': {
+					const argumentsRecord = requireRecord(rawArguments, 'arguments')
+					return result(
+						await this.workerService.getTaskTimeline(
+							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1, maxLength: 4_096 }),
+							requireString(argumentsRecord['taskId'], 'taskId', { minLength: 36, maxLength: 36 }),
 						),
 					)
 				}
@@ -376,6 +451,30 @@ function parseMode(value: unknown): WorkerMode {
 	}
 
 	throw new HarnessError('INVALID_ARGUMENT', 'mode must be research, implementation, testing, or review')
+}
+
+function parseOptionalMode(value: unknown): WorkerMode | null {
+	return value === undefined ? null : parseMode(value)
+}
+
+function parseTaskStatus(
+	value: unknown,
+): 'in_progress' | 'completed' | 'failed' | 'blocked' | 'policy_violation' | 'timed_out' | 'cancelled' | null {
+	if (value === undefined) {
+		return null
+	}
+	if (
+		value === 'in_progress' ||
+		value === 'completed' ||
+		value === 'failed' ||
+		value === 'blocked' ||
+		value === 'policy_violation' ||
+		value === 'timed_out' ||
+		value === 'cancelled'
+	) {
+		return value
+	}
+	throw new HarnessError('INVALID_ARGUMENT', 'status is not a supported task status')
 }
 
 type BoundedStringArrayOptions = {

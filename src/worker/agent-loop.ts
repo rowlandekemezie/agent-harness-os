@@ -19,12 +19,26 @@ export type AgentLoopLimits = {
 	maxAssistantContentBytes: number
 }
 
+export type ToolCallObservation = {
+	toolName: string
+	iteration: number
+	outcome: 'succeeded' | 'failed'
+	inputBytes: number
+	outputBytes: number
+	durationMs: number
+}
+
+export type ObserveToolCall = (
+	observation: ToolCallObservation,
+) => Promise<void>
+
 export async function runAgentLoop(
 	task: WorkerTask,
 	provider: WorkerProvider,
 	toolExecutor: WorkerToolExecutor,
 	limits: AgentLoopLimits,
 	signal: AbortSignal,
+	observeToolCall?: ObserveToolCall,
 ): Promise<AgentLoopResult> {
 	const messages: Array<ProviderMessage> = [
 		{ role: 'system', content: buildSystemPrompt(task) },
@@ -98,6 +112,7 @@ export async function runAgentLoop(
 
 		for (const toolCall of completion.toolCalls) {
 			let parsedArguments: unknown = {}
+			const toolStartedAt = Date.now()
 
 			try {
 				parsedArguments = JSON.parse(toolCall.function.arguments)
@@ -114,6 +129,20 @@ export async function runAgentLoop(
 				toolCall.function.name,
 				parsedArguments,
 			)
+
+			if (observeToolCall !== undefined) {
+				await observeToolCall({
+					toolName: toolCall.function.name,
+					iteration,
+					outcome: result.isError ? 'failed' : 'succeeded',
+					inputBytes: Buffer.byteLength(
+						toolCall.function.arguments,
+						'utf8',
+					),
+					outputBytes: Buffer.byteLength(result.content, 'utf8'),
+					durationMs: Date.now() - toolStartedAt,
+				})
+			}
 			const resultForTranscript = limitTranscriptValue(result.content, 8_000)
 			transcript.push(
 				`tool-result[${iteration}]: ${toolCall.function.name} error=${result.isError}\n${resultForTranscript}`,

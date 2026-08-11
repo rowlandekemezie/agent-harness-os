@@ -9,7 +9,7 @@ const modernProtocolVersion = '2026-07-28'
 const legacyProtocolVersions = new Set(['2025-11-25', '2025-06-18'])
 const supportedProtocolVersions = [modernProtocolVersion, ...legacyProtocolVersions]
 const serverInfo = { name: 'agent-harness-os', version: '0.1.0' }
-const serverInstructions = 'Delegate bounded tasks to an isolated Qwen worker. Review reports before separately calling apply_worker_patch.'
+const serverInstructions = 'Delegate bounded tasks to isolated routed workers. Review task history and run reports before separately calling apply_worker_patch.'
 
 export async function startMcpServer(config: HarnessConfig): Promise<void> {
 	const logger = new Logger('mcp-server', config.logLevel)

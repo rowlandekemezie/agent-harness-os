@@ -154,6 +154,21 @@ test('falls back across workers using a fresh worktree and applies only the succ
 		assert.equal(failing.requestCount(), 1)
 		assert.equal(successful.requestCount(), 2)
 		assert.deepEqual(report.changedFiles, ['src/routed.ts'])
+		assert.ok(report.taskId)
+		const timeline = await service.getTaskTimeline(
+			repositoryPath,
+			report.taskId,
+		)
+		assert.equal(
+			timeline.events.filter(event => event.type === 'WorkerStarted').length,
+			2,
+		)
+		assert.equal(
+			timeline.events.filter(event => event.type === 'AttemptCompleted').length,
+			2,
+		)
+		assert.deepEqual(timeline.task.workerIds, ['first', 'second'])
+		assert.equal(timeline.task.status, 'completed')
 
 		await service.applyRun(repositoryPath, report.runId)
 		assert.equal(

@@ -75,6 +75,18 @@ Run artifacts are stored outside repositories under the user-private state direc
 
 Reports include selected-worker metadata, route candidates, prior attempts, usage, validation results, and warnings. Protect and expire artifacts according to source-code sensitivity. Patches are intentionally byte-faithful and may contain secrets that already existed in delegated source paths.
 
+Task journals live under `tasks/<taskId>/events/`. Use `list_tasks` for bounded
+discovery and `get_task_timeline` for the validated event chain. An
+`incomplete` timeline may be active or interrupted; the journal does not guess.
+Delete task journals only under the same retention policy as their run reports.
+An interrupted atomic publication can leave a UUID task directory without
+`.task-ready`, or a reserved `.publish-*` entry. Read-only queries recognize a
+verified matching staging/final pair, ignore only bounded staging-only states,
+and still count them toward traversal bounds. With the server stopped, unlink
+only a same-inode staging link; remove a staging-only entry only after confirming
+no task is active and no matching final name exists. Never remove the final
+event name.
+
 ## Docker validation
 
 Use a digest-pinned image and network `none` by default. The harness resets the image entrypoint, uses a read-only root filesystem, mounts `.git` read-only, drops capabilities, sets no-new-privileges, and applies resource bounds.

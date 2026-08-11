@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { link, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -152,6 +152,32 @@ test('rejects a patch artifact replaced by a hard link', async function () {
 	)
 })
 
+test('rejects a run directory replaced by a symbolic link', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-directory-'))
+	const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-outside-'))
+	const report = createReport('77777777-7777-4777-8777-777777777777')
+	const store = new ArtifactStore()
+	await store.persist({
+		artifactRoot: root,
+		report,
+		patch: 'candidate',
+		workerTranscript: '',
+	})
+	const runPath = path.join(root, report.runId)
+	const outsideRunPath = path.join(outsideRoot, report.runId)
+	await rename(runPath, outsideRunPath)
+	await symlink(outsideRunPath, runPath)
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'ARTIFACT_PATH_INVALID',
+	)
+})
+
 test('bounds persisted report reads', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-large-report-'))
 	const report = createReport('55555555-5555-4555-8555-555555555555')
@@ -215,4 +241,113 @@ test('rejects a corrupted run report as invalid rather than missing', async func
 			'code' in error &&
 			error.code === 'INVALID_RUN_REPORT',
 	)
+})
+
+test('requires a task ID on version 2 run reports', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-task-id-'))
+	const report: WorkerRunReport = {
+		...createReport('66666666-6666-4666-8666-666666666666'),
+		schemaVersion: 2,
+		taskId: '77777777-7777-4777-8777-777777777777',
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: 'candidate',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		taskId?: string
+	}
+	delete value.taskId
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'INVALID_RUN_REPORT',
+	)
+})
+
+test('rejects a report whose run ID does not match its artifact directory', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-run-link-'))
+	const report = createReport('88888888-8888-4888-8888-888888888888')
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		runId: string
+	}
+	value.runId = '99999999-9999-4999-8999-999999999999'
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'INVALID_RUN_REPORT',
+	)
+})
+
+test('rejects unrecognized fields in a persisted run report', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-extra-field-'))
+	const report = createReport('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as
+		Record<string, unknown>
+	value['providerResponse'] = { secret: 'must-not-escape' }
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'INVALID_RUN_REPORT',
+	)
+})
+
+test('rejects a run-directory collision without changing prior artifacts', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-collision-'))
+	const report = createReport('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: 'original patch',
+		workerTranscript: 'original transcript',
+	})
+
+	await assert.rejects(
+		store.persist({
+			artifactRoot: root,
+			report,
+			patch: 'replacement patch',
+			workerTranscript: 'replacement transcript',
+		}),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'ARTIFACT_RUN_COLLISION',
+	)
+	assert.ok(persisted.patchPath)
+	assert.equal(await readFile(persisted.patchPath, 'utf8'), 'original patch')
 })
