@@ -235,6 +235,44 @@ export async function writeExclusiveRegularFile(
 	}
 }
 
+export async function removeRegularFileIfContentsMatch(
+	rootPath: string,
+	filePath: string,
+	expectedContents: Buffer,
+	maxBytes: number,
+): Promise<boolean> {
+	assertPathInside(rootPath, filePath)
+	const handle = await open(filePath, constants.O_RDONLY | noFollowFlag)
+	let device: string
+	let inode: string
+	try {
+		const stats = await assertHandleMatchesPath(
+			rootPath,
+			filePath,
+			handle,
+			'file',
+		)
+		const contents = await readBoundedHandle(handle, stats.size, maxBytes)
+		if (!contents.equals(expectedContents)) {
+			return false
+		}
+		device = stats.dev.toString()
+		inode = stats.ino.toString()
+	} finally {
+		await handle.close()
+	}
+
+	const parentPath = path.dirname(filePath)
+	const identity = await getDirectoryIdentity(rootPath, parentPath)
+	await runHelper(rootPath, parentPath, identity, [
+		'unlink-file',
+		path.basename(filePath),
+		device,
+		inode,
+	])
+	return true
+}
+
 export function assertPathInside(rootPath: string, candidatePath: string): void {
 	const relative = path.relative(
 		path.resolve(rootPath),

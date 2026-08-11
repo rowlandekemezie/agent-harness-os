@@ -8,7 +8,11 @@ Codex
         |
         v
 MCP tools
-  health, registry inspection, route preview, delegation, history, report, apply
+  health, routing, delegation, workflow control, history, report, apply
+        |
+        v
+Workflow service
+  replay, dependencies, bounded stages, repair, approval, resume, cancellation
         |
         v
 Policy resolver
@@ -20,7 +24,7 @@ Worker registry and deterministic router
         |
         v
 Provider adapter
-  OpenAI-compatible or Anthropic Messages API
+  Codex CLI, OpenAI-compatible, or Anthropic Messages API
         |
         v
 Secure execution kernel
@@ -126,6 +130,20 @@ filenames include their content digest and each event links to its predecessor.
 The journal projects summaries from the validated chain instead of trusting a
 mutable summary file.
 
+### Workflow service and journal
+
+`src/workflow/service.ts` coordinates stages only through the `WorkerService`
+contract; it never reaches into adapters or execution internals.
+`src/workflow/journal.ts` and `src/workflow/event-model.ts` persist and replay
+workflow decisions. A workflow stage maps to one ordinary delegation, so all
+policy, routing, evaluation, artifact, and fresh-worktree gates still apply.
+
+Patch-bearing stages are chained by run ID. `WorkerService` validates the source
+report and task history, seeds the exact patch into a fresh worktree, and checks
+the regenerated cumulative patch before provider execution. Workflow approval
+records intent only; the patch application service remains the sole checkout
+mutation boundary. See [Durable coding workflows](workflows.md).
+
 ### Secure artifact I/O
 
 `src/artifacts/secure-io.ts` verifies handle identity and containment for reads.
@@ -133,7 +151,7 @@ For writes, a sanitized Node helper starts in the verified destination
 directory inode, rechecks containment around mutation, stages and syncs content,
 publishes it with a no-replace hard link, and syncs the directory. Task
 directories use exclusive creation plus a final readiness marker. Both run
-artifacts and task events use this module.
+artifacts, task events, workflow events, and workflow leases use this module.
 
 ### Fallback
 
@@ -156,5 +174,6 @@ provider adapters -> domain contracts
 router -> worker metadata + domain contracts
 execution kernel -> router + provider registry + security modules
 MCP -> execution service
-UI/durable workflows -> MCP or application service, never provider internals
+UI -> MCP or workflow application service
+workflow service -> execution service, never provider internals
 ```

@@ -43,6 +43,10 @@ At completion, return a concise report covering:
 4. validation the harness should run and any expected risks;
 5. acceptance criteria evidence;
 6. unresolved risks or blockers.
+
+${task.candidateRunId === undefined
+		? ''
+		: `A validated candidate patch from run ${task.candidateRunId} is already present in the worktree. Treat the current files as the candidate state and return a cumulative patch against the original base.\n`}
 `
 }
 

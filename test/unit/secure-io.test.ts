@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
 	createPrivateDirectory,
+	removeRegularFileIfContentsMatch,
 	writeExclusiveRegularFile,
 } from '../../src/artifacts/secure-io.js'
 
@@ -180,3 +181,33 @@ test('creates private directories exclusively', async function () {
 			error.code === 'ARTIFACT_WRITE_FAILED',
 	)
 })
+
+test('removes only the regular file with the expected contents', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-unlink-'))
+	const filePath = path.join(root, 'workflow.lock')
+	const original = Buffer.from('original lock\n')
+	await writeExclusiveRegularFile(root, filePath, original)
+
+	assert.equal(
+		await removeRegularFileIfContentsMatch(
+			root,
+			filePath,
+			Buffer.from('replacement lock\n'),
+			1_024,
+		),
+		false,
+	)
+	assert.deepEqual(await readFile(filePath), original)
+	assert.equal(
+		await removeRegularFileIfContentsMatch(root, filePath, original, 1_024),
+		true,
+	)
+	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+})
+
+function hasCode(code: string): (error: unknown) => boolean {
+	return error => typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		error.code === code
+}

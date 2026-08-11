@@ -128,6 +128,14 @@ discovery and `get_task_timeline` for the validated event chain. An
 Delete task journals only under the same retention policy as their run reports,
 and remove the matching `routing-index/` entry in the same stopped-server
 maintenance operation.
+
+Workflow journals live under `workflows/<workflowId>/events/`; uniquely named
+active claims live under `workflow-locks/<workflowId>/`. Retain a workflow with every task and run it
+references. Before deleting workflow history, stop every server using the
+artifact root, verify no workflow lease is live, and remove the journal and its
+lease together. `get_workflow` and `list_workflows` are read-only and fail closed
+on unsafe permissions, unexpected entries, broken sequences, or digest changes.
+
 An interrupted atomic publication can leave a UUID task directory without
 `.task-ready`, or a reserved `.publish-*` entry. Read-only queries recognize a
 verified matching staging/final pair, ignore only bounded staging-only states,

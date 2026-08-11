@@ -80,6 +80,7 @@ Changing an organization policy affects subsequent delegations only. Changing
 a repository policy affects tasks whose resolved base commit includes that
 change. Existing reports stay bound to the policy used for their original run.
 
-Human approval rules are intentionally not part of this schema. Patch
-application remains a separate destructive MCP call; authenticated, resumable
-approval nodes belong to the durable-workflow layer.
+Human approval rules are intentionally not part of this schema. Durable
+workflows can pause at an MCP approval node, but the transport authenticates the
+caller and the policy engine does not authenticate a person. Patch application
+remains a separate destructive MCP call.

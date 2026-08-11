@@ -11,6 +11,8 @@ Codex authenticated with ChatGPT
         v
 Agent Harness OS
         |
+        +--> durable workflow service + event journal
+        |
         +--> worker registry
         |      Subscription-backed: local Codex CLI via ChatGPT sign-in
         |      OpenAI-compatible: GPT, Qwen, Gemini, OpenRouter, Ollama
@@ -41,6 +43,7 @@ your clean checkout
 - A fresh detached worktree for every fallback attempt
 - Request, token, latency, and operator-supplied cost telemetry in run reports
 - Durable task IDs and validated append-only timelines across fallback attempts
+- Durable plan, implement, test, review, repair, dependency, and approval workflows
 - Mandatory deterministic evaluation with optional independent reviewer results
 - Bounded task-history listing and timeline inspection
 - `list_workers` and `route_worker` MCP inspection tools
@@ -48,8 +51,9 @@ your clean checkout
 - The hardened execution kernel from version 0.1: strict path authority, file-only worker tools, immutable patch validation, isolated command execution, artifact integrity, cancellation, bounded resources, and approval-separated application
 
 Historical evidence adjusts deterministic scores; it does not learn or rewrite
-weights, capabilities, or policy. This release does not add durable distributed
-queues, semantic memory, or a dashboard.
+weights, capabilities, or policy. Workflows are local artifact-backed state
+machines, not distributed queues. This release does not add semantic memory or
+a dashboard.
 
 ## Security model
 
@@ -294,7 +298,7 @@ common provider credential names, and every custom `apiKeyEnv` or `headerEnv`
 name used by the effective registry.
 Regenerate the block whenever those names change.
 
-The eight MCP tools are:
+The MCP tools are:
 
 - `health_check`: configuration and runtime readiness
 - `list_workers`: redacted worker registry metadata
@@ -303,6 +307,12 @@ The eight MCP tools are:
 - `get_worker_run`: persisted report retrieval
 - `list_tasks`: bounded, filtered task-history listing
 - `get_task_timeline`: validated task summary and event timeline
+- `create_coding_workflow`: persist a fixed-base, bounded workflow
+- `run_workflow`: run or resume until a wait or terminal state
+- `approve_workflow`: approve or reject without applying
+- `cancel_workflow`: cancel durable work and a locally owned active delegation
+- `get_workflow`: validated definition, summary, and event timeline
+- `list_workflows`: bounded workflow listing for one repository
 - `apply_worker_patch`: approval-gated patch application
 
 See [Execution history](docs/execution-history.md) for identity, integrity,
@@ -313,6 +323,8 @@ See [Policies as code](docs/policies.md) for deterministic composition and
 policy provenance.
 See [Historical routing evidence](docs/routing-evidence.md) for measured inputs,
 weights, cold-start behavior, and audit binding.
+See [Durable coding workflows](docs/workflows.md) for stages, candidate chaining,
+resume, dependencies, approvals, and limits.
 
 ## Operating workflow
 
@@ -324,6 +336,10 @@ weights, cold-start behavior, and audit binding.
 6. Codex reviews the task timeline, evaluation results, validation evidence, changed files, and patch.
 7. Codex invokes `apply_worker_patch` only for an acceptable completed run.
 8. Codex reruns validation in the real checkout and reviews the final diff.
+
+For multi-stage work, Codex can instead create and run a durable workflow,
+inspect its timeline at each wait, approve the candidate, then pass the returned
+`candidateRunId` to `apply_worker_patch`. Workflow approval never applies it.
 
 ## Development
 
@@ -337,7 +353,9 @@ The project uses strict TypeScript and Node's built-in test runner. Security or 
 
 ## Current boundary
 
-Agent Harness OS is a local, durable-artifact coding runtime, not yet a distributed orchestration platform. It does not currently provide:
+Agent Harness OS is a local, durable-artifact coding runtime with resumable
+workflows, not a distributed orchestration platform. It does not currently
+provide:
 
 - persistent task queues across machines
 - dynamic provider discovery

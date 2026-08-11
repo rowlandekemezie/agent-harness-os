@@ -58,9 +58,44 @@ async function main(): Promise<void> {
 				destination,
 			)
 			return
+		case 'unlink-file':
+			await removeFile(
+				requireName(argumentsList[0]),
+				requireValue(argumentsList[1]),
+				requireValue(argumentsList[2]),
+				destination,
+			)
+			return
 		default:
 			throw new Error('Secure filesystem helper received an unknown operation')
 	}
+}
+
+async function removeFile(
+	name: string,
+	expectedDevice: string,
+	expectedInode: string,
+	destination: DestinationIdentity,
+): Promise<void> {
+	await assertWorkingDirectory(destination)
+	const handle = await open(name, constants.O_RDONLY | noFollowFlag)
+	try {
+		const fileStats = await handle.stat({ bigint: true })
+		if (
+			!fileStats.isFile() ||
+			fileStats.nlink !== 1n ||
+			fileStats.dev.toString() !== expectedDevice ||
+			fileStats.ino.toString() !== expectedInode
+		) {
+			throw new Error('Artifact file identity changed before removal')
+		}
+	} finally {
+		await handle.close()
+	}
+	await assertWorkingDirectory(destination)
+	await unlink(name)
+	await assertWorkingDirectory(destination)
+	await syncWorkingDirectory()
 }
 
 type DestinationIdentity = {

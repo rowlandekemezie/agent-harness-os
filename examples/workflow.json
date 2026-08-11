@@ -1,0 +1,57 @@
+{
+  "objective": "Implement and independently verify the requested change.",
+  "repositoryPath": "/absolute/path/to/repository",
+  "baseRef": "HEAD",
+  "deadlineSeconds": 3600,
+  "maxTransitions": 12,
+  "maxRepairAttempts": 1,
+  "dependencyWorkflowIds": [],
+  "stages": {
+    "implement": {
+      "objective": "Implement the change with focused tests.",
+      "allowedPaths": ["src/**", "test/**"],
+      "acceptanceCriteria": ["The requested behavior has regression coverage."],
+      "requiredCommands": [
+        { "command": "npm", "args": ["test"] }
+      ],
+      "routing": {
+        "requiredCapabilities": ["implementation", "testing"],
+        "strategy": "quality",
+        "allowFallback": true,
+        "maxAttempts": 2
+      }
+    },
+    "test": {
+      "objective": "Exercise the cumulative candidate and close test gaps.",
+      "allowedPaths": ["src/**", "test/**"],
+      "requiredCommands": [
+        { "command": "npm", "args": ["test"] }
+      ],
+      "routing": {
+        "requiredCapabilities": ["testing"],
+        "strategy": "quality"
+      }
+    },
+    "review": {
+      "objective": "Review correctness, security, maintainability, and test quality.",
+      "allowedPaths": ["src/**", "test/**"],
+      "routing": {
+        "requiredCapabilities": ["review"],
+        "strategy": "quality",
+        "allowFallback": false
+      }
+    },
+    "repair": {
+      "objective": "Repair deterministic validation or approval findings.",
+      "allowedPaths": ["src/**", "test/**"],
+      "requiredCommands": [
+        { "command": "npm", "args": ["test"] }
+      ],
+      "routing": {
+        "requiredCapabilities": ["implementation", "testing"],
+        "strategy": "quality",
+        "allowFallback": false
+      }
+    }
+  }
+}

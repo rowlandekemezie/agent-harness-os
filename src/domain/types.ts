@@ -172,6 +172,183 @@ export type WorkerTask = {
 	timeoutSeconds: number
 	allowNetwork: boolean
 	routing?: WorkerRoutingPolicy
+	candidateRunId?: string
+}
+
+export type WorkflowWorkerStageName =
+	| 'plan'
+	| 'implement'
+	| 'test'
+	| 'review'
+	| 'repair'
+
+export type WorkflowStageName = WorkflowWorkerStageName | 'approval'
+
+export type WorkflowWorkerStage = {
+	objective: string
+	allowedPaths: Array<string>
+	prohibitedPaths: Array<string>
+	acceptanceCriteria: Array<string>
+	requiredCommands: Array<CommandSpec>
+	maxIterations: number
+	timeoutSeconds: number
+	allowNetwork: boolean
+	routing: WorkerRoutingPolicy
+	retryLimit: number
+}
+
+export type WorkflowDefinition = {
+	schemaVersion: 1
+	objective: string
+	repositoryPath: string
+	baseCommit: string
+	deadlineAt: string
+	maxTransitions: number
+	maxRepairAttempts: number
+	dependencyWorkflowIds: Array<string>
+	stages: {
+		plan: WorkflowWorkerStage | null
+		implement: WorkflowWorkerStage
+		test: WorkflowWorkerStage | null
+		review: WorkflowWorkerStage | null
+		repair: WorkflowWorkerStage | null
+	}
+}
+
+export type WorkflowStatus =
+	| 'pending'
+	| 'running'
+	| 'waiting_for_dependency'
+	| 'waiting_for_approval'
+	| 'completed'
+	| 'failed'
+	| 'blocked'
+	| 'timed_out'
+	| 'cancelled'
+
+export type WorkflowSummary = {
+	schemaVersion: 1
+	workflowId: string
+	objective: string
+	repositoryPath: string
+	baseCommit: string
+	createdAt: string
+	updatedAt: string
+	deadlineAt: string
+	status: WorkflowStatus
+	currentStage: WorkflowStageName | null
+	activeExecutionId: string | null
+	candidateRunId: string | null
+	transitionCount: number
+	repairAttemptCount: number
+	stageAttempts: Partial<Record<WorkflowWorkerStageName, number>>
+	approvalDecision: 'approved' | 'rejected' | null
+	lastFailureCode: string | null
+	eventCount: number
+	latestEventSha256: string
+}
+
+export type WorkflowEventBase = {
+	schemaVersion: 1
+	eventId: string
+	workflowId: string
+	sequence: number
+	occurredAt: string
+	previousEventSha256: string | null
+}
+
+export type WorkflowCreatedEvent = WorkflowEventBase & {
+	type: 'WorkflowCreated'
+	data: { definition: WorkflowDefinition }
+}
+
+export type WorkflowStageStartedEvent = WorkflowEventBase & {
+	type: 'WorkflowStageStarted'
+	data: {
+		stage: WorkflowWorkerStageName
+		executionId: string
+		attemptNumber: number
+		sourceRunId: string | null
+	}
+}
+
+export type WorkflowStageInterruptedEvent = WorkflowEventBase & {
+	type: 'WorkflowStageInterrupted'
+	data: {
+		stage: WorkflowWorkerStageName
+		executionId: string
+		reason: 'resume' | 'cancel' | 'deadline'
+	}
+}
+
+export type WorkflowDependencyStateChangedEvent = WorkflowEventBase & {
+	type: 'WorkflowDependencyStateChanged'
+	data: { state: 'waiting' | 'ready' }
+}
+
+export type WorkflowStageCompletedEvent = WorkflowEventBase & {
+	type: 'WorkflowStageCompleted'
+	data: {
+		stage: WorkflowWorkerStageName
+		executionId: string
+		taskId: string | null
+		runId: string | null
+		status: RunStatus
+		failureCode: string | null
+		candidateRunId: string | null
+		nextStage: WorkflowStageName | null
+	}
+}
+
+export type WorkflowApprovalRequestedEvent = WorkflowEventBase & {
+	type: 'WorkflowApprovalRequested'
+	data: { candidateRunId: string }
+}
+
+export type WorkflowApprovalDecidedEvent = WorkflowEventBase & {
+	type: 'WorkflowApprovalDecided'
+	data: {
+		decision: 'approved' | 'rejected'
+		feedback: string
+		source: 'mcp_call'
+		nextStage: 'repair' | null
+	}
+}
+
+export type WorkflowCompletedEvent = WorkflowEventBase & {
+	type: 'WorkflowCompleted'
+	data: {
+		status: 'completed' | 'failed' | 'blocked' | 'timed_out' | 'cancelled'
+		failureCode: string | null
+		candidateRunId: string | null
+	}
+}
+
+export type WorkflowEvent =
+	| WorkflowCreatedEvent
+	| WorkflowStageStartedEvent
+	| WorkflowStageInterruptedEvent
+	| WorkflowDependencyStateChangedEvent
+	| WorkflowStageCompletedEvent
+	| WorkflowApprovalRequestedEvent
+	| WorkflowApprovalDecidedEvent
+	| WorkflowCompletedEvent
+
+export type WorkflowEventInput = WorkflowEvent extends infer Event
+	? Event extends WorkflowEvent
+		? Omit<Event, keyof WorkflowEventBase>
+		: never
+	: never
+
+export type WorkflowTimeline = {
+	definition: WorkflowDefinition
+	summary: WorkflowSummary
+	events: Array<WorkflowEvent>
+}
+
+export type WorkflowPage = {
+	workflows: Array<WorkflowSummary>
+	nextCursor: string | null
 }
 
 export type ProviderUsage = {

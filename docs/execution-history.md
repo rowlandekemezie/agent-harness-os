@@ -27,6 +27,10 @@ Version 1 and 2 reports remain readable for audit but cannot pass the
 evaluation-bound patch gate. Failure to append new patch-lifecycle events after
 a successful link check remains a warning.
 
+A workflow is a separate durable aggregate. Its stages reference task and run
+IDs but do not replace task history or run-report authority. See
+[Durable coding workflows](workflows.md).
+
 ## Event model
 
 The harness records these versioned events:

@@ -3,8 +3,10 @@ import type { Dirent } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import type {
+	EvaluationDimensionId,
 	EvaluationOutcome,
 	ResolvedPolicy,
+	RunStatus,
 	TaskEvent,
 	TaskEventInput,
 	TaskListQuery,
@@ -59,14 +61,16 @@ export type RunHistoryLink = {
 	runId: string
 	repositoryPath: string
 	baseCommit: string
-	status: 'completed'
-	patchSha256: string
+	status: RunStatus
+	patchSha256: string | null
 	changedFileCount: number
 	workerId: string
 	evaluation: {
 		evaluatorIds: Array<string>
 		outcome: EvaluationOutcome
 		evaluationPolicy: 'default' | 'strict'
+		failedDimensions: Array<EvaluationDimensionId>
+		unknownDimensions: Array<EvaluationDimensionId>
 	} | null
 	policySha256?: string | null
 	routingEvidenceSha256?: string | null
@@ -257,6 +261,16 @@ export class TaskJournal {
 		)
 		const completed = timeline.events.find(event => event.type === 'TaskCompleted')
 		const route = timeline.events.find(event => event.type === 'RouteSelected')
+		const patchEvidenceMatches = input.patchSha256 === null
+			? input.changedFileCount === 0
+				? produced === undefined
+				: input.status === 'failed' &&
+					input.evaluation?.failedDimensions.includes('patch_size') === true &&
+					produced?.type === 'PatchProduced' &&
+					produced.data.changedFileCount === input.changedFileCount
+			: produced?.type === 'PatchProduced' &&
+				produced.data.patchSha256 === input.patchSha256 &&
+				produced.data.changedFileCount === input.changedFileCount
 
 		return (
 			created?.type === 'TaskCreated' &&
@@ -274,9 +288,7 @@ export class TaskJournal {
 				: (input.routingEvidenceSha256 ?? null) === null) &&
 			started?.type === 'WorkerStarted' &&
 			started.data.workerId === input.workerId &&
-			produced?.type === 'PatchProduced' &&
-			produced.data.patchSha256 === input.patchSha256 &&
-			produced.data.changedFileCount === input.changedFileCount &&
+			patchEvidenceMatches &&
 			attempt?.type === 'AttemptCompleted' &&
 			attempt.data.status === input.status &&
 			(input.evaluation === null ||
@@ -287,6 +299,14 @@ export class TaskJournal {
 					arraysEqual(
 						evaluation.data.evaluatorIds,
 						input.evaluation.evaluatorIds,
+					) &&
+					arraysEqual(
+						evaluation.data.failedDimensions,
+						input.evaluation.failedDimensions,
+					) &&
+					arraysEqual(
+						evaluation.data.unknownDimensions,
+						input.evaluation.unknownDimensions,
 					))) &&
 			completed?.type === 'TaskCompleted' &&
 			completed.data.runId === input.runId &&

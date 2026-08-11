@@ -22,6 +22,12 @@ repository policy. Confirm the resolved policy and source digests in the report.
 
 Never delegate product interpretation, architecture approval, secret handling, production operations, database migration execution, dependency or CI control-plane changes, merge decisions, or final acceptance. The worker receives file tools only and cannot choose or run commands.
 
+For multi-stage work, prefer `create_coding_workflow` and `run_workflow` when
+crash-safe resume, specialist testing/review, bounded repair, dependencies, or
+an explicit approval pause matter. Every later stage must allow every path in
+the cumulative candidate. Workflow approval never replaces final review or
+`apply_worker_patch`.
+
 After delegation:
 
 1. Read the worker report, selected worker, route, and prior fallback attempts.

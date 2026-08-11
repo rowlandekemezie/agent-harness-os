@@ -19,6 +19,9 @@ All notable changes are documented here.
 - Restrictive organization and fixed-base repository policies for execution, path, network, and routing limits
 - Digest-bound effective policy provenance in run reports and event-schema-version-4 task history
 - Confidence-bounded historical outcome, latency, token, cost, and patch-application routing evidence
+- Durable local workflows with bounded plan, implement, test, review, repair, dependency, approval, resume, deadline, and cancellation semantics
+- Digest-chained workflow history plus bounded `create_coding_workflow`, `run_workflow`, `approve_workflow`, `cancel_workflow`, `get_workflow`, and `list_workflows` tools
+- Validated cumulative candidate handoff between fresh detached worktrees
 
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
 - ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
@@ -42,6 +45,8 @@ All notable changes are documented here.
 - Reject unsafe or malformed policy files before worker selection and block patch application when policy evidence is removed or changed
 - Aggregate-bound hostile glob matching, enforce absolute deadlines between changed paths, and fail closed before transforming invalid Git patch bytes
 - Bind routing evidence to event-schema-version-5 history and fail closed on corrupt evidence inputs
+- Bind workflow candidates to current run reports and task history before seeding later stages
+- Serialize workflow runners with private leases and reject credential-bearing workflow definitions or events
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers
