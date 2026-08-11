@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { promisify } from 'node:util'
 import { loadConfig } from '../../src/config.js'
 import type { WorkerTask } from '../../src/domain/types.js'
 import {
@@ -10,7 +12,10 @@ import {
 	repositoryPolicyPath,
 	resolveTaskPolicy,
 } from '../../src/policy/engine.js'
+import { isSafeGitRelativePath } from '../../src/git/repository.js'
 import { createTestRepository, runGit } from '../helpers/git.js'
+
+const execFileAsync = promisify(execFile)
 
 function createTask(repositoryPath: string): WorkerTask {
 	return {
@@ -198,6 +203,50 @@ test('rejects unsafe organization and repository policy files', async function (
 		),
 		hasHarnessCode('INVALID_POLICY_ENCODING'),
 	)
+})
+
+test('rejects blocking and oversized organization policy inputs', async function (context) {
+	if (process.platform === 'win32') {
+		context.skip('POSIX FIFO semantics are unavailable on Windows')
+		return
+	}
+
+	const repositoryPath = await createTestRepository()
+	const policyRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-policy-bounded-'))
+	const fifoPath = path.join(policyRoot, 'policy.fifo')
+	await execFileAsync('mkfifo', [fifoPath])
+	const task = createTask(repositoryPath)
+	const baseCommit = await runGit(repositoryPath, ['rev-parse', 'HEAD'])
+
+	await assert.rejects(
+		resolveTaskPolicy(
+			loadConfig({ AGENT_OS_ORGANIZATION_POLICY_PATH: fifoPath }),
+			repositoryPath,
+			baseCommit,
+			task,
+		),
+		hasHarnessCode('INVALID_POLICY_FILE'),
+	)
+
+	const oversizedPath = path.join(policyRoot, 'oversized.json')
+	await writeFile(oversizedPath, Buffer.alloc(65_537, 0x20))
+	await assert.rejects(
+		resolveTaskPolicy(
+			loadConfig({ AGENT_OS_ORGANIZATION_POLICY_PATH: oversizedPath }),
+			repositoryPath,
+			baseCommit,
+			task,
+		),
+		hasHarnessCode('POLICY_FILE_TOO_LARGE'),
+	)
+})
+
+test('treats repository policy locations as Git paths on every host', function () {
+	assert.notEqual(path.win32.normalize(repositoryPolicyPath), repositoryPolicyPath)
+	assert.equal(isSafeGitRelativePath(repositoryPolicyPath), true)
+	assert.equal(isSafeGitRelativePath('../policy.json'), false)
+	assert.equal(isSafeGitRelativePath('C:\\policy.json'), false)
+	assert.equal(isSafeGitRelativePath('.agent-os\\policy.json'), false)
 })
 
 function hasHarnessCode(code: string): (error: unknown) => boolean {

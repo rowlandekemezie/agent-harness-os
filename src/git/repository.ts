@@ -149,11 +149,7 @@ export async function readRegularFileAtCommit(
 	if (!/^[a-f0-9]{40,64}$/i.test(commit)) {
 		throw new HarnessError('INVALID_BASE_REF', 'Policy base commit is invalid')
 	}
-	if (
-		path.isAbsolute(relativePath) ||
-		path.normalize(relativePath) !== relativePath ||
-		relativePath.startsWith('../')
-	) {
+	if (!isSafeGitRelativePath(relativePath)) {
 		throw new HarnessError('INVALID_POLICY_PATH', 'Policy path must be repository-relative')
 	}
 
@@ -214,6 +210,15 @@ export async function readRegularFileAtCommit(
 	}
 
 	return { contents: blob.stdout, objectId }
+}
+
+export function isSafeGitRelativePath(relativePath: string): boolean {
+	return relativePath.length > 0 &&
+		!path.posix.isAbsolute(relativePath) &&
+		!path.win32.isAbsolute(relativePath) &&
+		!relativePath.includes('\\') &&
+		path.posix.normalize(relativePath) === relativePath &&
+		!relativePath.startsWith('../')
 }
 
 export async function isWorkingTreeClean(

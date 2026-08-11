@@ -18,6 +18,7 @@ import { isRecord } from '../lib/json.js'
 export const repositoryPolicyPath = '.agent-os/policy.json'
 const maxPolicyBytes = 65_536
 const noFollowFlag = constants.O_NOFOLLOW ?? 0
+const nonBlockingFlag = constants.O_NONBLOCK ?? 0
 
 type PolicyRoutingConstraints = {
 	requiredCapabilities: Array<WorkerCapability>
@@ -178,7 +179,10 @@ async function loadPolicies(
 async function readOrganizationPolicy(policyPath: string): Promise<string> {
 	let handle: Awaited<ReturnType<typeof open>>
 	try {
-		handle = await open(policyPath, constants.O_RDONLY | noFollowFlag)
+		handle = await open(
+			policyPath,
+			constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+		)
 	} catch (error) {
 		throw new HarnessError(
 			'POLICY_READ_FAILED',
@@ -219,13 +223,7 @@ async function readOrganizationPolicy(policyPath: string): Promise<string> {
 				'Organization policy must be owned by the Agent OS user',
 			)
 		}
-		if (stats.size > maxPolicyBytes) {
-			throw new HarnessError(
-				'POLICY_FILE_TOO_LARGE',
-				`Organization policy exceeds the ${maxPolicyBytes}-byte limit`,
-			)
-		}
-		const contents = await handle.readFile()
+		const contents = await readBoundedPolicyFile(handle)
 		if (contents.byteLength > maxPolicyBytes) {
 			throw new HarnessError(
 				'POLICY_FILE_TOO_LARGE',
@@ -246,6 +244,37 @@ async function readOrganizationPolicy(policyPath: string): Promise<string> {
 	} finally {
 		await handle.close()
 	}
+}
+
+async function readBoundedPolicyFile(
+	handle: Awaited<ReturnType<typeof open>>,
+): Promise<Buffer> {
+	const contents = Buffer.alloc(maxPolicyBytes + 1)
+	let offset = 0
+
+	while (offset < contents.byteLength) {
+		let bytesRead: number
+		try {
+			({ bytesRead } = await handle.read(
+				contents,
+				offset,
+				contents.byteLength - offset,
+				offset,
+			))
+		} catch (error) {
+			throw new HarnessError(
+				'POLICY_READ_FAILED',
+				'Organization policy content could not be read',
+				{ cause: error instanceof Error ? error.message : String(error) },
+			)
+		}
+		if (bytesRead === 0) {
+			break
+		}
+		offset += bytesRead
+	}
+
+	return contents.subarray(0, offset)
 }
 
 function parsePolicyDocument(contents: string, label: string): PolicyDocument {
