@@ -318,7 +318,11 @@ function validateReport(
 		!isCommandResults(value['commandResults']) ||
 		!isAcceptanceResults(value['acceptanceCriteria']) ||
 		!isProviderMetadata(value['provider'], schemaVersion === 3) ||
-		!isOptionalRoutingMetadata(value['routing']) ||
+		!isOptionalRoutingMetadata(
+			value['routing'],
+			value['mode'],
+			isRecord(value['provider']) ? value['provider']['workerId'] : undefined,
+		) ||
 		!isOptionalNullableString(value['failureCode']) ||
 		(patchPath === null) !== (patchSha256 === null) ||
 		(patchSha256 !== null && !/^[a-f0-9]{64}$/i.test(patchSha256))
@@ -504,13 +508,20 @@ function isOptionalWorkerProfile(value: unknown): boolean {
 	)
 }
 
-function isOptionalRoutingMetadata(value: unknown): boolean {
+function isOptionalRoutingMetadata(
+	value: unknown,
+	reportMode: unknown,
+	providerWorkerId: unknown,
+): boolean {
 	if (value === undefined) {
 		return true
 	}
 	if (!isRecord(value)) {
 		return false
 	}
+	const candidateWorkerIds = value['candidateWorkerIds']
+	const attemptNumber = value['attemptNumber']
+	const previousAttempts = value['previousAttempts']
 
 	return (
 		hasExpectedKeys(value, [
@@ -528,23 +539,34 @@ function isOptionalRoutingMetadata(value: unknown): boolean {
 			value['strategy'] === 'latency' ||
 			value['strategy'] === 'quality') &&
 		isWorkerCapabilities(value['requiredCapabilities']) &&
-		isStringArray(value['candidateWorkerIds']) &&
-		typeof value['selectedWorkerId'] === 'string' &&
-		isPositiveInteger(value['attemptNumber']) &&
+		Array.isArray(candidateWorkerIds) &&
+		candidateWorkerIds.length > 0 &&
+		candidateWorkerIds.length <= 64 &&
+		candidateWorkerIds.every(isWorkerId) &&
+		new Set(candidateWorkerIds).size === candidateWorkerIds.length &&
+		isWorkerId(value['selectedWorkerId']) &&
+		isPositiveInteger(attemptNumber) &&
 		isPositiveInteger(value['maxAttempts']) &&
+		(value['maxAttempts'] as number) <= 8 &&
+		(value['maxAttempts'] as number) <= candidateWorkerIds.length &&
 		typeof value['fallbackEnabled'] === 'boolean' &&
-		Array.isArray(value['previousAttempts']) &&
-		value['previousAttempts'].every(isWorkerAttempt) &&
-		(value['attemptNumber'] as number) <= (value['maxAttempts'] as number) &&
-		(value['previousAttempts'] as Array<unknown>).length ===
-			(value['attemptNumber'] as number) - 1 &&
-		(value['candidateWorkerIds'] as Array<string>).includes(
-			value['selectedWorkerId'] as string,
+		Array.isArray(previousAttempts) &&
+		previousAttempts.every(isWorkerAttempt) &&
+		(attemptNumber as number) <= (value['maxAttempts'] as number) &&
+		previousAttempts.length === (attemptNumber as number) - 1 &&
+		candidateWorkerIds[(attemptNumber as number) - 1] ===
+			value['selectedWorkerId'] &&
+		previousAttempts.every((attempt, index) =>
+			(attempt as Record<string, unknown>)['workerId'] ===
+				candidateWorkerIds[index],
 		) &&
+		(typeof providerWorkerId !== 'string' ||
+			value['selectedWorkerId'] === providerWorkerId) &&
 		((value['evidence'] === undefined &&
 			value['candidates'] === undefined &&
 			value['decisionSha256'] === undefined) ||
 			(isRoutingEvidenceSnapshot(value['evidence']) &&
+				(value['evidence'] as Record<string, unknown>)['mode'] === reportMode &&
 				isRouteCandidateMetadata(
 					value['candidates'],
 					value['candidateWorkerIds'] as Array<string>,
@@ -662,6 +684,7 @@ function isWorkerRoutingEvidence(
 			'medianDurationMs',
 			'averageProviderLatencyMs',
 			'averageTotalTokens',
+			'estimatedCostSampleCount',
 			'averageEstimatedCostMicroUsd',
 		], []) &&
 		isWorkerId(value['workerId']) &&
@@ -683,8 +706,15 @@ function isWorkerRoutingEvidence(
 		isNonNegativeInteger(value['medianDurationMs']) &&
 		isNonNegativeInteger(value['averageProviderLatencyMs']) &&
 		isNonNegativeInteger(value['averageTotalTokens']) &&
-		(value['averageEstimatedCostMicroUsd'] === null ||
-			isNonNegativeInteger(value['averageEstimatedCostMicroUsd']))
+		isIntegerInRange(
+			value['estimatedCostSampleCount'],
+			0,
+			sampleSize as number,
+		) &&
+		((value['estimatedCostSampleCount'] === 0 &&
+			value['averageEstimatedCostMicroUsd'] === null) ||
+			((value['estimatedCostSampleCount'] as number) > 0 &&
+				isNonNegativeInteger(value['averageEstimatedCostMicroUsd'])))
 	)
 }
 

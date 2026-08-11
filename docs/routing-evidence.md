@@ -12,6 +12,11 @@ disables history-based scoring. Journal traversal and sampled timelines are
 separately bounded; reads are read-only,
 cancellation-aware, and included in the task deadline.
 
+Current tasks publish a small newest-sortable entry under `routing-index/`.
+Evidence validates only the selected entries and linked timelines, rather than
+walking every retained task. If aggregate event or byte limits are reached, the
+valid window is shortened. Malformed index or timeline data still fails closed.
+
 Only event-schema-version-5 attempts contain routing metrics. Older history
 remains readable but does not invent measurements. Evidence is grouped by exact
 worker/profile ID and task mode, so review results do not score implementation
@@ -22,7 +27,7 @@ Each worker aggregate records:
 - completed attempts and evaluation passes
 - median end-to-end attempt duration
 - average provider latency and total tokens
-- average estimated cost when configured pricing produced one
+- average estimated cost and its sample count when configured pricing produced one
 - produced and applied patch counts
 
 Patch application is exposed for audit but does not affect routing scores;
@@ -41,11 +46,13 @@ Measured completion and evaluation rates receive confidence
 | --- | ---: | ---: | ---: |
 | `quality` | ±300,000 | — | — |
 | `balanced` | ±75,000 | ±30,000 | ±30,000 |
-| `cost` | ±20,000 | ±60,000 | — |
-| `latency` | ±20,000 | — | ±60,000 |
+| `cost` | ±100,000 | ±60,000 | — |
+| `latency` | ±100,000 | — | ±60,000 |
 
 Cost and duration adjustments are deterministic ranks among eligible workers
-with comparable measurements. Missing or tied measurements contribute zero.
+with comparable measurements. Cost confidence uses only priced samples. Missing
+or tied measurements contribute zero, and a fully observed zero-success worker
+cannot outrank a fully successful peer only by failing faster or more cheaply.
 Worker ID remains the final tie breaker.
 
 ## Audit and trust boundary

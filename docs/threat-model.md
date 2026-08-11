@@ -64,7 +64,8 @@
 ### Historical routing evidence
 
 - Only validated event-schema-version-5 attempts become measured samples
-- Evidence reads are repository-scoped, traversal-bounded, read-only, and cancellation-aware
+- A private digest-named index selects newest tasks without replaying all retained history
+- Evidence reads are repository-scoped, sample- and resource-bounded, read-only, and cancellation-aware
 - Capability, role, tier, and policy filters run before measured scoring
 - Evidence weights are fixed code with bounded confidence; models cannot rewrite them
 - Reports retain source event hashes, evidence, scores, and reasons; task history binds evidence and decision digests

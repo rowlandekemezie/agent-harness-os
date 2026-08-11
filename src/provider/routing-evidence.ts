@@ -48,29 +48,29 @@ export class RoutingEvidenceStore {
 			return createSnapshot(input.mode, 0, 0, [], [])
 		}
 
-		const page = await this.taskJournal.list(input.artifactRoot, {
-			limit: input.taskLimit,
-			cursor: null,
-			status: null,
-			mode: input.mode,
-			workerId: null,
-		}, input.signal)
+		const timelines = await this.taskJournal.recentTimelines(
+			input.artifactRoot,
+			input.mode,
+			input.taskLimit,
+			input.signal,
+		)
 		const observations: Array<RoutingObservation> = []
 		const sources: Array<RoutingEvidenceTaskSource> = []
 		const includedWorkerIds = new Set(input.workerIds)
 
-		for (const task of page.tasks) {
+		for (const timeline of timelines) {
 			input.signal?.throwIfAborted()
-			if (task.repositoryPath !== input.repositoryPath) {
-				continue
+			if (
+				timeline.task.repositoryPath !== input.repositoryPath ||
+				timeline.task.mode !== input.mode
+			) {
+				throw new HarnessError(
+					'ROUTING_EVIDENCE_SCOPE_MISMATCH',
+					'Routing index selected task history outside the requested scope',
+				)
 			}
-			const timeline = await this.taskJournal.timeline(
-				input.artifactRoot,
-				task.taskId,
-				input.signal,
-			)
 			sources.push({
-				taskId: task.taskId,
+				taskId: timeline.task.taskId,
 				latestEventSha256: timeline.task.latestEventSha256,
 			})
 			observations.push(...collectTimelineObservations(
@@ -205,6 +205,7 @@ function aggregateObservations(
 			averageTotalTokens: average(
 				workerObservations.map(item => item.totalTokens),
 			),
+			estimatedCostSampleCount: costs.length,
 			averageEstimatedCostMicroUsd: costs.length === 0
 				? null
 				: average(costs),

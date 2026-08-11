@@ -125,7 +125,9 @@ but cannot be applied; rerun the task to produce evaluation-bound evidence.
 Task journals live under `tasks/<taskId>/events/`. Use `list_tasks` for bounded
 discovery and `get_task_timeline` for the validated event chain. An
 `incomplete` timeline may be active or interrupted; the journal does not guess.
-Delete task journals only under the same retention policy as their run reports.
+Delete task journals only under the same retention policy as their run reports,
+and remove the matching `routing-index/` entry in the same stopped-server
+maintenance operation.
 An interrupted atomic publication can leave a UUID task directory without
 `.task-ready`, or a reserved `.publish-*` entry. Read-only queries recognize a
 verified matching staging/final pair, ignore only bounded staging-only states,

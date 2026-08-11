@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -25,6 +25,9 @@ test('projects bounded per-mode routing evidence from validated task events', as
 		'failed',
 		false,
 	)
+	journal.list = async function () {
+		throw new Error('Routing evidence must not traverse the general task list')
+	}
 	const store = new RoutingEvidenceStore(journal)
 
 	const snapshot = await store.collect({
@@ -38,6 +41,7 @@ test('projects bounded per-mode routing evidence from validated task events', as
 	assert.equal(snapshot.sampledTaskCount, 2)
 	assert.equal(snapshot.sampledAttemptCount, 2)
 	assert.match(snapshot.sha256, /^[a-f0-9]{64}$/)
+	assert.equal(snapshot.sources[0]?.taskId, second.taskId)
 	assert.deepEqual(
 		new Map(snapshot.sources.map(source => [source.taskId, source])),
 		new Map([first, second].map(source => [source.taskId, source])),
@@ -55,6 +59,7 @@ test('projects bounded per-mode routing evidence from validated task events', as
 			medianDurationMs: 2_000,
 			averageProviderLatencyMs: 1_500,
 			averageTotalTokens: 500,
+			estimatedCostSampleCount: 1,
 			averageEstimatedCostMicroUsd: 1_234,
 		},
 		{
@@ -69,6 +74,7 @@ test('projects bounded per-mode routing evidence from validated task events', as
 			medianDurationMs: 2_000,
 			averageProviderLatencyMs: 1_500,
 			averageTotalTokens: 500,
+			estimatedCostSampleCount: 1,
 			averageEstimatedCostMicroUsd: 1_234,
 		},
 	])
@@ -99,6 +105,35 @@ test('disables evidence reads at a zero task limit and observes cancellation', a
 		}),
 		(error: unknown) =>
 			error instanceof DOMException && error.name === 'AbortError',
+	)
+})
+
+test('fails closed when the newest-task routing index is corrupted', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'routing-index-'))
+	const journal = new TaskJournal()
+	await appendTask(journal, artifactRoot, 'worker-one', 'completed', true)
+	const indexDirectory = path.join(
+		artifactRoot,
+		'routing-index',
+		'implementation',
+	)
+	const [entryName] = await readdir(indexDirectory)
+	assert.ok(entryName)
+	await writeFile(path.join(indexDirectory, entryName), '{}\n')
+
+	await assert.rejects(
+		new RoutingEvidenceStore(journal).collect({
+			artifactRoot,
+			repositoryPath: '/tmp/evidence-repository',
+			mode: 'implementation',
+			workerIds: ['worker-one'],
+			taskLimit: 100,
+		}),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'INVALID_TASK_JOURNAL',
 	)
 })
 

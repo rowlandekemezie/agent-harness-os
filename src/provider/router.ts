@@ -17,8 +17,8 @@ const evidenceWeights: Record<RoutingStrategy, {
 	latency: number
 }> = {
 	balanced: { performance: 75_000, cost: 30_000, latency: 30_000 },
-	cost: { performance: 20_000, cost: 60_000, latency: 0 },
-	latency: { performance: 20_000, cost: 0, latency: 60_000 },
+	cost: { performance: 100_000, cost: 60_000, latency: 0 },
+	latency: { performance: 100_000, cost: 0, latency: 60_000 },
 	quality: { performance: 300_000, cost: 0, latency: 0 },
 }
 
@@ -186,12 +186,14 @@ function applyRoutingEvidence(
 		candidates,
 		evidenceByWorker,
 		item => item.averageEstimatedCostMicroUsd,
+		item => item.estimatedCostSampleCount,
 		weights.cost,
 	)
 	const latencyAdjustments = rankMetricAdjustments(
 		candidates,
 		evidenceByWorker,
 		item => item.medianDurationMs,
+		item => item.sampleSize,
 		weights.latency,
 	)
 
@@ -228,7 +230,8 @@ function scorePerformance(
 		: evidence.evaluationPassCount / evidence.evaluationCount
 	const performance = (successRate + evaluationRate) / 2
 	return Math.round(
-		(performance - 0.5) * 2 * maximumAdjustment * evidenceConfidence(evidence),
+		(performance - 0.5) * 2 * maximumAdjustment *
+			evidenceConfidence(evidence.sampleSize),
 	)
 }
 
@@ -236,6 +239,7 @@ function rankMetricAdjustments(
 	candidates: Array<WorkerRouteCandidate>,
 	evidenceByWorker: Map<string, WorkerRoutingEvidence>,
 	readMetric: (evidence: WorkerRoutingEvidence) => number | null,
+	readSampleCount: (evidence: WorkerRoutingEvidence) => number,
 	maximumAdjustment: number,
 ): Map<string, number> {
 	if (maximumAdjustment === 0) {
@@ -260,14 +264,15 @@ function rankMetricAdjustments(
 		return [
 			metric.workerId,
 			Math.round(
-				relative * maximumAdjustment * evidenceConfidence(metric.evidence),
+				relative * maximumAdjustment *
+					evidenceConfidence(readSampleCount(metric.evidence)),
 			),
 		]
 	}))
 }
 
-function evidenceConfidence(evidence: WorkerRoutingEvidence): number {
-	return Math.min(evidence.sampleSize, 20) / 20
+function evidenceConfidence(sampleSize: number): number {
+	return Math.min(sampleSize, 20) / 20
 }
 
 function formatEvidenceReason(evidence: WorkerRoutingEvidence): string {
@@ -286,7 +291,7 @@ function formatEvidenceReason(evidence: WorkerRoutingEvidence): string {
 		? 'cost unavailable'
 		: `average cost $${(
 			evidence.averageEstimatedCostMicroUsd / 1_000_000
-		).toFixed(6)}`
+		).toFixed(6)} (${evidence.estimatedCostSampleCount} priced)`
 	return `history ${evidence.sampleSize}: ${successPercent}% completed, ${
 		evaluationPercent === null ? 'evaluation unavailable' : `${evaluationPercent}% evaluation passed`
 	}, median ${evidence.medianDurationMs} ms, ${cost}, ${patchAcceptance}`
@@ -381,6 +386,9 @@ function compareCandidatesWithPreference(
 	right: WorkerRouteCandidate,
 	preferredWorkerId: string | null,
 ): number {
+	if (left.worker.id === right.worker.id) {
+		return 0
+	}
 	if (left.worker.id === preferredWorkerId) {
 		return -1
 	}

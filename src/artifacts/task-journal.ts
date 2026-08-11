@@ -37,8 +37,10 @@ const maxTaskDirectories = 10_000
 const maxEventsPerList = 25_000
 const maxListBytes = 8_388_608
 const taskDirectoryName = 'tasks'
+const routingIndexDirectoryName = 'routing-index'
 const taskReadyFileName = '.task-ready'
 const eventFilePattern = /^([0-9]{12})-([a-f0-9]{64})\.json$/i
+const routingIndexFilePattern = /^(\d{13})-([0-9a-f-]{36})-([a-f0-9]{64})\.json$/i
 const pendingFilePattern = /^\.publish-[0-9a-f-]{36}-(.+)$/i
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -135,6 +137,13 @@ export class TaskJournal {
 			path.join(taskDirectory, taskReadyFileName),
 			serializeTaskReadyMarker(taskId, eventSha256),
 		)
+		if (event.schemaVersion >= 5) {
+			await this.publishRoutingIndexEntry(
+				input.artifactRoot,
+				event,
+				eventSha256,
+			)
+		}
 
 		return projectTaskEvent(null, event, eventSha256, true).summary
 	}
@@ -383,6 +392,128 @@ export class TaskJournal {
 		}
 	}
 
+	async recentTimelines(
+		artifactRoot: string,
+		mode: WorkerMode,
+		limit: number,
+		signal?: AbortSignal,
+	): Promise<Array<TaskTimeline>> {
+		signal?.throwIfAborted()
+		if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100) {
+			throw new HarnessError(
+				'INVALID_TASK_LIMIT',
+				'Recent task timeline limit must be between 0 and 100',
+			)
+		}
+		if (limit === 0) {
+			return []
+		}
+		const indexRoot = path.join(artifactRoot, routingIndexDirectoryName)
+		const modeDirectory = path.join(indexRoot, mode)
+		const tasksRoot = path.join(artifactRoot, taskDirectoryName)
+		try {
+			await assertPrivateDirectory(artifactRoot, artifactRoot)
+			await assertPrivateDirectory(artifactRoot, tasksRoot)
+			await assertPrivateDirectory(artifactRoot, indexRoot)
+			await assertPrivateDirectory(artifactRoot, modeDirectory)
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+				return []
+			}
+			throw error
+		}
+
+		const entries = await readdir(modeDirectory, { withFileTypes: true })
+		if (entries.length > maxTaskDirectories * 2) {
+			throw traversalLimit(
+				`Routing index exceeds the ${maxTaskDirectories}-task traversal limit`,
+			)
+		}
+		const pendingByFinalName = collectPendingPublications(
+			entries,
+			routingIndexFilePattern,
+		)
+		const names = entries.flatMap(entry => {
+			if (pendingFilePattern.test(entry.name)) {
+				if (!entry.isFile()) {
+					throw invalidJournal('Routing index staging entry is not a file')
+				}
+				return []
+			}
+			if (!entry.isFile() || !routingIndexFilePattern.test(entry.name)) {
+				throw invalidJournal('Routing index contains an unexpected entry')
+			}
+			return [entry.name]
+		}).sort((left, right) => left === right ? 0 : left < right ? 1 : -1)
+		if (names.length > maxTaskDirectories) {
+			throw traversalLimit(
+				`Routing index exceeds the ${maxTaskDirectories}-task traversal limit`,
+			)
+		}
+
+		const timelines: Array<TaskTimeline> = []
+		let includedEvents = 0
+		let includedBytes = 0
+		for (const name of names.slice(0, limit)) {
+			signal?.throwIfAborted()
+			const match = routingIndexFilePattern.exec(name)
+			if (match === null) {
+				throw invalidJournal('Routing index entry name is invalid')
+			}
+			const entryPath = path.join(modeDirectory, name)
+			const pendingName = pendingByFinalName.get(name)
+			const contents = pendingName === undefined
+				? await readBoundedRegularFile(artifactRoot, entryPath, maxEventBytes)
+				: await readBoundedPublicationFile(
+					artifactRoot,
+					entryPath,
+					path.join(modeDirectory, pendingName),
+					maxEventBytes,
+				)
+			if (digest(contents) !== match[3]?.toLowerCase()) {
+				throw invalidJournal('Routing index entry digest does not match its name')
+			}
+			const entry = parseRoutingIndexEntry(contents, mode)
+			if (
+				entry.taskId !== match[2] ||
+				Date.parse(entry.createdAt) !== Number(match[1])
+			) {
+				throw invalidJournal('Routing index entry does not match its name')
+			}
+			const marker = await this.readTaskReadyMarker(
+				artifactRoot,
+				entry.taskId,
+				signal,
+			)
+			if (marker === null || marker.firstEventSha256 !== entry.firstEventSha256) {
+				throw invalidJournal('Routing index entry does not match a published task')
+			}
+			const result = await this.readTimeline(
+				artifactRoot,
+				entry.taskId,
+				marker,
+				signal,
+			)
+			if (
+				result.timeline.task.mode !== mode ||
+				result.timeline.task.createdAt !== entry.createdAt
+			) {
+				throw invalidJournal('Routing index entry does not match TaskCreated')
+			}
+			if (
+				timelines.length > 0 &&
+				(includedEvents + result.timeline.events.length > maxEventsPerList ||
+					includedBytes + result.bytesRead > maxListBytes)
+			) {
+				break
+			}
+			timelines.push(result.timeline)
+			includedEvents += result.timeline.events.length
+			includedBytes += result.bytesRead
+		}
+		return timelines
+	}
+
 	private async readTimeline(
 		artifactRoot: string,
 		taskId: string,
@@ -579,6 +710,39 @@ export class TaskJournal {
 			throw error
 		}
 	}
+
+	private async publishRoutingIndexEntry(
+		artifactRoot: string,
+		event: TaskEvent,
+		firstEventSha256: string,
+	): Promise<void> {
+		if (event.type !== 'TaskCreated') {
+			throw invalidJournal('Routing index requires TaskCreated')
+		}
+		const indexRoot = path.join(artifactRoot, routingIndexDirectoryName)
+		const modeDirectory = path.join(indexRoot, event.data.mode)
+		await ensurePrivateDirectory(artifactRoot, indexRoot, { recursive: true })
+		await ensurePrivateDirectory(artifactRoot, modeDirectory, { recursive: true })
+		const contents = serializeRoutingIndexEntry({
+			schemaVersion: 1,
+			taskId: event.taskId,
+			mode: event.data.mode,
+			createdAt: event.occurredAt,
+			firstEventSha256,
+		})
+		await writeExclusiveRegularFile(
+			artifactRoot,
+			path.join(
+				modeDirectory,
+				routingIndexFileName(
+					event.occurredAt,
+					event.taskId,
+					digest(contents),
+				),
+			),
+			contents,
+		)
+	}
 }
 
 function collectPendingPublications(
@@ -613,6 +777,55 @@ type TaskReadyMarker = {
 	schemaVersion: 1
 	taskId: string
 	firstEventSha256: string
+}
+
+type RoutingIndexEntry = {
+	schemaVersion: 1
+	taskId: string
+	mode: WorkerMode
+	createdAt: string
+	firstEventSha256: string
+}
+
+function routingIndexFileName(
+	createdAt: string,
+	taskId: string,
+	entrySha256: string,
+): string {
+	return `${String(Date.parse(createdAt)).padStart(13, '0')}-${taskId}-${entrySha256}.json`
+}
+
+function serializeRoutingIndexEntry(entry: RoutingIndexEntry): string {
+	return `${JSON.stringify(entry)}\n`
+}
+
+function parseRoutingIndexEntry(
+	contents: Buffer,
+	expectedMode: WorkerMode,
+): RoutingIndexEntry {
+	try {
+		const value: unknown = JSON.parse(contents.toString('utf8'))
+		if (
+			!isRecord(value) ||
+			Object.keys(value).sort().join(',') !==
+				'createdAt,firstEventSha256,mode,schemaVersion,taskId' ||
+			value['schemaVersion'] !== 1 ||
+			!uuidPattern.test(String(value['taskId'])) ||
+			value['mode'] !== expectedMode ||
+			typeof value['createdAt'] !== 'string' ||
+			!Number.isFinite(Date.parse(value['createdAt'])) ||
+			typeof value['firstEventSha256'] !== 'string' ||
+			!/^[a-f0-9]{64}$/i.test(value['firstEventSha256'])
+		) {
+			throw invalidJournal('Routing index entry has an invalid shape')
+		}
+		return value as RoutingIndexEntry
+	} catch (error) {
+		if (error instanceof HarnessError) {
+			throw error
+		}
+		throw invalidJournal('Routing index entry does not contain valid JSON')
+	}
 }
 
 function serializeTaskReadyMarker(

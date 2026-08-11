@@ -74,6 +74,7 @@ function evidence(overrides: Partial<RoutingEvidenceSnapshot> = {}): RoutingEvid
 				medianDurationMs: 30_000,
 				averageProviderLatencyMs: 25_000,
 				averageTotalTokens: 10_000,
+				estimatedCostSampleCount: 20,
 				averageEstimatedCostMicroUsd: 900_000,
 			},
 			{
@@ -88,6 +89,7 @@ function evidence(overrides: Partial<RoutingEvidenceSnapshot> = {}): RoutingEvid
 				medianDurationMs: 5_000,
 				averageProviderLatencyMs: 4_000,
 				averageTotalTokens: 2_000,
+				estimatedCostSampleCount: 20,
 				averageEstimatedCostMicroUsd: 10_000,
 			},
 		],
@@ -163,6 +165,27 @@ test('uses measured outcomes, latency, and cost without model-selected routing',
 			'code' in error &&
 			error.code === 'ROUTING_EVIDENCE_MODE_MISMATCH',
 	)
+})
+
+test('does not prefer a fully failed worker for being cheaper or faster', function () {
+	const config = createConfig()
+	const conflictingEvidence = evidence()
+	const failed = conflictingEvidence.workers[0]!
+	const reliable = conflictingEvidence.workers[1]!
+	failed.medianDurationMs = 100
+	failed.averageEstimatedCostMicroUsd = 100
+	reliable.medianDurationMs = 30_000
+	reliable.averageEstimatedCostMicroUsd = 900_000
+
+	for (const strategy of ['cost', 'latency'] as const) {
+		const route = routeWorkers(
+			config,
+			'implementation',
+			policy({ strategy }),
+			conflictingEvidence,
+		)
+		assert.equal(route.candidates[0]?.worker.id, 'claude-quality')
+	}
 })
 
 test('treats an explicit preferred worker as a strict routing contract', function () {

@@ -202,6 +202,7 @@ export type WorkerRoutingEvidence = {
 	medianDurationMs: number
 	averageProviderLatencyMs: number
 	averageTotalTokens: number
+	estimatedCostSampleCount: number
 	averageEstimatedCostMicroUsd: number | null
 }
 

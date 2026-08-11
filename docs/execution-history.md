@@ -84,6 +84,8 @@ tasks/<taskId>/
   events/
     000000000001-<sha256>.json
     000000000002-<sha256>.json
+routing-index/<mode>/
+  <epoch-ms>-<taskId>-<sha256>.json
 ```
 
 Event files are private, individually bounded, strictly sequenced, named with
@@ -107,6 +109,14 @@ Summaries are projected from the validated event chain. They are not stored as
 a second mutable source of truth. One timeline is bounded to 10,000 events and
 8 MiB. Task listing is bounded to 10,000 directory entries, 25,000 events, and 8 MiB of
 event bytes per request.
+
+Event-schema-version-5 tasks also publish a small immutable routing-index entry
+after `TaskCreated` becomes visible. Evidence reads sort those names newest
+first, validate each entry against the task's ready marker and event chain, and
+read at most the configured sample window. The index avoids reparsing all
+retained timelines before each delegation. Aggregate event/byte bounds may
+shorten a valid sample window; they do not make older unrelated timelines block
+routing.
 
 The digest chain detects accidental or partial mutation. It is not a signed or
 externally anchored audit ledger: a host account able to rewrite the entire
