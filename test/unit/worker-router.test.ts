@@ -188,6 +188,45 @@ test('does not prefer a fully failed worker for being cheaper or faster', functi
 	}
 })
 
+test('bounds both sides of sparse cost comparisons', function () {
+	const config = createConfig()
+	const sparseEvidence = evidence()
+	const qwen = sparseEvidence.workers[0]!
+	const claude = sparseEvidence.workers[1]!
+	qwen.successCount = 20
+	qwen.evaluationPassCount = 20
+	qwen.estimatedCostSampleCount = 1
+	qwen.averageEstimatedCostMicroUsd = 10_000
+	claude.averageEstimatedCostMicroUsd = 900_000
+
+	const baselineEvidence = structuredClone(sparseEvidence)
+	baselineEvidence.workers[0]!.estimatedCostSampleCount = 0
+	baselineEvidence.workers[0]!.averageEstimatedCostMicroUsd = null
+	const sparseRoute = routeWorkers(
+		config,
+		'implementation',
+		policy({ strategy: 'cost' }),
+		sparseEvidence,
+	)
+	const baselineRoute = routeWorkers(
+		config,
+		'implementation',
+		policy({ strategy: 'cost' }),
+		baselineEvidence,
+	)
+	const sparseClaudeScore = sparseRoute.candidates.find(
+		candidate => candidate.worker.id === 'claude-quality',
+	)?.score
+	const baselineClaudeScore = baselineRoute.candidates.find(
+		candidate => candidate.worker.id === 'claude-quality',
+	)?.score
+
+	assert.equal(
+		(sparseClaudeScore ?? 0) - (baselineClaudeScore ?? 0),
+		-3_000,
+	)
+})
+
 test('treats an explicit preferred worker as a strict routing contract', function () {
 	const config = createConfig()
 	const route = routeWorkers(

@@ -27,7 +27,8 @@ Each worker aggregate records:
 - completed attempts and evaluation passes
 - median end-to-end attempt duration
 - average provider latency and total tokens
-- average estimated cost and its sample count when configured pricing produced one
+- average estimated cost and its sample count when configured pricing and complete
+  provider usage produced one
 - produced and applied patch counts
 
 Patch application is exposed for audit but does not affect routing scores;
@@ -49,11 +50,16 @@ Measured completion and evaluation rates receive confidence
 | `cost` | ±100,000 | ±60,000 | — |
 | `latency` | ±100,000 | — | ±60,000 |
 
-Cost and duration adjustments are deterministic ranks among eligible workers
-with comparable measurements. Cost confidence uses only priced samples. Missing
-or tied measurements contribute zero, and a fully observed zero-success worker
-cannot outrank a fully successful peer only by failing faster or more cheaply.
-Worker ID remains the final tie breaker.
+Cost and duration adjustments use deterministic pairwise comparisons among
+eligible workers with comparable measurements. Each comparison uses the lower
+confidence of its two samples, so one sparse measurement cannot impose a
+full-confidence penalty on a well-sampled peer. Cost confidence uses only priced
+samples. A cost is available only when pricing is configured and every provider
+request in the attempt reports valid input and output token counts; missing or
+malformed usage makes it unavailable rather than zero. Missing or tied
+measurements contribute zero, and a fully observed zero-success worker cannot
+outrank a fully successful peer only by failing faster or more cheaply. Worker ID
+remains the final tie breaker.
 
 ## Audit and trust boundary
 

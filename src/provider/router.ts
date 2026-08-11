@@ -252,20 +252,32 @@ function rankMetricAdjustments(
 			? []
 			: [{ workerId: candidate.worker.id, value, evidence }]
 	})
-	const uniqueValues = [...new Set(metrics.map(metric => metric.value))]
-		.sort((left, right) => left - right)
-	if (uniqueValues.length < 2) {
+	if (metrics.length < 2) {
 		return new Map()
 	}
 
 	return new Map(metrics.map(metric => {
-		const rank = uniqueValues.indexOf(metric.value)
-		const relative = 1 - (2 * rank) / (uniqueValues.length - 1)
+		const confidence = evidenceConfidence(
+			readSampleCount(metric.evidence),
+		)
+		const comparisons = metrics
+			.filter(other => other.workerId !== metric.workerId)
+			.reduce((total, other) => {
+				const direction = metric.value < other.value
+					? 1
+					: metric.value > other.value
+						? -1
+						: 0
+				const comparisonConfidence = Math.min(
+					confidence,
+					evidenceConfidence(readSampleCount(other.evidence)),
+				)
+				return total + direction * comparisonConfidence
+			}, 0)
 		return [
 			metric.workerId,
 			Math.round(
-				relative * maximumAdjustment *
-					evidenceConfidence(readSampleCount(metric.evidence)),
+				maximumAdjustment * comparisons / (metrics.length - 1),
 			),
 		]
 	}))

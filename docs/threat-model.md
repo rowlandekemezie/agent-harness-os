@@ -68,6 +68,7 @@
 - Evidence reads are repository-scoped, sample- and resource-bounded, read-only, and cancellation-aware
 - Capability, role, tier, and policy filters run before measured scoring
 - Evidence weights are fixed code with bounded confidence; models cannot rewrite them
+- Missing or malformed provider usage never becomes zero-cost routing evidence
 - Reports retain source event hashes, evidence, scores, and reasons; task history binds evidence and decision digests
 - Invalid history fails before provider invocation; a zero task limit disables evidence reads
 
