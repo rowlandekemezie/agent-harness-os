@@ -1,6 +1,7 @@
 import { constants } from 'node:fs'
 import {
 	link,
+	lstat,
 	mkdir,
 	open,
 	realpath,
@@ -279,16 +280,14 @@ async function confirmRemoval(
 }
 
 async function assertEntryMissing(name: string): Promise<void> {
-	let handle: Awaited<ReturnType<typeof open>>
 	try {
-		handle = await open(name, constants.O_RDONLY | noFollowFlag)
+		await lstat(name)
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
 			return
 		}
 		throw error
 	}
-	await handle.close()
 	throw new Error('Artifact removal was not completed')
 }
 
