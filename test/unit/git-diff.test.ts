@@ -37,6 +37,57 @@ test('collects staged and worker-committed changes against the original base', a
 	)
 })
 
+test('preserves token-shaped patch bytes exactly', async function () {
+	const repositoryPath = await createTestRepository()
+	const baseCommit = await resolveCommit(repositoryPath, 'HEAD')
+	const token = 'sk-1234567890abcdef'
+	await writeFile(
+		path.join(repositoryPath, 'token.txt'),
+		`${token}\n`,
+		'utf8',
+	)
+
+	const patch = await getBinaryPatch(repositoryPath, baseCommit)
+	assert.equal(patch.includes(token), true)
+	assert.equal(patch.includes('[REDACTED]'), false)
+})
+
+test('preserves multibyte patch content across Git output chunks', async function () {
+	const repositoryPath = await createTestRepository()
+	const baseCommit = await resolveCommit(repositoryPath, 'HEAD')
+	const changedPath = path.join(repositoryPath, 'boundary.txt')
+	await writeFile(changedPath, 'é\n', 'utf8')
+	const initialPatch = await getBinaryPatch(repositoryPath, baseCommit)
+	const initialIndex = initialPatch.indexOf('é')
+	const paddingLength = 65_535 - initialIndex
+	assert.ok(initialIndex >= 0)
+	assert.ok(paddingLength > 0)
+
+	await writeFile(changedPath, `${'a'.repeat(paddingLength)}é\n`, 'utf8')
+	const patch = await getBinaryPatch(repositoryPath, baseCommit)
+
+	assert.equal(patch.indexOf('é'), 65_535)
+	assert.equal(patch.includes('\uFFFD'), false)
+})
+
+test('rejects non-UTF-8 patch bytes instead of transforming them', async function () {
+	const repositoryPath = await createTestRepository()
+	const baseCommit = await resolveCommit(repositoryPath, 'HEAD')
+	await writeFile(
+		path.join(repositoryPath, 'invalid.txt'),
+		Buffer.from([0xff, 0x0a]),
+	)
+
+	await assert.rejects(
+		getBinaryPatch(repositoryPath, baseCommit),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'PATCH_INVALID_ENCODING',
+	)
+})
+
 test('reports both sides of a rename so prohibited source paths cannot disappear', async function () {
 	const repositoryPath = await createTestRepository()
 	await writeFile(

@@ -79,6 +79,9 @@ export type HarnessConfig = {
 	workers: Array<WorkerConfig>
 	redactionSecrets: WorkerSecrets
 	workerSecretEnvironmentNames: Array<string>
+	policy: {
+		organizationPolicyPath: string | null
+	}
 	routing: {
 		defaultWorkerId: string | null
 		defaultStrategy: RoutingStrategy
@@ -135,6 +138,11 @@ export function loadConfig(
 		redactionSecrets: collectWorkerSecrets(backingWorkers),
 		workerSecretEnvironmentNames:
 			collectWorkerSecretEnvironmentNames(backingWorkers),
+		policy: {
+			organizationPolicyPath: parseOrganizationPolicyPath(
+				environment['AGENT_OS_ORGANIZATION_POLICY_PATH'],
+			),
+		},
 		routing: {
 			defaultWorkerId: requestedDefaultWorkerId,
 			defaultStrategy: parseRoutingStrategy(
@@ -241,6 +249,20 @@ export function loadConfig(
 			environment['AGENT_HARNESS_LOG_LEVEL'] ?? 'info',
 		),
 	}
+}
+
+function parseOrganizationPolicyPath(value: string | undefined): string | null {
+	const policyPath = value?.trim()
+	if (policyPath === undefined || policyPath === '') {
+		return null
+	}
+	if (policyPath.length > 4_096 || !path.isAbsolute(policyPath)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'AGENT_OS_ORGANIZATION_POLICY_PATH must be an absolute path of at most 4096 characters',
+		)
+	}
+	return path.normalize(policyPath)
 }
 
 export function assertWorkersConfigured(config: HarnessConfig): void {

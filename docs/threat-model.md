@@ -21,6 +21,7 @@
 - An evaluator returning malformed, contradictory, oversized, or hostile evidence
 - A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
 - Incorrect or malicious worker profile, capability, cost, latency, priority, endpoint, or pricing configuration
+- Malformed, unsafe, mutable-checkout, or authority-expanding policy input
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
 - Concurrent tasks or external processes targeting the same repository
@@ -48,12 +49,24 @@
 - Every fallback attempt starts from the original base in a fresh worktree
 - Failed attempts are persisted for audit but cannot be applied
 
+### Policies as code
+
+- Organization policy is an absolute-path, owner-owned, single-link regular file with no group or other write access
+- Repository policy is read from the verified base commit as one non-executable regular Git blob
+- Policy files are exact-schema UTF-8 JSON bounded to 64 KiB
+- Numeric limits use the minimum; deny paths and capabilities use a union; permissions require every source to allow them
+- `.agent-os` is outside worker read and write authority
+- Invalid policy fails before provider invocation
+- Policy metadata containing configured credentials fails instead of being persisted or transformed
+- Reports retain effective policy and source digests; event schema version 4 binds the policy digest before patch application
+
 
 ### Filesystem
 
 - Explicit non-empty repository path allowlist
 - Repository-relative paths only
 - Allowlist and denylist globs with bounded pattern counts and lengths
+- Aggregate-bounded state-machine glob evaluation with cancellation between changed paths
 - Direct and nested `.git`, environment, private-key, credential, package-registry, infrastructure-state, and harness-artifact denial
 - Separate worker-write denial for manifests, lockfiles, CI, Docker, development-container, MCP, editor, and agent-control files
 - Lexical path containment and realpath containment
@@ -97,6 +110,7 @@
 - Hooks and fsmonitor overridden; `core.worktree`, executable local/worktree filters, textconv, merge drivers, and attributes configuration rejected
 - Patch and changed-file collection against the original base commit, including staged and worker-committed changes
 - Rename detection disabled so both deleted and added paths remain visible to policy
+- Invalid UTF-8 patches fail closed before hashing or persistence; captured patch text is never replacement-decoded
 - Binary-capable patch collection
 - Independent changed-path and file-type validation
 - Artifacts outside the checkout
@@ -105,6 +119,7 @@
 - Handle-bound artifact reads and helper-confined atomic writes that verify the destination directory inode before mutation
 - Digest-named, chained task events; task summaries are projected from the validated chain
 - Patch SHA-256
+- Git standard output remains byte-faithful; only diagnostic standard error is redacted
 - Patch bytes passed to Git over standard input after verification, avoiding a second patch-path lookup
 - Clean caller working tree
 - Exact base-commit match before and after patch verification

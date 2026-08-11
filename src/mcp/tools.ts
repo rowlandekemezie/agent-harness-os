@@ -352,6 +352,9 @@ export class McpTools {
 			configuredWorkerCount: configuredWorkers.length,
 			defaultWorkerId: this.config.routing.defaultWorkerId,
 			defaultRoutingStrategy: this.config.routing.defaultStrategy,
+			organizationPolicyConfigured:
+				this.config.policy.organizationPolicyPath !== null,
+			repositoryPolicyPath: '.agent-os/policy.json',
 			workers: this.workerRegistry.list(),
 			executionBackend: this.config.execution.backend,
 			localExecutionEnabled: this.config.execution.allowUnsandboxedLocal,

@@ -34,6 +34,10 @@ test('denies traversal and secret paths', async function () {
 	assert.throws(() => policy.assertAllowed('../outside.txt'))
 	await assertHarnessCode(policy.resolveForRead('.env'), 'SENSITIVE_PATH_DENIED')
 	await assertHarnessCode(policy.resolveForRead('.git'), 'SENSITIVE_PATH_DENIED')
+	await assertHarnessCode(
+		policy.resolveForRead('.agent-os/policy.json'),
+		'SENSITIVE_PATH_DENIED',
+	)
 	await assertHarnessCode(policy.resolveForRead('.ssh/id_ed25519'), 'SENSITIVE_PATH_DENIED')
 	await assertHarnessCode(policy.resolveForRead('AGENTS.md'), 'SENSITIVE_PATH_DENIED')
 	await assertHarnessCode(

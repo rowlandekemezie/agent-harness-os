@@ -18,6 +18,20 @@ A ready installation has:
 
 Inspect the worker registry and route separately through `list_workers` and `route_worker`.
 
+## Policy changes
+
+Treat `AGENT_OS_ORGANIZATION_POLICY_PATH` and `.agent-os/policy.json` as
+security configuration. Review limit reductions, prohibited paths, required
+capabilities, routing tiers, network permission, fallback, and attempt counts.
+The organization path must be absolute and available to the MCP process; run
+`agent-harness-os codex-config` again after adding or changing the variable.
+
+Repository policy takes effect only when it is present in the delegated base
+commit. `route_worker` does not read repositories, so its result is a
+registry-only preview; the delegation report and task timeline contain the
+resolved policy and exact source digests. Invalid or unsafe policy fails before
+provider invocation. Existing runs remain bound to their original policy.
+
 ## Registry changes
 
 Treat `AGENT_OS_WORKERS_JSON` as production configuration. Review changes to:
@@ -87,7 +101,8 @@ Run artifacts are stored outside repositories under the user-private state direc
 - `changes.patch`
 - `worker-transcript.txt`
 
-Reports include selected-worker metadata, route candidates, prior attempts,
+Reports include selected-worker metadata, route candidates, resolved policy and
+source digests, prior attempts,
 usage, validation results, evaluation dimensions, and warnings. `failed`
 evaluation dimensions block application. `unknown` dimensions make evaluation
 inconclusive and require operator review; they are not claims of success. Protect

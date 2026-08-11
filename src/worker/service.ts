@@ -54,6 +54,10 @@ import { WorkerToolExecutor } from './tool-executor.js'
 import { DeterministicEvaluator } from '../evaluation/deterministic.js'
 import type { Evaluator } from '../evaluation/evaluator.js'
 import {
+	resolveTaskPolicy,
+	type PolicyBoundTask,
+} from '../policy/engine.js'
+import {
 	validateEvaluationResult,
 	validateEvaluationSummary,
 } from '../evaluation/schema.js'
@@ -93,6 +97,7 @@ export class WorkerService {
 	private readonly worktreeManager: WorktreeManager
 	private readonly artifactStore: ArtifactStore
 	private readonly taskJournal: TaskJournal
+	private readonly redactor: Redactor
 	private readonly evaluators: Array<Evaluator>
 	private readonly workerRegistry: WorkerRegistry
 	private readonly semaphore: Semaphore
@@ -106,12 +111,12 @@ export class WorkerService {
 		this.logger = new Logger('worker-service', config.logLevel)
 		this.worktreeManager = new WorktreeManager(this.logger)
 		const workerSecrets = getWorkerSecrets(config)
-		const redactor = new Redactor(
+		this.redactor = new Redactor(
 			workerSecrets.namedSecrets,
 			workerSecrets.additionalSecrets,
 		)
-		this.artifactStore = new ArtifactStore(redactor)
-		this.taskJournal = new TaskJournal(redactor)
+		this.artifactStore = new ArtifactStore(this.redactor)
+		this.taskJournal = new TaskJournal(this.redactor)
 		this.evaluators = [
 			new DeterministicEvaluator(),
 			...(dependencies.evaluators ?? []),
@@ -129,29 +134,40 @@ export class WorkerService {
 			throwIfAborted(externalSignal)
 			assertWorkersConfigured(this.config)
 			this.assertTaskContract(task)
-			const route = this.workerRegistry.route(task.mode, task.routing)
 			const repositoryPath = await resolveRepositoryRoot(task.repositoryPath)
 			await assertSafeRepositoryConfiguration(repositoryPath)
 			this.assertRepositoryAvailable(repositoryPath)
 			const artifactRoot = await this.getArtifactRoot(repositoryPath)
 			const lease = await acquireRepositoryLease(artifactRoot)
-			const deadlineMs = Date.now() + task.timeoutSeconds * 1_000
 			const previousAttempts: Array<WorkerAttemptSummary> = []
 			this.activeRepositories.add(repositoryPath)
 
 			try {
 				const baseCommit = await resolveCommit(repositoryPath, task.baseRef)
-				const resolvedTask = {
-					...task,
+				const resolvedTask = await resolveTaskPolicy(
+					this.config,
 					repositoryPath,
-					baseRef: baseCommit,
-				}
+					baseCommit,
+					{
+						...task,
+						repositoryPath,
+						baseRef: baseCommit,
+					},
+				)
+				this.assertTaskContract(resolvedTask)
+				this.assertPolicySafeToPersist(resolvedTask)
+				const deadlineMs = Date.now() + resolvedTask.timeoutSeconds * 1_000
+				const route = this.workerRegistry.route(
+					resolvedTask.mode,
+					resolvedTask.routing,
+				)
 				const taskSummary = await this.taskJournal.create({
 					artifactRoot,
 					objective: resolvedTask.objective,
 					mode: resolvedTask.mode,
 					repositoryPath,
 					baseCommit,
+					policy: resolvedTask.policy,
 				})
 				await this.taskJournal.append(artifactRoot, taskSummary.taskId, {
 					type: 'RouteSelected',
@@ -495,6 +511,7 @@ export class WorkerService {
 				patchSha256: report.patchSha256,
 				changedFileCount: report.changedFiles.length,
 				workerId,
+				policySha256: report.policy?.digest ?? null,
 				evaluation: report.schemaVersion === 3 && report.evaluation !== undefined
 					? {
 						evaluatorIds: report.evaluation.results.map(
@@ -570,7 +587,7 @@ export class WorkerService {
 	}
 
 	private async executeInWorktree(
-		task: WorkerTask,
+		task: PolicyBoundTask,
 		worker: WorkerConfig,
 		context: AttemptContext,
 	): Promise<WorkerRunReport> {
@@ -717,6 +734,8 @@ export class WorkerService {
 					task,
 					worktree.path,
 					worktree.baseCommit,
+					signal,
+					context.deadlineMs,
 				)
 				changedFiles = candidate.changedFiles
 				patch = candidate.patch
@@ -733,12 +752,25 @@ export class WorkerService {
 					})
 				}
 			} catch (error) {
-				status = 'failed'
-				failureCode = failureCode ?? getFailureCode(error)
+				status = classifyRunError(
+					error,
+					context.externalSignal,
+					timeoutController.signal,
+				)
+				failureCode = status === 'cancelled' || status === 'timed_out'
+					? 'WORKER_ABORTED'
+					: failureCode ?? getFailureCode(error)
+				if (status === 'policy_violation') {
+					policyViolations.push(formatPolicyViolation(error))
+				}
 				warnings.push(`Patch collection failed: ${getErrorMessage(error)}`)
 			}
 
-			if (policyViolations.length > 0) {
+			if (
+				policyViolations.length > 0 &&
+				status !== 'cancelled' &&
+				status !== 'timed_out'
+			) {
 				status = 'policy_violation'
 				failureCode = failureCode ?? 'WORKER_POLICY_VIOLATION'
 			}
@@ -790,10 +822,21 @@ export class WorkerService {
 							worktree.baseCommit,
 							changedFiles,
 							patch,
+							signal,
+							context.deadlineMs,
 						)
 					} catch (error) {
-						status = 'failed'
-						failureCode = failureCode ?? getFailureCode(error)
+						status = classifyRunError(
+							error,
+							context.externalSignal,
+							timeoutController.signal,
+						)
+						failureCode = status === 'cancelled' || status === 'timed_out'
+							? 'WORKER_ABORTED'
+							: failureCode ?? getFailureCode(error)
+						if (status === 'policy_violation') {
+							policyViolations.push(formatPolicyViolation(error))
+						}
 						warnings.push(
 							`Validation integrity check failed: ${getErrorMessage(error)}`,
 						)
@@ -854,7 +897,7 @@ export class WorkerService {
 				acceptanceCriteria,
 				policyViolations,
 				warnings,
-				maxChangedFiles: this.config.limits.maxChangedFiles,
+				maxChangedFiles: task.policy.maxChangedFiles,
 				maxPatchBytes: maxArtifactPatchBytes,
 				deadlineMs: context.deadlineMs,
 			}
@@ -969,6 +1012,7 @@ export class WorkerService {
 				policyViolations,
 				warnings,
 				evaluation,
+				policy: task.policy,
 				provider: {
 					workerId: worker.id,
 					adapter: worker.adapter,
@@ -1032,7 +1076,7 @@ export class WorkerService {
 	}
 
 	private async runRequiredCommands(
-		task: WorkerTask,
+		task: PolicyBoundTask,
 		commandRunner: ReturnType<typeof createCommandRunner>,
 		commandResults: Array<CommandResult>,
 		worktreePath: string,
@@ -1055,36 +1099,52 @@ export class WorkerService {
 	}
 
 	private async collectPatchCandidate(
-		task: WorkerTask,
+		task: PolicyBoundTask,
 		worktreePath: string,
 		baseCommit: string,
+		signal?: AbortSignal,
+		deadlineMs?: number,
 	): Promise<{
 		changedFiles: Array<string>
 		patch: string
 		policyViolations: Array<string>
 	}> {
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const changedFiles = await getChangedFiles(worktreePath, baseCommit)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 
-		const policyViolations = changedFiles.length > this.config.limits.maxChangedFiles
+		const policyViolations = changedFiles.length > task.policy.maxChangedFiles
 			? [
-				`CHANGED_FILE_LIMIT: Worker changed ${changedFiles.length} files, exceeding the limit of ${this.config.limits.maxChangedFiles}`,
+				`CHANGED_FILE_LIMIT: Worker changed ${changedFiles.length} files, exceeding the limit of ${task.policy.maxChangedFiles}`,
 			]
-			: await this.validateChangedPaths(task, worktreePath, changedFiles)
+			: await this.validateChangedPaths(
+				task,
+				worktreePath,
+				changedFiles,
+				signal,
+				deadlineMs,
+			)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const patch = policyViolations.length === 0
 			? await getBinaryPatch(worktreePath, baseCommit)
 			: ''
+		throwIfAbortedOrExpired(signal, deadlineMs)
 
 		return { changedFiles, patch, policyViolations }
 	}
 
 	private async assertValidationPreservedCandidate(
-		task: WorkerTask,
+		task: PolicyBoundTask,
 		worktreePath: string,
 		baseCommit: string,
 		expectedChangedFiles: Array<string>,
 		expectedPatch: string,
+		signal?: AbortSignal,
+		deadlineMs?: number,
 	): Promise<void> {
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const currentHead = await resolveCommit(worktreePath, 'HEAD')
+		throwIfAbortedOrExpired(signal, deadlineMs)
 
 		if (currentHead !== baseCommit) {
 			throw new HarnessError(
@@ -1095,10 +1155,13 @@ export class WorkerService {
 		}
 
 		await assertSafeRepositoryConfiguration(worktreePath)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const actual = await this.collectPatchCandidate(
 			task,
 			worktreePath,
 			baseCommit,
+			signal,
+			deadlineMs,
 		)
 
 		if (actual.policyViolations.length > 0) {
@@ -1125,9 +1188,11 @@ export class WorkerService {
 	}
 
 	private async validateChangedPaths(
-		task: WorkerTask,
+		task: PolicyBoundTask,
 		worktreePath: string,
 		changedFiles: Array<string>,
+		signal?: AbortSignal,
+		deadlineMs?: number,
 	): Promise<Array<string>> {
 		const policy = new PathPolicy(
 			worktreePath,
@@ -1137,6 +1202,7 @@ export class WorkerService {
 		const policyViolations: Array<string> = []
 
 		for (const changedFile of changedFiles) {
+			throwIfAbortedOrExpired(signal, deadlineMs)
 			try {
 				await policy.assertSafeChangedPath(changedFile)
 			} catch (error) {
@@ -1208,6 +1274,19 @@ export class WorkerService {
 					'Local validation cannot enforce allowNetwork=false. Use Docker or explicitly allow network access for this trusted task.',
 				)
 			}
+		}
+	}
+
+	private assertPolicySafeToPersist(task: PolicyBoundTask): void {
+		const persistedText = JSON.stringify({
+			sources: task.policy.sources.map(source => source.location),
+			prohibitedPaths: task.policy.prohibitedPaths,
+		})
+		if (this.redactor.redact(persistedText) !== persistedText) {
+			throw new HarnessError(
+				'POLICY_CONTAINS_SECRET',
+				'Policy metadata contains credential material and cannot be persisted safely',
+			)
 		}
 	}
 
@@ -1417,6 +1496,10 @@ function classifyRunError(
 		return 'timed_out'
 	}
 
+	if (error instanceof DOMException && error.name === 'TimeoutError') {
+		return 'timed_out'
+	}
+
 	if (error instanceof HarnessError && isPolicyCode(error.code)) {
 		return 'policy_violation'
 	}
@@ -1434,6 +1517,16 @@ function arraysEqual(left: Array<string>, right: Array<string>): boolean {
 function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted === true) {
 		throw new DOMException('Worker delegation aborted', 'AbortError')
+	}
+}
+
+function throwIfAbortedOrExpired(
+	signal: AbortSignal | undefined,
+	deadlineMs: number | undefined,
+): void {
+	throwIfAborted(signal)
+	if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+		throw new DOMException('Worker deadline expired', 'TimeoutError')
 	}
 }
 

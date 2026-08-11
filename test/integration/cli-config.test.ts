@@ -37,6 +37,7 @@ test('includes custom worker secret environment names in generated Codex configu
 				role: 'implementation',
 				allowedCapabilities: ['implementation', 'tool-calling'],
 			}]),
+			AGENT_OS_ORGANIZATION_POLICY_PATH: '/etc/agent-os/policy.json',
 		},
 	})
 
@@ -45,4 +46,5 @@ test('includes custom worker secret environment names in generated Codex configu
 	assert.match(stdout, /"UNPROFILED_PROVIDER_KEY"/)
 	assert.match(stdout, /"UNPROFILED_PRIVATE_TOKEN"/)
 	assert.match(stdout, /"AGENT_OS_WORKER_PROFILES_JSON"/)
+	assert.match(stdout, /"AGENT_OS_ORGANIZATION_POLICY_PATH"/)
 })

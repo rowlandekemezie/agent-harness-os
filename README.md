@@ -31,6 +31,7 @@ your clean checkout
 
 - A worker registry configured through `AGENT_OS_WORKERS_JSON`
 - Optional role profiles configured through `AGENT_OS_WORKER_PROFILES_JSON`
+- Restrictive organization, repository, and task policies with digest-bound provenance
 - ChatGPT-authenticated Codex CLI, OpenAI-compatible, and native Anthropic adapters
 - Capability-based routing for research, implementation, testing, review, tool calling, long context, and private execution
 - Deterministic `balanced`, `cost`, `latency`, and `quality` strategies
@@ -65,6 +66,30 @@ model responses. It does not route around iteration or other policy limits,
 failed deterministic validation, unsafe Git configuration, or cancellation.
 
 See [Architecture](docs/architecture.md) and [Threat model](docs/threat-model.md).
+
+## Configure policies
+
+Repositories may commit `.agent-os/policy.json`; operators may also set an
+absolute host path with `AGENT_OS_ORGANIZATION_POLICY_PATH`. The harness reads
+repository policy from the verified base commit and combines every source by
+choosing the restrictive result.
+
+```json
+{
+  "schemaVersion": 1,
+  "maxChangedFiles": 30,
+  "allowNetwork": false,
+  "prohibitedPaths": ["infra/**", "migrations/**"],
+  "routing": {
+    "maxCostTier": "medium",
+    "allowFallback": false
+  }
+}
+```
+
+Resolved policy and source digests are recorded in reports and task history.
+See [Policies as code](docs/policies.md) for the schema, merge rules, trust
+boundary, and operations.
 
 ## Prerequisites
 
@@ -253,9 +278,10 @@ agent-harness-os codex-config
 ```
 
 The generated server name is `agent_os`. Run the command with
-`AGENT_OS_WORKERS_JSON` and optional `AGENT_OS_WORKER_PROFILES_JSON` loaded; it
-forwards both configuration values, common provider credential names, and every
-custom `apiKeyEnv` or `headerEnv` name used by the effective registry.
+`AGENT_OS_WORKERS_JSON`, optional `AGENT_OS_WORKER_PROFILES_JSON`, and optional
+`AGENT_OS_ORGANIZATION_POLICY_PATH` loaded; it forwards those configuration
+values, common provider credential names, and every custom `apiKeyEnv` or
+`headerEnv` name used by the effective registry.
 Regenerate the block whenever those names change.
 
 The eight MCP tools are:
@@ -273,6 +299,8 @@ See [Execution history](docs/execution-history.md) for identity, integrity,
 query bounds, incomplete tasks, and replay semantics.
 See [Evaluation](docs/evaluation.md) for evidence sources, dimensions, outcome
 semantics, compatibility, and extension boundaries.
+See [Policies as code](docs/policies.md) for deterministic composition and
+policy provenance.
 
 ## Operating workflow
 

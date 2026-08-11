@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { TaskJournal } from '../../src/artifacts/task-journal.js'
+import type { ResolvedPolicy } from '../../src/domain/types.js'
 
 async function createTask(
 	journal: TaskJournal,
@@ -130,6 +131,51 @@ test('persists and projects an append-only task timeline', async function () {
 	assert.deepEqual(
 		timeline.events.map(event => event.sequence),
 		[1, 2, 3, 4, 5, 6, 7, 8],
+	)
+})
+
+test('binds a resolved policy to current task history', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-policy-'))
+	const journal = new TaskJournal()
+	const policyWithoutDigest = {
+		schemaVersion: 1 as const,
+		sources: [],
+		maxChangedFiles: 10,
+		maxIterations: 4,
+		maxTaskSeconds: 60,
+		allowNetwork: false,
+		prohibitedPaths: ['infra/**'],
+		routing: {
+			requiredCapabilities: [],
+			maxCostTier: null,
+			maxLatencyTier: null,
+			allowFallback: false,
+			maxAttempts: 1,
+		},
+	}
+	const policy: ResolvedPolicy = {
+		...policyWithoutDigest,
+		digest: createHash('sha256')
+			.update(JSON.stringify(policyWithoutDigest))
+			.digest('hex'),
+	}
+	const task = await journal.create({
+		artifactRoot,
+		objective: 'Bind policy.',
+		mode: 'implementation',
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		policy,
+	})
+	const timeline = await journal.timeline(artifactRoot, task.taskId)
+
+	assert.equal(task.policySha256, policy.digest)
+	assert.equal(timeline.events[0]?.schemaVersion, 4)
+	assert.equal(
+		timeline.events[0]?.type === 'TaskCreated'
+			? timeline.events[0].data.policySha256
+			: null,
+		policy.digest,
 	)
 })
 

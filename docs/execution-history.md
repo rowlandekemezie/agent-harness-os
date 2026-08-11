@@ -19,9 +19,10 @@ journal provides durable history and query projections; Agent Harness OS does
 not reconstruct patch bytes or application authority from events.
 
 Before adding application events, the harness proves that the report's run,
-worker, repository, base commit, patch digest, changed-file count, and terminal
-status match the journal. For version 3 reports it also proves evaluator IDs and
-outcome; missing, corrupt, or mismatched evaluation history blocks application.
+worker, repository, base commit, patch digest, changed-file count, resolved
+policy digest, and terminal status match the journal. For version 3 reports it
+also proves evaluator IDs and outcome; missing, corrupt, or mismatched
+evaluation or policy history blocks application.
 Version 1 and 2 reports remain readable for audit but cannot pass the
 evaluation-bound patch gate. Failure to append new patch-lifecycle events after
 a successful link check remains a warning.
@@ -53,10 +54,14 @@ existing private permissions and integrity checks.
 
 `EvaluationCompleted` records evaluator IDs, the aggregate outcome, the profile
 evaluation policy, and failed or unknown dimension IDs. Detailed summaries and
-evidence remain in the run report. New event-schema-version-3 attempts require
+evidence remain in the run report. Event-schema-version-3 and version-4 attempts require
 evaluation after validation and before attempt completion, and reject a
 completed strict-profile attempt when evaluation is inconclusive. Version 1 and
 2 timelines remain readable without invented policy evidence.
+
+Event schema version 4 adds the resolved policy digest and source count to
+`TaskCreated`. Policy details and individual source digests remain in the run
+report.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
