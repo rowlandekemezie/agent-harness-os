@@ -34,10 +34,10 @@ export async function runProcess(
 	let outputTruncated = false
 	let invalidUtf8 = false
 	const stdoutDecoder = options.requireValidUtf8 === true
-		? new TextDecoder('utf-8', { fatal: true })
+		? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 		: null
 	const stderrDecoder = options.requireValidUtf8 === true
-		? new TextDecoder('utf-8', { fatal: true })
+		? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 		: null
 
 	return await new Promise<ProcessResult>((resolve, reject) => {

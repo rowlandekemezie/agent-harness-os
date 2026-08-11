@@ -216,7 +216,10 @@ async function readOrganizationPolicy(policyPath: string): Promise<string> {
 			)
 		}
 		try {
-			return new TextDecoder('utf-8', { fatal: true }).decode(contents)
+			return new TextDecoder('utf-8', {
+				fatal: true,
+				ignoreBOM: true,
+			}).decode(contents)
 		} catch {
 			throw new HarnessError(
 				'INVALID_POLICY_ENCODING',
