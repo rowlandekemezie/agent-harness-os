@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { open } from 'node:fs/promises'
+import { lstat, open } from 'node:fs/promises'
 import type { HarnessConfig } from '../config.js'
 import type {
 	PolicySource,
@@ -189,8 +189,25 @@ async function readOrganizationPolicy(policyPath: string): Promise<string> {
 
 	try {
 		const stats = await handle.stat()
+		let pathStats: Awaited<ReturnType<typeof lstat>>
+		try {
+			pathStats = await lstat(policyPath)
+		} catch (error) {
+			throw new HarnessError(
+				'POLICY_READ_FAILED',
+				'Organization policy path changed while it was being opened',
+				{ cause: error instanceof Error ? error.message : String(error) },
+			)
+		}
 		const mode = typeof stats.mode === 'bigint' ? Number(stats.mode) : stats.mode
-		if (!stats.isFile() || stats.nlink !== 1 || (mode & 0o022) !== 0) {
+		if (
+			!stats.isFile() ||
+			!pathStats.isFile() ||
+			pathStats.dev !== stats.dev ||
+			pathStats.ino !== stats.ino ||
+			stats.nlink !== 1 ||
+			(mode & 0o022) !== 0
+		) {
 			throw new HarnessError(
 				'INVALID_POLICY_FILE',
 				'Organization policy must be a regular file with one link and no group or other write access',
