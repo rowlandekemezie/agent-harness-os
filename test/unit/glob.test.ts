@@ -19,3 +19,19 @@ test('bounds adversarial wildcard matching without regex backtracking', function
 		false,
 	)
 })
+
+test('shares one matching budget across an entire pattern set', function () {
+	const patterns = Array.from(
+		{ length: 300 },
+		(_, index) => `${'*a'.repeat(50)}b${index}`,
+	)
+
+	assert.throws(
+		() => matchesAnyGlob('a'.repeat(100), patterns),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'GLOB_MATCH_LIMIT',
+	)
+})

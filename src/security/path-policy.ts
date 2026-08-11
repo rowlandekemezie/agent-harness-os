@@ -1,7 +1,12 @@
 import { lstat, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { HarnessError } from '../lib/errors.js'
-import { matchesAnyGlob, normalizePath } from '../lib/glob.js'
+import {
+	createGlobMatchBudget,
+	matchesAnyGlob,
+	normalizePath,
+} from '../lib/glob.js'
+import type { GlobMatchBudget } from '../lib/glob.js'
 
 export const defaultProhibitedPaths = [
 	'.git',
@@ -204,29 +209,40 @@ export class PathPolicy {
 
 	isAllowed(relativePath: string): boolean {
 		const normalized = normalizeAndValidateRelativePath(relativePath)
+		const budget = createGlobMatchBudget()
 
 		return (
-			matchesAnyGlob(normalized, this.allowedPaths) &&
-			!matchesAnyGlob(normalized, this.prohibitedPaths)
+			matchesAnyGlob(normalized, this.allowedPaths, budget) &&
+			!matchesAnyGlob(normalized, this.prohibitedPaths, budget)
 		)
 	}
 
 	isProhibited(relativePath: string): boolean {
 		const normalized = normalizeAndValidateRelativePath(relativePath)
-		return matchesAnyGlob(normalized, this.prohibitedPaths)
+		return matchesAnyGlob(
+			normalized,
+			this.prohibitedPaths,
+			createGlobMatchBudget(),
+		)
 	}
 
 	assertAllowed(relativePath: string): string {
 		const normalized = normalizeAndValidateRelativePath(relativePath)
+		return this.assertAllowedWithBudget(normalized, createGlobMatchBudget())
+	}
 
-		if (!matchesAnyGlob(normalized, this.allowedPaths)) {
+	private assertAllowedWithBudget(
+		normalized: string,
+		budget: GlobMatchBudget,
+	): string {
+		if (!matchesAnyGlob(normalized, this.allowedPaths, budget)) {
 			throw new HarnessError(
 				'PATH_NOT_ALLOWED',
 				`Path is outside the task allowlist: ${normalized}`,
 			)
 		}
 
-		if (matchesAnyGlob(normalized, this.prohibitedPaths)) {
+		if (matchesAnyGlob(normalized, this.prohibitedPaths, budget)) {
 			throw new HarnessError(
 				'SENSITIVE_PATH_DENIED',
 				`Path is prohibited by policy: ${normalized}`,
@@ -330,9 +346,11 @@ export class PathPolicy {
 	}
 
 	private assertWritable(relativePath: string): string {
-		const normalized = this.assertAllowed(relativePath)
+		const normalized = normalizeAndValidateRelativePath(relativePath)
+		const budget = createGlobMatchBudget()
+		this.assertAllowedWithBudget(normalized, budget)
 
-		if (matchesAnyGlob(normalized, this.writeProhibitedPaths)) {
+		if (matchesAnyGlob(normalized, this.writeProhibitedPaths, budget)) {
 			throw new HarnessError(
 				'CONTROL_PATH_WRITE_DENIED',
 				`Worker writes to repository control-plane files are prohibited: ${normalized}`,

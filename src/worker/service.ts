@@ -734,6 +734,7 @@ export class WorkerService {
 					task,
 					worktree.path,
 					worktree.baseCommit,
+					signal,
 				)
 				changedFiles = candidate.changedFiles
 				patch = candidate.patch
@@ -750,8 +751,15 @@ export class WorkerService {
 					})
 				}
 			} catch (error) {
-				status = 'failed'
+				status = classifyRunError(
+					error,
+					context.externalSignal,
+					timeoutController.signal,
+				)
 				failureCode = failureCode ?? getFailureCode(error)
+				if (status === 'policy_violation') {
+					policyViolations.push(formatPolicyViolation(error))
+				}
 				warnings.push(`Patch collection failed: ${getErrorMessage(error)}`)
 			}
 
@@ -807,10 +815,18 @@ export class WorkerService {
 							worktree.baseCommit,
 							changedFiles,
 							patch,
+							signal,
 						)
 					} catch (error) {
-						status = 'failed'
+						status = classifyRunError(
+							error,
+							context.externalSignal,
+							timeoutController.signal,
+						)
 						failureCode = failureCode ?? getFailureCode(error)
+						if (status === 'policy_violation') {
+							policyViolations.push(formatPolicyViolation(error))
+						}
 						warnings.push(
 							`Validation integrity check failed: ${getErrorMessage(error)}`,
 						)
@@ -1076,21 +1092,26 @@ export class WorkerService {
 		task: PolicyBoundTask,
 		worktreePath: string,
 		baseCommit: string,
+		signal?: AbortSignal,
 	): Promise<{
 		changedFiles: Array<string>
 		patch: string
 		policyViolations: Array<string>
 	}> {
+		throwIfAborted(signal)
 		const changedFiles = await getChangedFiles(worktreePath, baseCommit)
+		throwIfAborted(signal)
 
 		const policyViolations = changedFiles.length > task.policy.maxChangedFiles
 			? [
 				`CHANGED_FILE_LIMIT: Worker changed ${changedFiles.length} files, exceeding the limit of ${task.policy.maxChangedFiles}`,
 			]
-			: await this.validateChangedPaths(task, worktreePath, changedFiles)
+			: await this.validateChangedPaths(task, worktreePath, changedFiles, signal)
+		throwIfAborted(signal)
 		const patch = policyViolations.length === 0
 			? await getBinaryPatch(worktreePath, baseCommit)
 			: ''
+		throwIfAborted(signal)
 
 		return { changedFiles, patch, policyViolations }
 	}
@@ -1101,8 +1122,11 @@ export class WorkerService {
 		baseCommit: string,
 		expectedChangedFiles: Array<string>,
 		expectedPatch: string,
+		signal?: AbortSignal,
 	): Promise<void> {
+		throwIfAborted(signal)
 		const currentHead = await resolveCommit(worktreePath, 'HEAD')
+		throwIfAborted(signal)
 
 		if (currentHead !== baseCommit) {
 			throw new HarnessError(
@@ -1113,10 +1137,12 @@ export class WorkerService {
 		}
 
 		await assertSafeRepositoryConfiguration(worktreePath)
+		throwIfAborted(signal)
 		const actual = await this.collectPatchCandidate(
 			task,
 			worktreePath,
 			baseCommit,
+			signal,
 		)
 
 		if (actual.policyViolations.length > 0) {
@@ -1146,6 +1172,7 @@ export class WorkerService {
 		task: PolicyBoundTask,
 		worktreePath: string,
 		changedFiles: Array<string>,
+		signal?: AbortSignal,
 	): Promise<Array<string>> {
 		const policy = new PathPolicy(
 			worktreePath,
@@ -1155,6 +1182,7 @@ export class WorkerService {
 		const policyViolations: Array<string> = []
 
 		for (const changedFile of changedFiles) {
+			throwIfAborted(signal)
 			try {
 				await policy.assertSafeChangedPath(changedFile)
 			} catch (error) {

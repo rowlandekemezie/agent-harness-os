@@ -52,6 +52,24 @@ test('preserves token-shaped patch bytes exactly', async function () {
 	assert.equal(patch.includes('[REDACTED]'), false)
 })
 
+test('preserves multibyte patch content across Git output chunks', async function () {
+	const repositoryPath = await createTestRepository()
+	const baseCommit = await resolveCommit(repositoryPath, 'HEAD')
+	const changedPath = path.join(repositoryPath, 'boundary.txt')
+	await writeFile(changedPath, 'é\n', 'utf8')
+	const initialPatch = await getBinaryPatch(repositoryPath, baseCommit)
+	const initialIndex = initialPatch.indexOf('é')
+	const paddingLength = 65_535 - initialIndex
+	assert.ok(initialIndex >= 0)
+	assert.ok(paddingLength > 0)
+
+	await writeFile(changedPath, `${'a'.repeat(paddingLength)}é\n`, 'utf8')
+	const patch = await getBinaryPatch(repositoryPath, baseCommit)
+
+	assert.equal(patch.indexOf('é'), 65_535)
+	assert.equal(patch.includes('\uFFFD'), false)
+})
+
 test('reports both sides of a rename so prohibited source paths cannot disappear', async function () {
 	const repositoryPath = await createTestRepository()
 	await writeFile(

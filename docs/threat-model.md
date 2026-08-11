@@ -66,7 +66,7 @@
 - Explicit non-empty repository path allowlist
 - Repository-relative paths only
 - Allowlist and denylist globs with bounded pattern counts and lengths
-- Bounded state-machine glob evaluation without regular-expression backtracking
+- Aggregate-bounded state-machine glob evaluation with cancellation between changed paths
 - Direct and nested `.git`, environment, private-key, credential, package-registry, infrastructure-state, and harness-artifact denial
 - Separate worker-write denial for manifests, lockfiles, CI, Docker, development-container, MCP, editor, and agent-control files
 - Lexical path containment and realpath containment

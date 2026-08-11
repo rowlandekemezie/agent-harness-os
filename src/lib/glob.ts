@@ -2,27 +2,47 @@ import { HarnessError } from './errors.js'
 
 const maxGlobStates = 200_000
 
+export type GlobMatchBudget = {
+	remainingStates: number
+}
+
 type GlobState = {
 	valueIndex: number
 	patternIndex: number
 	globstarSlashActive: boolean
 }
 
-export function matchGlob(value: string, pattern: string): boolean {
-	const normalizedValue = normalizePath(value)
-	const normalizedPattern = normalizePath(pattern)
-	return matchNormalizedGlob(normalizedValue, normalizedPattern)
+export function createGlobMatchBudget(): GlobMatchBudget {
+	return { remainingStates: maxGlobStates }
 }
 
-export function matchesAnyGlob(value: string, patterns: Array<string>): boolean {
-	return patterns.some(pattern => matchGlob(value, pattern))
+export function matchGlob(
+	value: string,
+	pattern: string,
+	budget: GlobMatchBudget = createGlobMatchBudget(),
+): boolean {
+	const normalizedValue = normalizePath(value)
+	const normalizedPattern = normalizePath(pattern)
+	return matchNormalizedGlob(normalizedValue, normalizedPattern, budget)
+}
+
+export function matchesAnyGlob(
+	value: string,
+	patterns: Array<string>,
+	budget: GlobMatchBudget = createGlobMatchBudget(),
+): boolean {
+	return patterns.some(pattern => matchGlob(value, pattern, budget))
 }
 
 export function normalizePath(value: string): string {
 	return value.replaceAll('\\', '/').replace(/^\.\//, '')
 }
 
-function matchNormalizedGlob(value: string, pattern: string): boolean {
+function matchNormalizedGlob(
+	value: string,
+	pattern: string,
+	budget: GlobMatchBudget,
+): boolean {
 	const pending: Array<GlobState> = [{
 		valueIndex: 0,
 		patternIndex: 0,
@@ -41,7 +61,8 @@ function matchNormalizedGlob(value: string, pattern: string): boolean {
 			continue
 		}
 		visited.add(stateKey)
-		if (visited.size > maxGlobStates) {
+		budget.remainingStates -= 1
+		if (budget.remainingStates < 0) {
 			throw new HarnessError(
 				'GLOB_MATCH_LIMIT',
 				`Glob matching exceeded the ${maxGlobStates}-state safety limit`,

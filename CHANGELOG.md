@@ -39,7 +39,7 @@ All notable changes are documented here.
 - Reject profile authority expansion, unknown backing workers, role mismatches, and malformed profile fields
 - Keep worker iteration exhaustion as a non-fallback policy failure
 - Reject unsafe or malformed policy files before worker selection and block patch application when policy evidence is removed or changed
-- Bound hostile glob matching without regular-expression backtracking and preserve exact Git policy/patch output bytes
+- Aggregate-bound hostile glob matching, observe cancellation between changed paths, and preserve exact streamed Git policy/patch UTF-8 bytes
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

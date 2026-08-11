@@ -18,6 +18,21 @@ test('validates UTF-8 across process output chunk boundaries', async function ()
 	assert.equal(result.invalidUtf8, false)
 })
 
+test('preserves UTF-8 across ordinary process output chunk boundaries', async function () {
+	const result = await runProcess(process.execPath, [
+		'-e',
+		"process.stdout.write(Buffer.from([0xc3])); setTimeout(() => process.stdout.write(Buffer.from([0xa9])), 10)",
+	], {
+		cwd: process.cwd(),
+		timeoutMs: 5_000,
+		maxOutputBytes: 1_024,
+		redactStdout: false,
+	})
+
+	assert.equal(result.exitCode, 0)
+	assert.equal(result.stdout, 'é')
+})
+
 test('marks invalid process UTF-8 without replacement decoding', async function () {
 	const result = await runProcess(process.execPath, [
 		'-e',

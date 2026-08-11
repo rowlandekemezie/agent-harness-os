@@ -61,8 +61,8 @@ misleading policy digest. Bounds are:
 - `routing.maxAttempts`: 1–8
 
 Glob evaluation uses a bounded state-machine matcher, not dynamically generated
-regular expressions, so adversarial wildcard patterns cannot trigger unbounded
-regex backtracking.
+regular expressions. One aggregate work budget covers every allow and deny
+pattern in a path check, and changed-file checks observe task cancellation.
 
 ## Audit and operation
 

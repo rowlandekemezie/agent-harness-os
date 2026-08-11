@@ -34,12 +34,14 @@ export async function runProcess(
 	let timedOut = false
 	let outputTruncated = false
 	let invalidUtf8 = false
-	const stdoutDecoder = options.requireValidUtf8 === true
-		? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-		: null
-	const stderrDecoder = options.requireValidUtf8 === true
-		? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-		: null
+	const stdoutDecoder = new TextDecoder('utf-8', {
+		fatal: options.requireValidUtf8 === true,
+		ignoreBOM: true,
+	})
+	const stderrDecoder = new TextDecoder('utf-8', {
+		fatal: options.requireValidUtf8 === true,
+		ignoreBOM: true,
+	})
 
 	return await new Promise<ProcessResult>((resolve, reject) => {
 		const child = spawn(command, args, {
@@ -49,25 +51,12 @@ export async function runProcess(
 			shell: false,
 		})
 
-		function appendOutput(
-			current: string,
-			chunk: Buffer,
-			decoder: TextDecoder | null,
-		): string {
+		function appendDecodedOutput(current: string, decoded: string): string {
 			if (Buffer.byteLength(current) >= options.maxOutputBytes) {
 				outputTruncated = true
 				return current
 			}
 
-			let decoded: string
-			try {
-				decoded = decoder === null
-					? chunk.toString('utf8')
-					: decoder.decode(chunk, { stream: true })
-			} catch {
-				invalidUtf8 = true
-				return current
-			}
 			const combined = current + decoded
 			const buffer = Buffer.from(combined, 'utf8')
 
@@ -82,6 +71,22 @@ export async function runProcess(
 				options.maxOutputBytes - Buffer.byteLength(marker, 'utf8'),
 			)
 			return `${decodeUtf8Prefix(buffer, contentLimit)}${marker}`
+		}
+
+		function appendOutput(
+			current: string,
+			chunk: Buffer,
+			decoder: TextDecoder,
+		): string {
+			try {
+				return appendDecodedOutput(
+					current,
+					decoder.decode(chunk, { stream: true }),
+				)
+			} catch {
+				invalidUtf8 = true
+				return current
+			}
 		}
 
 		child.stdout?.on('data', (chunk: Buffer) => {
@@ -131,14 +136,15 @@ export async function runProcess(
 		child.on('close', (exitCode, signal) => {
 			clearTimeout(timer)
 			options.signal?.removeEventListener('abort', abort)
-			for (const decoder of [stdoutDecoder, stderrDecoder]) {
-				if (decoder !== null && !invalidUtf8) {
-					try {
-						decoder.decode()
-					} catch {
-						invalidUtf8 = true
-					}
-				}
+			try {
+				stdout = appendDecodedOutput(stdout, stdoutDecoder.decode())
+			} catch {
+				invalidUtf8 = true
+			}
+			try {
+				stderr = appendDecodedOutput(stderr, stderrDecoder.decode())
+			} catch {
+				invalidUtf8 = true
 			}
 			resolve({
 				command,
