@@ -788,7 +788,10 @@ async function runHelper(
 	}
 	if (operation === 'unlink-file' && removalStarted && !removalAcknowledged) {
 		try {
-			await runHelper(rootPath, workingDirectory, identity, ['sync-directory'])
+			await runHelper(rootPath, workingDirectory, identity, [
+				'confirm-removal',
+				argumentsList[1] ?? '',
+			])
 		} catch (error) {
 			throw new HarnessError(
 				'ARTIFACT_DURABILITY_FAILED',
@@ -796,14 +799,7 @@ async function runHelper(
 				{ cause: error instanceof Error ? error.message : String(error) },
 			)
 		}
-		try {
-			await lstat(path.join(workingDirectory, argumentsList[1] ?? ''))
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-				return { publicationUncertain: false }
-			}
-			throw error
-		}
+		return { publicationUncertain: false }
 	}
 	if (signal?.aborted === true && !publicationAcknowledged) {
 		if (operation === 'publish-file' && publicationCommitGranted) {

@@ -242,6 +242,9 @@ test('acknowledges removal only after its directory sync completes', async funct
 	assert.equal(exitCode, 0)
 	assert.equal(lines.indexOf('removal-started') < lines.indexOf('removal-committed'), true)
 	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+	assert.equal(await confirmRemoval(root, directoryIdentity, 'workflow.lock'), 0)
+	await writeFile(filePath, 'replacement\n', { mode: 0o600 })
+	assert.notEqual(await confirmRemoval(root, directoryIdentity, 'workflow.lock'), 0)
 })
 
 test('handles large exclusive-write collisions without crashing', async function () {
@@ -342,4 +345,28 @@ function hasCode(code: string): (error: unknown) => boolean {
 		error !== null &&
 		'code' in error &&
 		error.code === code
+}
+
+async function confirmRemoval(
+	root: string,
+	directoryIdentity: Awaited<ReturnType<typeof stat>>,
+	name: string,
+): Promise<number | null> {
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'confirm-removal',
+			directoryIdentity.dev.toString(),
+			directoryIdentity.ino.toString(),
+			root,
+			root,
+			name,
+		],
+		{ cwd: root, env: {}, stdio: 'ignore' },
+	)
+	return await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('close', resolve)
+	})
 }

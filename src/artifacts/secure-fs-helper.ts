@@ -61,6 +61,9 @@ async function main(): Promise<void> {
 		case 'sync-directory':
 			await syncDirectory(destination)
 			return
+		case 'confirm-removal':
+			await confirmRemoval(requireName(argumentsList[0]), destination)
+			return
 		case 'unlink-file':
 			await removeFile(
 				requireName(argumentsList[0]),
@@ -262,6 +265,31 @@ async function syncDirectory(destination: DestinationIdentity): Promise<void> {
 	await assertWorkingDirectory(destination)
 	await syncWorkingDirectory()
 	await assertWorkingDirectory(destination)
+}
+
+async function confirmRemoval(
+	name: string,
+	destination: DestinationIdentity,
+): Promise<void> {
+	await assertWorkingDirectory(destination)
+	await assertEntryMissing(name)
+	await syncWorkingDirectory()
+	await assertWorkingDirectory(destination)
+	await assertEntryMissing(name)
+}
+
+async function assertEntryMissing(name: string): Promise<void> {
+	let handle: Awaited<ReturnType<typeof open>>
+	try {
+		handle = await open(name, constants.O_RDONLY | noFollowFlag)
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return
+		}
+		throw error
+	}
+	await handle.close()
+	throw new Error('Artifact removal was not completed')
 }
 
 async function writeControlLine(value: string): Promise<void> {
