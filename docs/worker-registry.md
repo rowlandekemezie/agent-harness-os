@@ -2,7 +2,9 @@
 
 ## Configuration format
 
-`AGENT_OS_WORKERS_JSON` contains an array of one to thirty-two worker definitions. The JSON contains metadata and environment-variable names, not credentials.
+`AGENT_OS_WORKERS_JSON` contains one to thirty-two backing worker definitions.
+Each definition owns provider/model transport and declared capabilities. The
+JSON contains environment-variable names, not credentials.
 
 ```json
 {
@@ -33,6 +35,49 @@
   }
 }
 ```
+
+## Worker profiles
+
+`AGENT_OS_WORKER_PROFILES_JSON` optionally turns backing workers into explicit,
+routable roles. One backing worker can support several profiles without
+duplicating credentials or provider settings.
+
+```json
+[
+  {
+    "id": "codex-implementation",
+    "worker": "codex-subscription",
+    "role": "implementation",
+    "maxIterations": 20,
+    "allowedCapabilities": ["implementation", "testing", "tool-calling", "long-context"],
+    "evaluationPolicy": "strict"
+  },
+  {
+    "id": "codex-review",
+    "worker": "codex-subscription",
+    "role": "review",
+    "maxIterations": 12,
+    "allowedCapabilities": ["review", "tool-calling", "long-context"],
+    "evaluationPolicy": "default"
+  }
+]
+```
+
+Profile rules:
+
+- `id` is the route, report, and task-history identity.
+- `worker` must reference an existing backing worker.
+- `role` is exactly one of `research`, `implementation`, `testing`, or `review`.
+- `allowedCapabilities` must include the role and `tool-calling`, and must be a subset of the backing worker's capabilities.
+- `maxIterations` defaults to 20 and caps the task's requested limit; it never raises it.
+- `evaluationPolicy` defaults to `default`. `strict` rejects an inconclusive evaluation as `EVALUATION_INCONCLUSIVE`.
+- `enabled` defaults to true. A profile remains unusable when its backing worker is disabled or misconfigured.
+
+Profiles are bounded to sixty-four entries and reject unknown fields. When the
+variable is present, backing worker IDs are not independently routable unless a
+profile uses that ID. `AGENT_OS_DEFAULT_WORKER` and `preferredWorkerId` refer to
+profile IDs. Without the variable, every backing worker remains an implicit,
+backward-compatible profile with no additional role or iteration restriction.
 
 ## Adapters
 
@@ -106,7 +151,7 @@ Capabilities are operator assertions:
 - `long-context`
 - `private`
 
-The current coding runtime requires `tool-calling`. A task's mode is automatically added to its required capability set.
+The current coding runtime requires `tool-calling`. A task's mode is automatically added to its required capability set. An explicit profile must also have an exact matching role, even if its capability subset mentions another mode.
 
 `private` means the operator considers the worker appropriate for the task's privacy requirement. The harness does not prove provider data handling or local isolation from this label.
 
@@ -136,6 +181,9 @@ Fallback requires:
 - `allowFallback: true`
 - more than one eligible worker
 - a `maxAttempts` greater than one
-- a failure classified as provider transport/response failure, empty model response, or model iteration exhaustion
+- a failure classified as provider transport/response failure or empty model response
 
 Every attempt starts in a new detached worktree at the same base commit. Failed attempts are persisted for audit but cannot be applied. Policy violations, validation failures, unsafe repository state, and cancellation never trigger automatic fallback.
+
+An inconclusive result rejected by a strict profile and exhaustion of a profile
+or task iteration cap are policy failures, so neither triggers fallback.

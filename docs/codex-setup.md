@@ -49,6 +49,10 @@ Add the generated block to Codex configuration. The server is named `agent_os`.
 
 Run this command with `AGENT_OS_WORKERS_JSON` set. The generated `env_vars` list includes Codex auth-location variables plus every custom `apiKeyEnv` and `headerEnv` name declared by the loaded registry. The Codex worker subprocess deliberately strips `OPENAI_API_KEY`, `OPENAI_ORG_ID`, and `OPENAI_PROJECT_ID`; it relies on saved Codex CLI authentication instead.
 
+If `AGENT_OS_WORKER_PROFILES_JSON` is set, the generated configuration forwards
+it too. Use profile IDs for `AGENT_OS_DEFAULT_WORKER` and route previews;
+credentials remain defined only by the referenced backing workers.
+
 ## Approval model
 
 Recommended approvals:

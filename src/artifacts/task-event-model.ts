@@ -25,6 +25,7 @@ type AttemptProjection = {
 	validationOutcome: 'passed' | 'failed' | 'skipped' | null
 	evaluationCompleted: boolean
 	evaluationOutcome: EvaluationOutcome | null
+	evaluationPolicy: 'default' | 'strict' | null
 	status: RunStatus | null
 	failureCode: string | null
 }
@@ -38,7 +39,7 @@ export type TaskEventProjection = {
 	lastAttempt: AttemptProjection | null
 	knownRunIds: Set<string>
 	applicationRunId: string | null
-	eventSchemaVersion: 1 | 2
+	eventSchemaVersion: 1 | 2 | 3
 }
 
 export function validateTaskEvent(
@@ -58,7 +59,9 @@ export function validateTaskEvent(
 			'type',
 			'data',
 		]) ||
-		(value['schemaVersion'] !== 1 && value['schemaVersion'] !== 2) ||
+		(value['schemaVersion'] !== 1 &&
+			value['schemaVersion'] !== 2 &&
+			value['schemaVersion'] !== 3) ||
 		!isUuid(value['eventId']) ||
 		value['taskId'] !== expectedTaskId ||
 		value['sequence'] !== expectedSequence ||
@@ -99,7 +102,7 @@ export function validateTaskEvent(
 					'maxAttempts',
 				]) ||
 				!isRoutingStrategy(data['strategy']) ||
-				!isBoundedStringArray(data['candidateWorkerIds'], 32, 64) ||
+				!isBoundedStringArray(data['candidateWorkerIds'], 64, 64) ||
 				data['candidateWorkerIds'].length === 0 ||
 				new Set(data['candidateWorkerIds']).size !==
 					data['candidateWorkerIds'].length ||
@@ -191,18 +194,33 @@ export function validateTaskEvent(
 			return
 		case 'EvaluationCompleted':
 			if (
-				value['schemaVersion'] !== 2 ||
-				!hasExactKeys(data, [
-					'runId',
-					'evaluatorIds',
-					'outcome',
-					'failedDimensions',
-					'unknownDimensions',
-				]) ||
+				(value['schemaVersion'] !== 2 && value['schemaVersion'] !== 3) ||
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] === 3
+						? [
+							'runId',
+							'evaluatorIds',
+							'outcome',
+							'evaluationPolicy',
+							'failedDimensions',
+							'unknownDimensions',
+						]
+						: [
+							'runId',
+							'evaluatorIds',
+							'outcome',
+							'failedDimensions',
+							'unknownDimensions',
+						],
+				) ||
 				!isUuid(data['runId']) ||
 				!isUniqueBoundedStringArray(data['evaluatorIds'], 8, 100) ||
 				data['evaluatorIds'][0] !== 'deterministic-v1' ||
 				!isEvaluationOutcome(data['outcome']) ||
+				(value['schemaVersion'] === 3 &&
+					data['evaluationPolicy'] !== 'default' &&
+					data['evaluationPolicy'] !== 'strict') ||
 				!isEvaluationDimensionIds(data['failedDimensions']) ||
 				!isEvaluationDimensionIds(data['unknownDimensions']) ||
 				!areEvaluationDimensionSetsDisjoint(
@@ -369,6 +387,7 @@ export function projectTaskEvent(
 				validationOutcome: null,
 				evaluationCompleted: false,
 				evaluationOutcome: null,
+				evaluationPolicy: null,
 				status: null,
 				failureCode: null,
 			}
@@ -431,13 +450,15 @@ export function projectTaskEvent(
 			}
 			activeAttempt.evaluationCompleted = true
 			activeAttempt.evaluationOutcome = event.data.outcome
+			activeAttempt.evaluationPolicy =
+				event.data.evaluationPolicy ?? 'default'
 			break
 		}
 		case 'AttemptCompleted': {
 			const activeAttempt = getActiveRun(next, event.data.runId, appendOperation)
 			if (
 				!activeAttempt.validationCompleted ||
-				(next.eventSchemaVersion === 2 && !activeAttempt.evaluationCompleted)
+				(next.eventSchemaVersion >= 2 && !activeAttempt.evaluationCompleted)
 			) {
 				throw transitionError(
 					'AttemptCompleted requires validation and evaluation evidence',
@@ -449,10 +470,17 @@ export function projectTaskEvent(
 					(activeAttempt.workerOutcome !== 'succeeded' ||
 						activeAttempt.validationOutcome === 'failed' ||
 						activeAttempt.evaluationOutcome === 'failed' ||
+						(activeAttempt.evaluationPolicy === 'strict' &&
+							activeAttempt.evaluationOutcome === 'inconclusive') ||
 						event.data.failureCode !== null)) ||
-				(next.eventSchemaVersion === 2 &&
+				(next.eventSchemaVersion >= 2 &&
 					event.data.status !== 'completed' &&
-					activeAttempt.evaluationOutcome !== 'failed') ||
+					activeAttempt.evaluationOutcome !== 'failed' &&
+					!(next.eventSchemaVersion === 3 &&
+						event.data.status === 'failed' &&
+						activeAttempt.evaluationPolicy === 'strict' &&
+						activeAttempt.evaluationOutcome === 'inconclusive' &&
+						event.data.failureCode === 'EVALUATION_INCONCLUSIVE')) ||
 				(event.data.status !== 'completed' && event.data.failureCode === null)
 			) {
 				throw transitionError('AttemptCompleted outcome evidence is inconsistent', appendOperation)
@@ -596,8 +624,7 @@ function isFallbackEligible(attempt: AttemptProjection): boolean {
 	return attempt.status === 'failed' &&
 		code !== null &&
 		(code.startsWith('PROVIDER_') ||
-			code === 'WORKER_EMPTY_RESPONSE' ||
-			code === 'WORKER_ITERATION_LIMIT')
+			code === 'WORKER_EMPTY_RESPONSE')
 }
 
 function transitionError(message: string, appendOperation: boolean): HarnessError {

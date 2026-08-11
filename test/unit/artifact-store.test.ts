@@ -30,7 +30,13 @@ function createReport(runId: string): WorkerRunReport {
 		acceptanceCriteria: [],
 		policyViolations: [],
 		warnings: [],
-		provider: { baseUrl: 'http://provider', model: 'qwen', requestCount: 1 },
+		provider: {
+			workerId: 'qwen',
+			adapter: 'openai-compatible',
+			baseUrl: 'http://provider',
+			model: 'qwen',
+			requestCount: 1,
+		},
 	}
 }
 
@@ -333,6 +339,40 @@ test('requires a valid evaluation summary on version 3 run reports', async funct
 	)
 })
 
+test('requires worker identity on version 3 run reports', async function () {
+	const cases = [
+		{
+			runId: '23232323-2323-4232-8232-232323232323',
+			field: 'workerId',
+		},
+		{
+			runId: '45454545-4545-4454-8454-454545454545',
+			field: 'adapter',
+		},
+	] as const
+
+	for (const testCase of cases) {
+		const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-identity-'))
+		const report: WorkerRunReport = {
+			...createReport(testCase.runId),
+			schemaVersion: 3,
+			taskId: '67676767-6767-4676-8676-676767676767',
+			evaluation: createEvaluationSummary(),
+		}
+		delete report.provider[testCase.field]
+
+		await assert.rejects(
+			new ArtifactStore().persist({
+				artifactRoot: root,
+				report,
+				patch: '',
+				workerTranscript: '',
+			}),
+			hasHarnessCode('INVALID_RUN_REPORT'),
+		)
+	}
+})
+
 test('rejects a completed version 3 report with a failed evaluation', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-status-'))
 	const report: WorkerRunReport = {
@@ -354,6 +394,64 @@ test('rejects a completed version 3 report with a failed evaluation', async func
 	value.evaluation.outcome = 'failed'
 	value.evaluation.results[0]!.outcome = 'failed'
 	value.evaluation.results[0]!.dimensions[0]!.status = 'failed'
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+})
+
+test('binds strict-profile rejection to an inconclusive evaluation', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-profile-policy-'))
+	const evaluation = createEvaluationSummary()
+	evaluation.outcome = 'inconclusive'
+	evaluation.results[0]!.outcome = 'inconclusive'
+	evaluation.results[0]!.dimensions[0]!.status = 'unknown'
+	const report: WorkerRunReport = {
+		...createReport('45454545-4545-4454-8454-454545454545'),
+		schemaVersion: 3,
+		taskId: '56565656-5656-4565-8565-565656565656',
+		status: 'failed',
+		failureCode: 'EVALUATION_INCONCLUSIVE',
+		evaluation,
+		provider: {
+			workerId: 'strict-implementation',
+			adapter: 'openai-compatible',
+			baseUrl: 'http://provider',
+			model: 'qwen',
+			requestCount: 1,
+			profile: {
+				backingWorkerId: 'qwen',
+				role: 'implementation',
+				maxIterations: 20,
+				evaluationPolicy: 'strict',
+			},
+		},
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		status: string
+		failureCode: string | null
+		provider: { profile: { evaluationPolicy: string } }
+	}
+	value.status = 'completed'
+	value.failureCode = null
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+
+	value.status = 'failed'
+	value.failureCode = 'EVALUATION_INCONCLUSIVE'
+	value.provider.profile.evaluationPolicy = 'default'
 	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
 
 	await assert.rejects(

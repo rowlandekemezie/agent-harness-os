@@ -299,7 +299,9 @@ function validateReport(
 		!isReportEvaluationConsistent(
 			schemaVersion,
 			value['status'],
+			value['failureCode'],
 			value['evaluation'],
+			value['provider'],
 		) ||
 		!isWorkerMode(value['mode']) ||
 		requireReportString(value['reportPath']) !== expectedPath ||
@@ -311,7 +313,7 @@ function validateReport(
 		!isStringArray(value['warnings']) ||
 		!isCommandResults(value['commandResults']) ||
 		!isAcceptanceResults(value['acceptanceCriteria']) ||
-		!isProviderMetadata(value['provider']) ||
+		!isProviderMetadata(value['provider'], schemaVersion === 3) ||
 		!isOptionalRoutingMetadata(value['routing']) ||
 		!isOptionalNullableString(value['failureCode']) ||
 		(patchPath === null) !== (patchSha256 === null) ||
@@ -335,7 +337,9 @@ function validateReport(
 function isReportEvaluationConsistent(
 	schemaVersion: unknown,
 	status: unknown,
+	failureCode: unknown,
 	evaluation: unknown,
+	provider: unknown,
 ): boolean {
 	if (schemaVersion !== 3) {
 		return true
@@ -343,7 +347,24 @@ function isReportEvaluationConsistent(
 	if (!isRunStatus(status) || !isEvaluationSummary(evaluation)) {
 		return false
 	}
-	return (status === 'completed') === (evaluation.outcome !== 'failed')
+	if (status === 'completed') {
+		return evaluation.outcome !== 'failed' &&
+			(!isStrictWorkerProfile(provider) || evaluation.outcome === 'passed')
+	}
+	if (evaluation.outcome === 'failed') {
+		return true
+	}
+	return (
+		status === 'failed' &&
+		failureCode === 'EVALUATION_INCONCLUSIVE' &&
+		isStrictWorkerProfile(provider)
+	)
+}
+
+function isStrictWorkerProfile(provider: unknown): boolean {
+	return isRecord(provider) &&
+		isRecord(provider['profile']) &&
+		provider['profile']['evaluationPolicy'] === 'strict'
 }
 
 function isUuid(value: unknown): value is string {
@@ -401,7 +422,10 @@ function isAcceptanceResults(
 	})
 }
 
-function isProviderMetadata(value: unknown): boolean {
+function isProviderMetadata(
+	value: unknown,
+	requireIdentity: boolean,
+): boolean {
 	if (
 		!isRecord(value) ||
 		!hasExpectedKeys(
@@ -410,6 +434,7 @@ function isProviderMetadata(value: unknown): boolean {
 			[
 				'workerId',
 				'adapter',
+				'profile',
 				'inputTokens',
 				'outputTokens',
 				'totalTokens',
@@ -425,11 +450,11 @@ function isProviderMetadata(value: unknown): boolean {
 	}
 
 	return (
-		isOptionalString(value['workerId']) &&
-		(value['adapter'] === undefined ||
-			value['adapter'] === 'openai-compatible' ||
-			value['adapter'] === 'anthropic' ||
-			value['adapter'] === 'codex') &&
+		(requireIdentity
+			? isWorkerId(value['workerId']) && isWorkerAdapter(value['adapter'])
+			: isOptionalString(value['workerId']) &&
+				(value['adapter'] === undefined || isWorkerAdapter(value['adapter']))) &&
+		isOptionalWorkerProfile(value['profile']) &&
 		isOptionalNonNegativeInteger(value['inputTokens']) &&
 		isOptionalNonNegativeInteger(value['outputTokens']) &&
 		isOptionalNonNegativeInteger(value['totalTokens']) &&
@@ -439,6 +464,39 @@ function isProviderMetadata(value: unknown): boolean {
 			(typeof value['estimatedCostUsd'] === 'number' &&
 				Number.isFinite(value['estimatedCostUsd']) &&
 				value['estimatedCostUsd'] >= 0))
+	)
+}
+
+function isWorkerId(value: unknown): value is string {
+	return typeof value === 'string' &&
+		/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)
+}
+
+function isWorkerAdapter(value: unknown): boolean {
+	return value === 'openai-compatible' ||
+		value === 'anthropic' ||
+		value === 'codex'
+}
+
+function isOptionalWorkerProfile(value: unknown): boolean {
+	if (value === undefined) {
+		return true
+	}
+	return (
+		isRecord(value) &&
+		hasExpectedKeys(value, [
+			'backingWorkerId',
+			'role',
+			'maxIterations',
+			'evaluationPolicy',
+		], []) &&
+		typeof value['backingWorkerId'] === 'string' &&
+		/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value['backingWorkerId']) &&
+		isWorkerMode(value['role']) &&
+		isPositiveInteger(value['maxIterations']) &&
+		(value['maxIterations'] as number) <= 64 &&
+		(value['evaluationPolicy'] === 'default' ||
+			value['evaluationPolicy'] === 'strict')
 	)
 }
 

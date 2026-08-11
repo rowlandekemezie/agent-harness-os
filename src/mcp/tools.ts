@@ -729,6 +729,7 @@ function serializeRoute(route: WorkerRoute): Record<string, unknown> {
 		fallbackEnabled: route.fallbackEnabled,
 		candidates: route.candidates.map(candidate => ({
 			workerId: candidate.worker.id,
+			profile: candidate.worker.profile,
 			adapter: candidate.worker.adapter,
 			model: candidate.worker.model,
 			capabilities: candidate.worker.capabilities,

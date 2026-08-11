@@ -125,3 +125,62 @@ test('redacts all endpoint query values from worker registry output', async func
 		'https://provider.example/chat/completions?api-version=%5Bredacted%5D',
 	)
 })
+
+test('routes only profiles whose declared role matches the task mode', function () {
+	const config = loadConfig({
+		AGENT_OS_WORKERS_JSON: JSON.stringify([{
+			id: 'codex-subscription',
+			adapter: 'codex',
+			capabilities: [
+				'implementation',
+				'review',
+				'tool-calling',
+			],
+		}]),
+		AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([
+			{
+				id: 'codex-implementation',
+				worker: 'codex-subscription',
+				role: 'implementation',
+				allowedCapabilities: [
+					'implementation',
+					'review',
+					'tool-calling',
+				],
+			},
+			{
+				id: 'codex-review',
+				worker: 'codex-subscription',
+				role: 'review',
+				allowedCapabilities: [
+					'implementation',
+					'review',
+					'tool-calling',
+				],
+			},
+		]),
+	})
+
+	assert.deepEqual(
+		routeWorkers(config, 'implementation', policy()).candidates.map(
+			candidate => candidate.worker.id,
+		),
+		['codex-implementation'],
+	)
+	assert.deepEqual(
+		routeWorkers(config, 'review', policy()).candidates.map(
+			candidate => candidate.worker.id,
+		),
+		['codex-review'],
+	)
+	assert.throws(
+		() => routeWorkers(config, 'review', policy({
+			preferredWorkerId: 'codex-implementation',
+		})),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'WORKER_DOES_NOT_SATISFY_ROUTE',
+	)
+})

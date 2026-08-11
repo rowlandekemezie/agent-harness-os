@@ -46,7 +46,7 @@ export function routeWorkers(
 
 	if (
 		preferredWorker !== null &&
-		!workerSatisfiesPolicy(preferredWorker, requiredCapabilities, policy)
+		!workerSatisfiesPolicy(preferredWorker, mode, requiredCapabilities, policy)
 	) {
 		throw new HarnessError(
 			'WORKER_DOES_NOT_SATISFY_ROUTE',
@@ -55,6 +55,7 @@ export function routeWorkers(
 				configurationIssues: preferredWorker.configurationIssues,
 				requiredCapabilities,
 				workerCapabilities: preferredWorker.capabilities,
+				profile: preferredWorker.profile,
 				maxCostTier: policy.maxCostTier,
 				maxLatencyTier: policy.maxLatencyTier,
 			},
@@ -63,7 +64,12 @@ export function routeWorkers(
 
 	const defaultWorkerId = policy.preferredWorkerId ?? config.routing.defaultWorkerId
 	const candidates = configuredWorkers
-		.filter(worker => workerSatisfiesPolicy(worker, requiredCapabilities, policy))
+		.filter(worker => workerSatisfiesPolicy(
+			worker,
+			mode,
+			requiredCapabilities,
+			policy,
+		))
 		.map(worker => scoreWorker(
 			worker,
 			policy.strategy,
@@ -82,6 +88,7 @@ export function routeWorkers(
 				maxLatencyTier: policy.maxLatencyTier,
 				workers: config.workers.map(worker => ({
 					id: worker.id,
+					profile: worker.profile,
 					enabled: worker.enabled,
 					configured: isWorkerConfigured(worker),
 					capabilities: worker.capabilities,
@@ -112,6 +119,7 @@ export function routeWorkers(
 export function describeWorker(worker: WorkerConfig): Record<string, unknown> {
 	return {
 		id: worker.id,
+		profile: worker.profile,
 		enabled: worker.enabled,
 		configured: isWorkerConfigured(worker),
 		adapter: worker.adapter,
@@ -128,11 +136,13 @@ export function describeWorker(worker: WorkerConfig): Record<string, unknown> {
 
 function workerSatisfiesPolicy(
 	worker: WorkerConfig,
+	mode: WorkerMode,
 	requiredCapabilities: Array<WorkerCapability>,
 	policy: WorkerRoutingPolicy,
 ): boolean {
 	return (
 		isWorkerConfigured(worker) &&
+		(worker.profile === null || worker.profile.role === mode) &&
 		requiredCapabilities.every(capability =>
 			worker.capabilities.includes(capability),
 		) &&

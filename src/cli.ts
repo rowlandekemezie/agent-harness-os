@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url'
-import { loadConfig } from './config.js'
+import { getWorkerSecretEnvironmentNames, loadConfig } from './config.js'
 import { getErrorMessage } from './lib/errors.js'
 import { McpTools } from './mcp/tools.js'
 import { startMcpServer } from './mcp/server.js'
@@ -50,6 +50,7 @@ function renderCodexConfig(config: ReturnType<typeof loadConfig>): string {
 	const nodePath = process.execPath.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
 	const envVars = [...new Set([
 		'AGENT_OS_WORKERS_JSON',
+		'AGENT_OS_WORKER_PROFILES_JSON',
 		'AGENT_OS_DEFAULT_WORKER',
 		'AGENT_OS_ROUTING_STRATEGY',
 		'AGENT_OS_MAX_WORKER_ATTEMPTS',
@@ -99,10 +100,7 @@ function renderCodexConfig(config: ReturnType<typeof loadConfig>): string {
 		'AGENT_HARNESS_MAX_PROVIDER_CONTEXT_BYTES',
 		'AGENT_HARNESS_ARTIFACT_ROOT',
 		'AGENT_HARNESS_LOG_LEVEL',
-		...config.workers.flatMap(worker => [
-			...(worker.apiKeyEnv === null ? [] : [worker.apiKeyEnv]),
-			...worker.headerEnvNames,
-		]),
+		...getWorkerSecretEnvironmentNames(config),
 	])].sort()
 
 	return `[mcp_servers.agent_os]

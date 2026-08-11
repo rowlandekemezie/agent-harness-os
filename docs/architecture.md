@@ -12,7 +12,7 @@ MCP tools
         |
         v
 Worker registry and deterministic router
-  configuration, capabilities, budgets, candidate ordering, fallback limits
+  provider configuration, role profiles, budgets, candidate ordering, fallback limits
         |
         v
 Provider adapter
@@ -36,22 +36,34 @@ Codex is not delegated away. The Agent OS supplies controlled execution capacity
 
 ### Configuration
 
-`src/config.ts` loads worker definitions, secret references, routing defaults, execution policy, and limits. Invalid URLs, embedded credentials, duplicate worker IDs, unsupported adapters, and missing capabilities fail closed.
+`src/config.ts` loads backing workers, optional role profiles, secret references,
+routing defaults, execution policy, and limits. A profile can reduce a backing
+worker's capabilities and iterations but cannot expand them. Invalid references,
+URLs, embedded credentials, duplicate IDs, unsupported adapters, and authority
+expansion fail closed.
 
 ### Worker registry
 
-`src/provider/registry.ts` owns configured worker metadata and adapter construction. Model names never appear in the execution kernel.
+`src/provider/registry.ts` owns configured worker metadata and adapter
+construction. When profiles are configured, profile IDs are the routable and
+historical worker identities; provider/model settings remain on the referenced
+backing workers. Model names never drive the execution kernel.
 
 ### Router
 
 `src/provider/router.ts` filters workers by:
 
 1. enabled and configured state
-2. task mode and required capabilities
+2. exact profile role, task mode, and required capabilities
 3. maximum cost tier
 4. maximum latency tier
 
 It then scores the remaining candidates using an explicit strategy and deterministic tie breaking. No LLM participates in routing.
+
+The execution kernel caps the task's requested iteration count at the selected
+profile limit. A `strict` evaluation profile also rejects an inconclusive
+evaluation; a `default` profile preserves the explicit inconclusive result for
+operator review.
 
 ### Provider adapters
 

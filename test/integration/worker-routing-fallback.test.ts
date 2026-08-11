@@ -68,6 +68,33 @@ async function startSuccessfulProvider(): Promise<ProviderFixture> {
 	return await listen(server, () => requests)
 }
 
+async function startLoopingProvider(): Promise<ProviderFixture> {
+	let requests = 0
+	const server = createServer((request, response) => {
+		request.resume()
+		request.on('end', () => {
+			requests += 1
+			response.setHeader('content-type', 'application/json')
+			response.end(JSON.stringify({
+				choices: [{
+					message: {
+						content: null,
+						tool_calls: [{
+							id: `read-${requests}`,
+							type: 'function',
+							function: {
+								name: 'read_file',
+								arguments: JSON.stringify({ path: 'README.md' }),
+							},
+						}],
+					},
+				}],
+			}))
+		})
+	})
+	return await listen(server, () => requests)
+}
+
 async function listen(
 	server: Server,
 	requestCount: () => number,
@@ -182,6 +209,82 @@ test('falls back across workers using a fresh worktree and applies only the succ
 		)
 	} finally {
 		await failing.close()
+		await successful.close()
+	}
+})
+
+test('does not fall back after a profile iteration cap', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-os-profile-fallback-'))
+	const looping = await startLoopingProvider()
+	const successful = await startSuccessfulProvider()
+
+	try {
+		const config = loadConfig({
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_OS_WORKERS_JSON: JSON.stringify([
+				{
+					id: 'looping-provider',
+					adapter: 'openai-compatible',
+					model: 'looping-model',
+					baseUrl: looping.baseUrl,
+					auth: 'none',
+					capabilities: ['implementation', 'tool-calling'],
+					priority: 100,
+					maxRetries: 0,
+				},
+				{
+					id: 'successful-provider',
+					adapter: 'openai-compatible',
+					model: 'successful-model',
+					baseUrl: successful.baseUrl,
+					auth: 'none',
+					capabilities: ['implementation', 'tool-calling'],
+					priority: 50,
+					maxRetries: 0,
+				},
+			]),
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([
+				{
+					id: 'bounded-implementation',
+					worker: 'looping-provider',
+					role: 'implementation',
+					maxIterations: 1,
+					allowedCapabilities: ['implementation', 'tool-calling'],
+				},
+				{
+					id: 'fallback-implementation',
+					worker: 'successful-provider',
+					role: 'implementation',
+					maxIterations: 4,
+					allowedCapabilities: ['implementation', 'tool-calling'],
+				},
+			]),
+		})
+		const report = await new WorkerService(config).delegate({
+			objective: 'Create the routed implementation.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['README.md', 'src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 8,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(looping.requestCount(), 1)
+		assert.equal(successful.requestCount(), 0)
+		assert.equal(report.status, 'policy_violation')
+		assert.equal(report.failureCode, 'WORKER_ITERATION_LIMIT')
+		assert.equal(report.provider.workerId, 'bounded-implementation')
+		assert.equal(report.provider.profile?.backingWorkerId, 'looping-provider')
+		assert.ok(report.routing)
+		assert.deepEqual(report.routing.previousAttempts, [])
+	} finally {
+		await looping.close()
 		await successful.close()
 	}
 })

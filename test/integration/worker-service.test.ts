@@ -18,6 +18,7 @@ async function startFakeProvider(
 	paths: Array<string> = ['src/generated.ts'],
 ): Promise<{
 	baseUrl: string
+	requestCount(): number
 	close(): Promise<void>
 }> {
 	let requestCount = 0
@@ -70,6 +71,51 @@ async function startFakeProvider(
 
 	return {
 		baseUrl: `http://127.0.0.1:${address.port}/v1`,
+		requestCount: () => requestCount,
+		close: async () => await new Promise<void>((resolve, reject) => {
+			server.close(error => error === undefined ? resolve() : reject(error))
+		}),
+	}
+}
+
+async function startLoopingProvider(): Promise<{
+	baseUrl: string
+	requestCount(): number
+	close(): Promise<void>
+}> {
+	let requestCount = 0
+	const server = createServer((request, response) => {
+		request.resume()
+		request.on('end', () => {
+			requestCount += 1
+			response.setHeader('content-type', 'application/json')
+			response.end(JSON.stringify({
+				choices: [{
+					message: {
+						role: 'assistant',
+						content: null,
+						tool_calls: [{
+							id: `call-read-${requestCount}`,
+							type: 'function',
+							function: {
+								name: 'read_file',
+								arguments: JSON.stringify({ path: 'README.md' }),
+							},
+						}],
+					},
+				}],
+			}))
+		})
+	})
+
+	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+	const address = server.address()
+	if (address === null || typeof address === 'string') {
+		throw new Error('Looping provider did not bind to a TCP port')
+	}
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}/v1`,
+		requestCount: () => requestCount,
 		close: async () => await new Promise<void>((resolve, reject) => {
 			server.close(error => error === undefined ? resolve() : reject(error))
 		}),
@@ -265,6 +311,169 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 	}
 })
 
+test('enforces profile iteration and strict-evaluation bounds', async function () {
+	const iterationRepository = await createTestRepository()
+	const strictRepository = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-profiles-'))
+	const loopingProvider = await startLoopingProvider()
+	const successfulProvider = await startFakeProvider()
+
+	try {
+		const iterationConfig = loadConfig({
+			QWEN_BASE_URL: loopingProvider.baseUrl,
+			QWEN_API_KEY: 'profile-test-key',
+			QWEN_MODEL: 'profile-test-model',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'qwen-bounded-implementation',
+				worker: 'qwen',
+				role: 'implementation',
+				maxIterations: 1,
+				allowedCapabilities: ['implementation', 'tool-calling'],
+			}]),
+		})
+		const iterationReport = await new WorkerService(iterationConfig).delegate({
+			objective: 'Inspect the repository before implementing.',
+			repositoryPath: iterationRepository,
+			mode: 'implementation',
+			allowedPaths: ['README.md'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 8,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(loopingProvider.requestCount(), 1)
+		assert.equal(iterationReport.status, 'policy_violation')
+		assert.equal(iterationReport.failureCode, 'WORKER_ITERATION_LIMIT')
+		assert.deepEqual(iterationReport.provider.profile, {
+			backingWorkerId: 'qwen',
+			role: 'implementation',
+			maxIterations: 1,
+			evaluationPolicy: 'default',
+		})
+
+		const strictConfig = loadConfig({
+			QWEN_BASE_URL: successfulProvider.baseUrl,
+			QWEN_API_KEY: 'profile-test-key',
+			QWEN_MODEL: 'profile-test-model',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'qwen-strict-implementation',
+				worker: 'qwen',
+				role: 'implementation',
+				maxIterations: 4,
+				allowedCapabilities: ['implementation', 'tool-calling'],
+				evaluationPolicy: 'strict',
+			}]),
+		})
+		const strictReport = await new WorkerService(strictConfig).delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath: strictRepository,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: ['src/generated.ts exports generated'],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 8,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(strictReport.evaluation?.outcome, 'inconclusive')
+		assert.equal(strictReport.status, 'failed')
+		assert.equal(strictReport.failureCode, 'EVALUATION_INCONCLUSIVE')
+		assert.ok(strictReport.patchPath)
+		assert.ok(strictReport.taskId)
+		const strictTimeline = await new WorkerService(strictConfig)
+			.getTaskTimeline(strictRepository, strictReport.taskId)
+		const strictEvaluation = strictTimeline.events.find(
+			event => event.type === 'EvaluationCompleted',
+		)
+		assert.equal(
+			strictEvaluation?.type === 'EvaluationCompleted'
+				? strictEvaluation.data.evaluationPolicy
+				: null,
+			'strict',
+		)
+	} finally {
+		await loopingProvider.close()
+		await successfulProvider.close()
+	}
+})
+
+test('redacts credentials from backing workers without a profile', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-profile-redaction-'))
+	const provider = await startFakeProvider()
+	const unprofiledCredential = 'unprofiled-value-48291'
+
+	try {
+		const config = loadConfig({
+			PROFILED_API_KEY: 'profiled-value-73519',
+			UNPROFILED_API_KEY: unprofiledCredential,
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_OS_WORKERS_JSON: JSON.stringify([
+				{
+					id: 'profiled',
+					adapter: 'openai-compatible',
+					model: 'profiled-model',
+					baseUrl: provider.baseUrl,
+					apiKeyEnv: 'PROFILED_API_KEY',
+					capabilities: ['implementation', 'tool-calling'],
+				},
+				{
+					id: 'unprofiled',
+					adapter: 'openai-compatible',
+					model: 'unprofiled-model',
+					baseUrl: 'https://unprofiled.example/v1',
+					apiKeyEnv: 'UNPROFILED_API_KEY',
+					capabilities: ['review', 'tool-calling'],
+				},
+			]),
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'profiled-implementation',
+				worker: 'profiled',
+				role: 'implementation',
+				allowedCapabilities: ['implementation', 'tool-calling'],
+			}]),
+		})
+		const service = new WorkerService(config)
+		const report = await service.delegate({
+			objective: `Create a generated function using ${unprofiledCredential}.`,
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(report.objective.includes(unprofiledCredential), false)
+		assert.ok(report.objective.includes('[REDACTED]'))
+		assert.equal(
+			(await readFile(report.reportPath, 'utf8')).includes(unprofiledCredential),
+			false,
+		)
+		assert.ok(report.taskId)
+		const timeline = await service.getTaskTimeline(repositoryPath, report.taskId)
+		assert.equal(
+			JSON.stringify(timeline).includes(unprofiledCredential),
+			false,
+		)
+	} finally {
+		await provider.close()
+	}
+})
+
 test('binds independent-review evidence and rejects report schema downgrades', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-reviewer-'))
@@ -304,6 +513,14 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
 			AGENT_HARNESS_EXECUTION_BACKEND: 'local',
 			AGENT_HARNESS_ALLOW_UNSANDBOXED_LOCAL: 'false',
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'strict-implementation',
+				worker: 'qwen',
+				role: 'implementation',
+				maxIterations: 4,
+				allowedCapabilities: ['implementation', 'tool-calling'],
+				evaluationPolicy: 'strict',
+			}]),
 		})
 		const service = new WorkerService(config, { evaluators: [reviewer] })
 		const report = await service.delegate({
@@ -339,7 +556,12 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 				outcome: string
 				results: Array<{ evaluatorId: string }>
 			}
+			provider: {
+				workerId?: string
+				profile?: { evaluationPolicy?: string }
+			}
 		}
+		assert.equal(tampered.provider.profile?.evaluationPolicy, 'strict')
 		tampered.status = 'completed'
 		tampered.failureCode = null
 		tampered.evaluation.outcome = 'passed'
@@ -351,6 +573,13 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 			service.applyRun(repositoryPath, report.runId),
 			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
 		)
+		delete tampered.provider.workerId
+		await writeFile(report.reportPath, `${JSON.stringify(tampered)}\n`)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('INVALID_RUN_REPORT'),
+		)
+		tampered.provider.workerId = 'strict-implementation'
 		const downgraded = tampered as unknown as Record<string, unknown>
 		downgraded['schemaVersion'] = 2
 		delete downgraded['evaluation']

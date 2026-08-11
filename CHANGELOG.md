@@ -12,6 +12,10 @@ All notable changes are documented here.
 - Provider-neutral evaluator contract with mandatory deterministic evidence
 - Version 3 run reports with aggregate evaluation results
 - Version 2 task events with required `EvaluationCompleted` lifecycle evidence
+- Version 3 task events that bind profile evaluation policy to attempt outcomes
+- Explicit worker profiles that separate routable roles from backing provider/model configuration
+- Redaction retains credentials from every configured backing worker, including workers without a routable profile
+- Profile capability subsets, iteration caps, and default or strict evaluation policies
 
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
 - ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
@@ -30,6 +34,8 @@ All notable changes are documented here.
 - Bound evaluator execution by cancellation and deadline, and final reports by post-redaction UTF-8 bytes
 - Keep cancellation and deadlines authoritative through final run publication
 - Order cancellation against atomic event publication with an explicit commit grant
+- Reject profile authority expansion, unknown backing workers, role mismatches, and malformed profile fields
+- Keep worker iteration exhaustion as a non-fallback policy failure
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers
@@ -52,7 +58,7 @@ All notable changes are documented here.
 
 - Rejected credentials embedded in endpoint query parameters and static authorization headers
 - Redacted query values from worker-registry inspection
-- Restricted fallback to provider and bounded model-loop failures
+- Restricted fallback to provider and empty-model-response failures
 - Preserved the original base commit and clean worktree boundary across attempts
 - Removed unsupported capability claims from the routable capability vocabulary
 

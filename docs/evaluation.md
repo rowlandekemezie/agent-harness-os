@@ -74,9 +74,10 @@ persistence; a model reviewer can fail a run but cannot discard an in-bound
 audit patch.
 
 New reports use schema version 3 and contain an evaluation summary. Version 1
-and 2 reports remain readable. New task journals use event schema version 2 and
-require `EvaluationCompleted` between validation and attempt completion.
-Version 1 journals remain replayable without synthesizing evaluation evidence.
+and 2 reports remain readable. New task journals use event schema version 3,
+require `EvaluationCompleted` between validation and attempt completion, and
+bind the selected profile's evaluation policy to that decision. Event schema
+versions 1 and 2 remain replayable without inventing newer evidence.
 Patch application for a version 3 report additionally requires its evaluator
 IDs, aggregate outcome, and completed status to match the validated task event
 chain. Version 1 and 2 reports remain readable for audit, but cannot pass the

@@ -51,11 +51,12 @@ arguments or results. `PatchProduced` records the patch digest, byte count, and
 changed-file count. Exact patch bytes remain only in `changes.patch` with the
 existing private permissions and integrity checks.
 
-`EvaluationCompleted` records evaluator IDs, the aggregate outcome, and failed
-or unknown dimension IDs. Detailed summaries and evidence remain in the run
-report. New event-schema-version-2 attempts require evaluation after validation
-and before attempt completion. Version 1 timelines remain readable without
-invented evaluation events.
+`EvaluationCompleted` records evaluator IDs, the aggregate outcome, the profile
+evaluation policy, and failed or unknown dimension IDs. Detailed summaries and
+evidence remain in the run report. New event-schema-version-3 attempts require
+evaluation after validation and before attempt completion, and reject a
+completed strict-profile attempt when evaluation is inconclusive. Version 1 and
+2 timelines remain readable without invented policy evidence.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass

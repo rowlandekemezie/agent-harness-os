@@ -20,7 +20,7 @@
 - A provider returning malformed, oversized, repeated, redirected, or hostile tool calls
 - An evaluator returning malformed, contradictory, oversized, or hostile evidence
 - A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
-- Incorrect or malicious worker capability, cost, latency, priority, endpoint, or pricing configuration
+- Incorrect or malicious worker profile, capability, cost, latency, priority, endpoint, or pricing configuration
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
 - Concurrent tasks or external processes targeting the same repository
@@ -32,6 +32,9 @@
 ### Worker registry and routing
 
 - Worker IDs are unique and configuration is bounded to thirty-two entries
+- Profile IDs are unique and configuration is bounded to sixty-four entries
+- Profiles reference an existing worker, match exactly one role, and can only reduce declared capabilities and iterations
+- Only profiles are routable when explicit profiles are configured
 - Provider credentials are sourced from named environment variables
 - Sensitive static headers and credential-shaped URL query parameters are rejected
 - Non-loopback plaintext endpoints require explicit opt-in
@@ -40,7 +43,8 @@
 - Routing is deterministic and does not call an LLM
 - Required capabilities and cost/latency ceilings are enforced before scoring
 - Explicit worker preference fails closed when the worker cannot satisfy the contract
-- Fallback is limited to eligible provider/model-loop failures and bounded attempts
+- Strict profiles fail closed on inconclusive evaluation without making fallback eligible
+- Fallback is limited to eligible provider/empty-response failures and bounded attempts
 - Every fallback attempt starts from the original base in a fresh worktree
 - Failed attempts are persisted for audit but cannot be applied
 
@@ -140,7 +144,7 @@
 - Provider redirects are not followed
 - Provider credential used only in the provider request
 - Child processes never inherit provider credentials
-- Provider error bodies, command output, reports, transcripts, and logs are redacted
+- Provider error bodies, command output, reports, transcripts, and logs are redacted using credentials from every configured backing worker, including workers without a routable profile
 - Request retry, timeout, response-size, context-size, and tool-call bounds
 - Byte-bounded MCP framing, concurrent-request limits, duplicate-request-ID rejection, and cancellation while tools are active
 - MCP standard output contains JSON-RPC only
