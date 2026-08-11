@@ -70,3 +70,38 @@ test('bounds and deduplicates configured evaluators', function () {
 			error.code === 'EVALUATOR_LIMIT',
 	)
 })
+
+test('enforces the absolute deadline between hostile changed-path checks', async function () {
+	const service = new WorkerService(loadConfig({}))
+	const changedPathValidator = service as unknown as {
+		validateChangedPaths(
+			task: {
+				allowedPaths: Array<string>
+				prohibitedPaths: Array<string>
+			},
+			worktreePath: string,
+			changedFiles: Array<string>,
+			signal: AbortSignal,
+			deadlineMs: number,
+		): Promise<Array<string>>
+	}
+	const prohibitedPaths = Array.from(
+		{ length: 300 },
+		(_, index) => `${'*a'.repeat(50)}b${index}`,
+	)
+
+	await assert.rejects(
+		changedPathValidator.validateChangedPaths(
+			{
+				allowedPaths: ['**/*'],
+				prohibitedPaths,
+			},
+			process.cwd(),
+			['src/first.ts', 'src/second.ts'],
+			new AbortController().signal,
+			Date.now() + 1,
+		),
+		(error: unknown) =>
+			error instanceof DOMException && error.name === 'TimeoutError',
+	)
+})

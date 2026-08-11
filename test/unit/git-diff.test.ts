@@ -70,6 +70,24 @@ test('preserves multibyte patch content across Git output chunks', async functio
 	assert.equal(patch.includes('\uFFFD'), false)
 })
 
+test('rejects non-UTF-8 patch bytes instead of transforming them', async function () {
+	const repositoryPath = await createTestRepository()
+	const baseCommit = await resolveCommit(repositoryPath, 'HEAD')
+	await writeFile(
+		path.join(repositoryPath, 'invalid.txt'),
+		Buffer.from([0xff, 0x0a]),
+	)
+
+	await assert.rejects(
+		getBinaryPatch(repositoryPath, baseCommit),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'PATCH_INVALID_ENCODING',
+	)
+})
+
 test('reports both sides of a rename so prohibited source paths cannot disappear', async function () {
 	const repositoryPath = await createTestRepository()
 	await writeFile(

@@ -110,6 +110,7 @@
 - Hooks and fsmonitor overridden; `core.worktree`, executable local/worktree filters, textconv, merge drivers, and attributes configuration rejected
 - Patch and changed-file collection against the original base commit, including staged and worker-committed changes
 - Rename detection disabled so both deleted and added paths remain visible to policy
+- Invalid UTF-8 patches fail closed before hashing or persistence; captured patch text is never replacement-decoded
 - Binary-capable patch collection
 - Independent changed-path and file-type validation
 - Artifacts outside the checkout

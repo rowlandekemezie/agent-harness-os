@@ -278,23 +278,39 @@ export async function getBinaryPatch(
 	baseCommit: string,
 ): Promise<string> {
 	await markUntrackedFilesIntentToAdd(worktreePath)
-	const result = await runGit(worktreePath, [
-		'diff',
-		'--binary',
-		'--no-ext-diff',
-		'--no-renames',
-		'--full-index',
-		'--no-textconv',
-		baseCommit,
-		'--',
-	])
+	const result = await runGitBounded(
+		worktreePath,
+		[
+			'diff',
+			'--binary',
+			'--no-ext-diff',
+			'--no-renames',
+			'--full-index',
+			'--no-textconv',
+			baseCommit,
+			'--',
+		],
+		gitOutputLimit,
+		undefined,
+		true,
+	)
 
-	if (result.exitCode !== 0 || result.outputTruncated) {
+	if (
+		result.exitCode !== 0 ||
+		result.outputTruncated ||
+		result.invalidUtf8 === true
+	) {
 		throw new HarnessError(
-			result.outputTruncated ? 'PATCH_TOO_LARGE' : 'GIT_DIFF_FAILED',
+			result.outputTruncated
+				? 'PATCH_TOO_LARGE'
+				: result.invalidUtf8 === true
+					? 'PATCH_INVALID_ENCODING'
+					: 'GIT_DIFF_FAILED',
 			result.outputTruncated
 				? 'Worker patch exceeded the 20 MB safety limit'
-				: 'Unable to create worker patch',
+				: result.invalidUtf8 === true
+					? 'Worker patch must contain valid UTF-8'
+					: 'Unable to create worker patch',
 			{ stderr: result.stderr },
 		)
 	}

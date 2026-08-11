@@ -735,6 +735,7 @@ export class WorkerService {
 					worktree.path,
 					worktree.baseCommit,
 					signal,
+					context.deadlineMs,
 				)
 				changedFiles = candidate.changedFiles
 				patch = candidate.patch
@@ -756,14 +757,20 @@ export class WorkerService {
 					context.externalSignal,
 					timeoutController.signal,
 				)
-				failureCode = failureCode ?? getFailureCode(error)
+				failureCode = status === 'cancelled' || status === 'timed_out'
+					? 'WORKER_ABORTED'
+					: failureCode ?? getFailureCode(error)
 				if (status === 'policy_violation') {
 					policyViolations.push(formatPolicyViolation(error))
 				}
 				warnings.push(`Patch collection failed: ${getErrorMessage(error)}`)
 			}
 
-			if (policyViolations.length > 0) {
+			if (
+				policyViolations.length > 0 &&
+				status !== 'cancelled' &&
+				status !== 'timed_out'
+			) {
 				status = 'policy_violation'
 				failureCode = failureCode ?? 'WORKER_POLICY_VIOLATION'
 			}
@@ -816,6 +823,7 @@ export class WorkerService {
 							changedFiles,
 							patch,
 							signal,
+							context.deadlineMs,
 						)
 					} catch (error) {
 						status = classifyRunError(
@@ -823,7 +831,9 @@ export class WorkerService {
 							context.externalSignal,
 							timeoutController.signal,
 						)
-						failureCode = failureCode ?? getFailureCode(error)
+						failureCode = status === 'cancelled' || status === 'timed_out'
+							? 'WORKER_ABORTED'
+							: failureCode ?? getFailureCode(error)
 						if (status === 'policy_violation') {
 							policyViolations.push(formatPolicyViolation(error))
 						}
@@ -1093,25 +1103,32 @@ export class WorkerService {
 		worktreePath: string,
 		baseCommit: string,
 		signal?: AbortSignal,
+		deadlineMs?: number,
 	): Promise<{
 		changedFiles: Array<string>
 		patch: string
 		policyViolations: Array<string>
 	}> {
-		throwIfAborted(signal)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const changedFiles = await getChangedFiles(worktreePath, baseCommit)
-		throwIfAborted(signal)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 
 		const policyViolations = changedFiles.length > task.policy.maxChangedFiles
 			? [
 				`CHANGED_FILE_LIMIT: Worker changed ${changedFiles.length} files, exceeding the limit of ${task.policy.maxChangedFiles}`,
 			]
-			: await this.validateChangedPaths(task, worktreePath, changedFiles, signal)
-		throwIfAborted(signal)
+			: await this.validateChangedPaths(
+				task,
+				worktreePath,
+				changedFiles,
+				signal,
+				deadlineMs,
+			)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const patch = policyViolations.length === 0
 			? await getBinaryPatch(worktreePath, baseCommit)
 			: ''
-		throwIfAborted(signal)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 
 		return { changedFiles, patch, policyViolations }
 	}
@@ -1123,10 +1140,11 @@ export class WorkerService {
 		expectedChangedFiles: Array<string>,
 		expectedPatch: string,
 		signal?: AbortSignal,
+		deadlineMs?: number,
 	): Promise<void> {
-		throwIfAborted(signal)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const currentHead = await resolveCommit(worktreePath, 'HEAD')
-		throwIfAborted(signal)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 
 		if (currentHead !== baseCommit) {
 			throw new HarnessError(
@@ -1137,12 +1155,13 @@ export class WorkerService {
 		}
 
 		await assertSafeRepositoryConfiguration(worktreePath)
-		throwIfAborted(signal)
+		throwIfAbortedOrExpired(signal, deadlineMs)
 		const actual = await this.collectPatchCandidate(
 			task,
 			worktreePath,
 			baseCommit,
 			signal,
+			deadlineMs,
 		)
 
 		if (actual.policyViolations.length > 0) {
@@ -1173,6 +1192,7 @@ export class WorkerService {
 		worktreePath: string,
 		changedFiles: Array<string>,
 		signal?: AbortSignal,
+		deadlineMs?: number,
 	): Promise<Array<string>> {
 		const policy = new PathPolicy(
 			worktreePath,
@@ -1182,7 +1202,7 @@ export class WorkerService {
 		const policyViolations: Array<string> = []
 
 		for (const changedFile of changedFiles) {
-			throwIfAborted(signal)
+			throwIfAbortedOrExpired(signal, deadlineMs)
 			try {
 				await policy.assertSafeChangedPath(changedFile)
 			} catch (error) {
@@ -1476,6 +1496,10 @@ function classifyRunError(
 		return 'timed_out'
 	}
 
+	if (error instanceof DOMException && error.name === 'TimeoutError') {
+		return 'timed_out'
+	}
+
 	if (error instanceof HarnessError && isPolicyCode(error.code)) {
 		return 'policy_violation'
 	}
@@ -1493,6 +1517,16 @@ function arraysEqual(left: Array<string>, right: Array<string>): boolean {
 function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted === true) {
 		throw new DOMException('Worker delegation aborted', 'AbortError')
+	}
+}
+
+function throwIfAbortedOrExpired(
+	signal: AbortSignal | undefined,
+	deadlineMs: number | undefined,
+): void {
+	throwIfAborted(signal)
+	if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+		throw new DOMException('Worker deadline expired', 'TimeoutError')
 	}
 }
 
