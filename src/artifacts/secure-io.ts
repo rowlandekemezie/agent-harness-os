@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process'
 import { HarnessError } from '../lib/errors.js'
 
 const noFollowFlag = constants.O_NOFOLLOW ?? 0
+const nonBlockingFlag = constants.O_NONBLOCK ?? 0
 const directoryFlag = constants.O_DIRECTORY ?? 0
 const helperPath = fileURLToPath(new URL('./secure-fs-helper.js', import.meta.url))
 const maxHelperErrorBytes = 16_384
@@ -104,7 +105,10 @@ export async function readBoundedRegularFile(
 	maxBytes: number,
 ): Promise<Buffer> {
 	assertPathInside(rootPath, filePath)
-	const handle = await open(filePath, constants.O_RDONLY | noFollowFlag)
+	const handle = await open(
+		filePath,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+	)
 
 	try {
 		const stats = await assertHandleMatchesPath(
@@ -135,13 +139,16 @@ export async function readBoundedPublicationFile(
 		)
 	}
 
-	const finalHandle = await open(filePath, constants.O_RDONLY | noFollowFlag)
+	const finalHandle = await open(
+		filePath,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+	)
 	let temporaryHandle: FileHandle | null = null
 	try {
 		try {
 			temporaryHandle = await open(
 				temporaryPath,
-				constants.O_RDONLY | noFollowFlag,
+				constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
 			)
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -285,7 +292,10 @@ export async function removeRegularFileIfContentsMatch(
 	maxBytes: number,
 ): Promise<boolean> {
 	assertPathInside(rootPath, filePath)
-	const handle = await open(filePath, constants.O_RDONLY | noFollowFlag)
+	const handle = await open(
+		filePath,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+	)
 	let device: string
 	let inode: string
 	try {
@@ -360,10 +370,13 @@ export async function removePublicationStagingIfContentsMatch(
 		)
 	}
 
-	const finalHandle = await open(filePath, constants.O_RDONLY | noFollowFlag)
+	const finalHandle = await open(
+		filePath,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+	)
 	const temporaryHandle = await open(
 		temporaryPath,
-		constants.O_RDONLY | noFollowFlag,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
 	)
 	let device: string
 	let inode: string

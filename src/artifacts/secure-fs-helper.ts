@@ -12,6 +12,7 @@ import {
 import path from 'node:path'
 
 const noFollowFlag = constants.O_NOFOLLOW ?? 0
+const nonBlockingFlag = constants.O_NONBLOCK ?? 0
 const directoryFlag = constants.O_DIRECTORY ?? 0
 
 await main()
@@ -89,7 +90,10 @@ async function removeFile(
 	destination: DestinationIdentity,
 ): Promise<void> {
 	await assertWorkingDirectory(destination)
-	const handle = await open(name, constants.O_RDONLY | noFollowFlag)
+	const handle = await open(
+		name,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+	)
 	try {
 		const fileStats = await handle.stat({ bigint: true })
 		if (
@@ -223,7 +227,7 @@ async function publishFile(
 		await assertWorkingDirectory(destination)
 		const publishedHandle = await open(
 			finalName,
-			constants.O_RDONLY | noFollowFlag,
+			constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
 		)
 
 		try {

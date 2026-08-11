@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
 	createPrivateDirectory,
+	readBoundedRegularFile,
 	readBoundedPublishedFile,
 	removePublishedFileIfContentsMatch,
 	removeRegularFileIfContentsMatch,
@@ -340,6 +341,49 @@ test('rejects a publication staging file with different bytes and identity', asy
 	)
 })
 
+test('rejects hostile FIFO artifacts without blocking', {
+	skip: process.platform === 'win32',
+}, async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-fifo-'))
+	const fifoPath = path.join(root, 'workflow.lock')
+	const mkfifo = spawn('mkfifo', [fifoPath], { stdio: 'ignore' })
+	assert.equal(await waitForChild(mkfifo, 1_000), 0)
+
+	await assert.rejects(
+		readBoundedRegularFile(root, fifoPath, 1_024),
+		hasCode('ARTIFACT_FILE_INVALID'),
+	)
+	await assert.rejects(
+		removeRegularFileIfContentsMatch(
+			root,
+			fifoPath,
+			Buffer.from('lease\n'),
+			1_024,
+		),
+		hasCode('ARTIFACT_FILE_INVALID'),
+	)
+	const [directoryIdentity, fifoIdentity] = await Promise.all([
+		stat(root, { bigint: true }),
+		stat(fifoPath, { bigint: true }),
+	])
+	const helper = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'unlink-file',
+			directoryIdentity.dev.toString(),
+			directoryIdentity.ino.toString(),
+			root,
+			root,
+			'workflow.lock',
+			fifoIdentity.dev.toString(),
+			fifoIdentity.ino.toString(),
+		],
+		{ cwd: root, env: {}, stdio: 'ignore' },
+	)
+	assert.notEqual(await waitForChild(helper, 1_000), 0)
+})
+
 function hasCode(code: string): (error: unknown) => boolean {
 	return error => typeof error === 'object' &&
 		error !== null &&
@@ -369,4 +413,25 @@ async function confirmRemoval(
 		child.once('error', reject)
 		child.once('close', resolve)
 	})
+}
+
+async function waitForChild(
+	child: ReturnType<typeof spawn>,
+	timeoutMs: number,
+): Promise<number | null> {
+	let timeout: NodeJS.Timeout | null = null
+	try {
+		return await new Promise<number | null>((resolve, reject) => {
+			timeout = setTimeout(() => {
+				child.kill('SIGKILL')
+				reject(new Error('Child process did not exit within its test bound'))
+			}, timeoutMs)
+			child.once('error', reject)
+			child.once('close', resolve)
+		})
+	} finally {
+		if (timeout !== null) {
+			clearTimeout(timeout)
+		}
+	}
 }

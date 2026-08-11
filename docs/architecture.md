@@ -148,7 +148,8 @@ application service remains the sole checkout mutation boundary. See
 
 ### Secure artifact I/O
 
-`src/artifacts/secure-io.ts` verifies handle identity and containment for reads.
+`src/artifacts/secure-io.ts` opens hostile files nonblocking, then verifies
+regular-file type, handle identity, and containment for reads.
 For writes, a sanitized Node helper starts in the verified destination
 directory inode, rechecks containment around mutation, stages and syncs content,
 publishes it with a no-replace hard link, and syncs the directory. Task
