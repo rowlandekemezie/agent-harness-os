@@ -5,6 +5,9 @@ import type {
 } from '../domain/types.js'
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
+import { deterministicEvaluationDimensionIds } from './dimensions.js'
+
+export const maxEvaluationSummaryBytes = 3_000_000
 
 const dimensionIds = new Set<EvaluationDimensionId>([
 	'worker_execution',
@@ -114,15 +117,30 @@ export function validateEvaluationSummary(
 	}
 
 	const evaluatorIds = new Set<string>()
+	const validatedResults: Array<EvaluationResult> = []
 	for (const result of value['results']) {
 		validateEvaluationResult(result)
 		if (evaluatorIds.has(result.evaluatorId)) {
 			throw invalidEvaluation()
 		}
 		evaluatorIds.add(result.evaluatorId)
+		validatedResults.push(result)
+	}
+	const deterministicResult = validatedResults[0]
+	if (
+		deterministicResult === undefined ||
+		deterministicResult.evaluatorId !== 'deterministic-v1' ||
+		deterministicResult.evaluatorKind !== 'deterministic' ||
+		!arraysEqual(
+			deterministicResult.dimensions.map(dimension => dimension.id),
+			deterministicEvaluationDimensionIds,
+		) ||
+		Buffer.byteLength(JSON.stringify(value), 'utf8') > maxEvaluationSummaryBytes
+	) {
+		throw invalidEvaluation()
 	}
 
-	const outcomes = value['results'].map(result => result.outcome)
+	const outcomes = validatedResults.map(result => result.outcome)
 	const expectedOutcome = outcomes.includes('failed')
 		? 'failed'
 		: outcomes.includes('inconclusive')
@@ -153,7 +171,9 @@ function hasExactKeys(
 }
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
-	return typeof value === 'string' && value.length > 0 && value.length <= maxLength
+	return typeof value === 'string' &&
+		value.length > 0 &&
+		Buffer.byteLength(value, 'utf8') <= maxLength
 }
 
 function isBoundedStringArray(
@@ -169,6 +189,11 @@ function isBoundedStringArray(
 
 function isIsoDate(value: unknown): value is string {
 	return typeof value === 'string' && !Number.isNaN(Date.parse(value))
+}
+
+function arraysEqual(left: Array<string>, right: Array<string>): boolean {
+	return left.length === right.length &&
+		left.every((value, index) => value === right[index])
 }
 
 function invalidEvaluation(): HarnessError {

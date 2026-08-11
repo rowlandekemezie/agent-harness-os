@@ -56,7 +56,7 @@ The system keeps authority in deterministic code:
 4. The model receives bounded file tools, never a command-execution tool.
 5. The harness captures the candidate patch before running Codex-declared validation commands.
 6. Validation invalidates the run if it changes patch bytes, changed files, `HEAD`, or executable Git configuration.
-7. The mandatory evaluator scores harness evidence; failed evaluations and policy-violating patches cannot be applied.
+7. The mandatory evaluator scores harness evidence; reviewers are deadline-bound, and failed evaluations and policy-violating patches cannot be applied.
 8. Applying a completed patch is a separate destructive MCP call with repeated clean-tree, base-commit, artifact-integrity, and `git apply --check` gates.
 
 Automatic fallback is limited to provider failures and bounded model-loop failures. It does not route around path-policy violations, failed deterministic validation, unsafe Git configuration, or an operator cancellation.

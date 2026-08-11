@@ -283,6 +283,19 @@ test('rejects contradictory evaluation dimension evidence', async function () {
 		}),
 		hasHarnessCode('INVALID_TASK_JOURNAL'),
 	)
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'EvaluationCompleted',
+			data: {
+				runId,
+				evaluatorIds: ['model-only'],
+				outcome: 'failed',
+				failedDimensions: ['correctness'],
+				unknownDimensions: [],
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_JOURNAL'),
+	)
 })
 
 test('rejects a failed attempt paired with a non-failed evaluation', async function () {

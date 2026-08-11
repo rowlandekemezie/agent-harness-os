@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { link, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, link, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { ArtifactStore } from '../../src/artifacts/store.js'
 import { Redactor } from '../../src/lib/redaction.js'
 import type { EvaluationSummary, WorkerRunReport } from '../../src/domain/types.js'
+import { deterministicEvaluationDimensionIds } from '../../src/evaluation/dimensions.js'
 
 
 function createReport(runId: string): WorkerRunReport {
@@ -45,12 +46,12 @@ function createEvaluationSummary(secret = 'deterministic evidence'): EvaluationS
 			evaluatorKind: 'deterministic',
 			evaluatedAt,
 			outcome: 'passed',
-			dimensions: [{
-				id: 'worker_execution',
+			dimensions: deterministicEvaluationDimensionIds.map(id => ({
+				id,
 				status: 'passed',
 				summary: secret,
 				evidence: [secret],
-			}],
+			})),
 		}],
 	}
 }
@@ -381,6 +382,53 @@ test('redacts evaluator summaries and evidence before persistence', async functi
 
 	assert.equal(contents.includes(secret), false)
 	assert.equal(contents.includes('[REDACTED]'), true)
+})
+
+test('rebounds evaluation evidence after redaction expansion', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-redaction-bound-'))
+	const secret = 'secret'
+	const expandedEvidence = secret.repeat(166)
+	const report: WorkerRunReport = {
+		...createReport('cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd'),
+		schemaVersion: 3,
+		taskId: 'efefefef-efef-4fef-8fef-efefefefefef',
+		evaluation: createEvaluationSummary(expandedEvidence),
+	}
+	const store = new ArtifactStore(new Redactor({}, [secret]))
+
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const loaded = await store.loadReport(root, report.runId)
+	const evidence = loaded.evaluation?.results[0]?.dimensions[0]?.evidence[0]
+
+	assert.ok(evidence)
+	assert.equal(evidence.includes(secret), false)
+	assert.equal(Buffer.byteLength(evidence, 'utf8') <= 1_000, true)
+	assert.equal(persisted.reportPath, loaded.reportPath)
+})
+
+test('rejects an oversized final report before publication', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-report-bound-'))
+	const report: WorkerRunReport = {
+		...createReport('10101010-1010-4101-8101-101010101010'),
+		workerSummary: 'x'.repeat(4_194_304),
+	}
+	const store = new ArtifactStore()
+
+	await assert.rejects(
+		store.persist({
+			artifactRoot: root,
+			report,
+			patch: '',
+			workerTranscript: '',
+		}),
+		hasHarnessCode('ARTIFACT_FILE_TOO_LARGE'),
+	)
+	await assert.rejects(access(path.join(root, report.runId)))
 })
 
 test('rejects a report whose run ID does not match its artifact directory', async function () {

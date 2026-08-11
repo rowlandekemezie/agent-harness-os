@@ -81,6 +81,11 @@ and expire artifacts according to source-code sensitivity. Patches are
 intentionally byte-faithful and may contain secrets that already existed in
 delegated source paths.
 
+Version 3 application requires report evaluation metadata to match the
+validated task timeline. Treat `EVALUATION_HISTORY_INVALID` and
+`EVALUATION_HISTORY_MISMATCH` as fail-closed integrity incidents; do not repair
+one artifact in isolation.
+
 Task journals live under `tasks/<taskId>/events/`. Use `list_tasks` for bounded
 discovery and `get_task_timeline` for the validated event chain. An
 `incomplete` timeline may be active or interrupted; the journal does not guess.

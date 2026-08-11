@@ -113,8 +113,13 @@
 - Worker assertions about tests or correctness never become evidence
 - Optional reviewers add results but cannot replace deterministic evaluation
 - Evaluator IDs are unique and execution order is stable
-- Exact schemas, bounded text, dimensions, statuses, and aggregate outcomes are validated
+- Evaluators receive a bounded patch and task evidence, never repository or command authority
+- Evaluation is deadline-bound and cancellation races evaluators that ignore their signal
+- Exact schemas, UTF-8 byte bounds, dimensions, statuses, and aggregate outcomes are validated
+- Final reports are revalidated and byte-bounded after redaction
+- Version 3 application binds evaluator IDs, outcome, and status to task history
 - Failed evaluation blocks patch application and never enables fallback
+- Only deterministic patch-size evidence can suppress audit-patch persistence
 - Evaluation text is redacted before persistence
 
 ### Codex CLI worker

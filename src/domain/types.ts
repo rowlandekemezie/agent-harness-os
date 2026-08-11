@@ -103,7 +103,12 @@ export type EvaluationSummary = {
 
 export type EvaluationInput = {
 	runId: string
+	objective: string
 	mode: WorkerMode
+	baseCommit: string
+	allowedPaths: Array<string>
+	prohibitedPaths: Array<string>
+	candidatePatch: string
 	runStatus: RunStatus
 	failureCode: string | null
 	requiredCommands: Array<CommandSpec>
@@ -115,6 +120,7 @@ export type EvaluationInput = {
 	warnings: Array<string>
 	maxChangedFiles: number
 	maxPatchBytes: number
+	deadlineMs: number
 }
 
 export type CommandResult = {

@@ -25,6 +25,8 @@ All notable changes are documented here.
 - Reject unknown report and event fields, invalid lifecycle order, mismatched run links, and aggregate history traversal
 - Keep run reports and deterministic patch gates authoritative when history is unavailable
 - Validate evaluator output as hostile input and prevent evaluation failures from falling back or applying
+- Bind version 3 evaluation metadata to task history before patch application
+- Bound evaluator execution by cancellation and deadline, and final reports by post-redaction UTF-8 bytes
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

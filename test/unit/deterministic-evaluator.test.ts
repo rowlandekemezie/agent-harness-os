@@ -35,7 +35,12 @@ function commandResult(
 function evaluationInput(overrides: Partial<EvaluationInput> = {}): EvaluationInput {
 	return {
 		runId: '11111111-1111-4111-8111-111111111111',
+		objective: 'Evaluate a bounded patch.',
 		mode: 'implementation',
+		baseCommit: 'a'.repeat(40),
+		allowedPaths: ['src/**'],
+		prohibitedPaths: [],
+		candidatePatch: 'diff --git a/src/example.ts b/src/example.ts\n',
 		runStatus: 'completed',
 		failureCode: null,
 		requiredCommands: [
@@ -55,6 +60,7 @@ function evaluationInput(overrides: Partial<EvaluationInput> = {}): EvaluationIn
 		warnings: [],
 		maxChangedFiles: 200,
 		maxPatchBytes: 20_000_000,
+		deadlineMs: Date.now() + 60_000,
 		...overrides,
 	}
 }
@@ -166,6 +172,62 @@ test('keeps warnings and unverified criteria explicitly inconclusive', async fun
 	)
 })
 
+test('treats truncated validation output as unknown warning evidence', async function () {
+	const truncated = commandResult('npm', ['test'])
+	truncated.outputTruncated = true
+	const evaluation = await new DeterministicEvaluator().evaluate(evaluationInput({
+		commandResults: [
+			truncated,
+			commandResult('npm', ['run', 'lint']),
+			commandResult('tsc', ['--noEmit']),
+		],
+	}))
+
+	assert.equal(
+		evaluation.dimensions.find(dimension => dimension.id === 'new_warnings')?.status,
+		'unknown',
+	)
+})
+
+test('classifies every changed-path policy failure as scope evidence', async function () {
+	for (const code of [
+		'SENSITIVE_PATH_DENIED',
+		'CHANGED_SYMLINK_DENIED',
+		'UNSUPPORTED_CHANGED_FILE_TYPE',
+	]) {
+		const evaluation = await new DeterministicEvaluator().evaluate(evaluationInput({
+			policyViolations: [`${code}: rejected path`],
+		}))
+		assert.equal(
+			evaluation.dimensions.find(dimension =>
+				dimension.id === 'changed_files_scope'
+			)?.status,
+			'failed',
+			code,
+		)
+	}
+})
+
+test('bounds deterministic evidence from maximum task inputs by UTF-8 bytes', async function () {
+	const longValue = `src/${'x'.repeat(1_995)}`
+	const evaluation = await new DeterministicEvaluator().evaluate(evaluationInput({
+		requiredCommands: [{ command: 'npm', args: ['test', longValue] }],
+		commandResults: [commandResult('npm', ['test', longValue])],
+		acceptanceCriteria: [{
+			criterion: 'c'.repeat(2_000),
+			status: 'unknown',
+			evidence: ['No criterion-specific proof was supplied.'],
+		}],
+		policyViolations: [`PATH_NOT_ALLOWED: ${longValue}`],
+	}))
+
+	validateEvaluationResult(evaluation, 'deterministic-v1')
+	assert.equal(evaluation.dimensions.every(dimension =>
+		Buffer.byteLength(dimension.summary, 'utf8') <= 500 &&
+		dimension.evidence.every(value => Buffer.byteLength(value, 'utf8') <= 1_000),
+	), true)
+})
+
 test('rejects evaluator output with an inconsistent outcome or extra fields', function () {
 	const invalid = {
 		schemaVersion: 1,
@@ -209,4 +271,35 @@ test('rejects aggregate evaluations with duplicate evaluators or inconsistent ou
 
 	assert.throws(() => validateEvaluationSummary(duplicate))
 	assert.throws(() => validateEvaluationSummary(inconsistent))
+})
+
+test('requires deterministic evidence first and applies UTF-8 byte limits', async function () {
+	const deterministic = await new DeterministicEvaluator().evaluate(evaluationInput())
+	const modelOnly = {
+		schemaVersion: 1,
+		evaluatedAt: new Date().toISOString(),
+		outcome: 'passed',
+		results: [{
+			...deterministic,
+			evaluatorId: 'model-only',
+			evaluatorKind: 'model',
+			dimensions: [{
+				id: 'correctness',
+				status: 'passed',
+				summary: 'Passed',
+				evidence: ['Model evidence'],
+			}],
+		}],
+	}
+	const oversizedUtf8 = {
+		...deterministic,
+		dimensions: deterministic.dimensions.map((dimension, index) =>
+			index === 0
+				? { ...dimension, evidence: ['€'.repeat(334)] }
+				: dimension,
+		),
+	}
+
+	assert.throws(() => validateEvaluationSummary(modelOnly))
+	assert.throws(() => validateEvaluationResult(oversizedUtf8))
 })

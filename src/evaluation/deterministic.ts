@@ -7,27 +7,34 @@ import type {
 	EvaluationOutcome,
 	EvaluationResult,
 } from '../domain/types.js'
+import { truncateUtf8 } from '../lib/text.js'
+import { deterministicEvaluationDimensionIds } from './dimensions.js'
 import type { Evaluator } from './evaluator.js'
 
 type CommandDimension = 'tests' | 'lint' | 'typecheck'
 
-const deterministicDimensions: Array<EvaluationDimensionId> = [
-	'worker_execution',
-	'tests',
-	'lint',
-	'typecheck',
-	'changed_files_scope',
-	'acceptance_criteria',
-	'patch_size',
-	'new_warnings',
-	'security_policy_compliance',
-]
+const changedFileViolationCodes = new Set([
+	'CHANGED_FILE_LIMIT',
+	'CHANGED_SYMLINK_DENIED',
+	'CONTROL_PATH_WRITE_DENIED',
+	'HARD_LINK_DENIED',
+	'INVALID_PATH',
+	'PATH_NOT_ALLOWED',
+	'PATH_TRAVERSAL_DENIED',
+	'PATH_VALIDATION_FAILED',
+	'SENSITIVE_PATH_DENIED',
+	'UNSUPPORTED_CHANGED_FILE_TYPE',
+])
 
 export class DeterministicEvaluator implements Evaluator {
 	readonly id = 'deterministic-v1'
 
-	async evaluate(input: EvaluationInput): Promise<EvaluationResult> {
-		const dimensions = deterministicDimensions.map(dimension =>
+	async evaluate(
+		input: EvaluationInput,
+		signal?: AbortSignal,
+	): Promise<EvaluationResult> {
+		signal?.throwIfAborted()
+		const dimensions = deterministicEvaluationDimensionIds.map(dimension =>
 			evaluateDimension(dimension, input),
 		)
 		return {
@@ -251,7 +258,10 @@ function evaluateWarnings(input: EvaluationInput): EvaluationDimensionResult {
 		0,
 	)
 	const warningCount = input.warnings.length + commandWarningCount
-	if (warningCount === 0) {
+	const truncatedOutputCount = input.commandResults.filter(
+		command => command.outputTruncated,
+	).length
+	if (warningCount === 0 && truncatedOutputCount === 0) {
 		return result('new_warnings', 'passed', 'No warnings were captured', [
 			'Harness and validation warning count: 0',
 		])
@@ -263,6 +273,7 @@ function evaluateWarnings(input: EvaluationInput): EvaluationDimensionResult {
 		[
 			`Harness warning count: ${input.warnings.length}`,
 			`Validation output warning count: ${commandWarningCount}`,
+			`Truncated validation output count: ${truncatedOutputCount}`,
 			'A base-commit warning comparison was not executed.',
 		],
 	)
@@ -306,7 +317,7 @@ function commandName(command: string): string {
 }
 
 function isChangedFileViolation(value: string): boolean {
-	return /^(?:CHANGED_FILE_LIMIT|PATH_|SECRET_|CONTROL_|SYMLINK_|HARD_LINK_)/.test(value)
+	return changedFileViolationCodes.has(value.split(':', 1)[0] ?? '')
 }
 
 function countWarnings(value: string): number {
@@ -319,7 +330,14 @@ function result(
 	summary: string,
 	evidence: Array<string>,
 ): EvaluationDimensionResult {
-	return { id, status, summary, evidence }
+	return {
+		id,
+		status,
+		summary: truncateUtf8(summary, 500),
+		evidence: evidence.slice(0, 20).map(value =>
+			truncateUtf8(value, 1_000) || '[empty evidence]',
+		),
+	}
 }
 
 function getOutcome(

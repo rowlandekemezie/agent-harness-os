@@ -5,5 +5,8 @@ import type {
 
 export interface Evaluator {
 	readonly id: string
-	evaluate(input: EvaluationInput): Promise<EvaluationResult>
+	evaluate(
+		input: EvaluationInput,
+		signal: AbortSignal,
+	): Promise<EvaluationResult>
 }

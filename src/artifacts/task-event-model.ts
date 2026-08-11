@@ -201,6 +201,7 @@ export function validateTaskEvent(
 				]) ||
 				!isUuid(data['runId']) ||
 				!isUniqueBoundedStringArray(data['evaluatorIds'], 8, 100) ||
+				data['evaluatorIds'][0] !== 'deterministic-v1' ||
 				!isEvaluationOutcome(data['outcome']) ||
 				!isEvaluationDimensionIds(data['failedDimensions']) ||
 				!isEvaluationDimensionIds(data['unknownDimensions']) ||

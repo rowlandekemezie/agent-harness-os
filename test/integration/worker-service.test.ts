@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -73,6 +73,52 @@ async function startFakeProvider(
 		close: async () => await new Promise<void>((resolve, reject) => {
 			server.close(error => error === undefined ? resolve() : reject(error))
 		}),
+	}
+}
+
+function createBlockingEvaluator(): {
+	evaluator: Evaluator
+	started: Promise<void>
+	release(): void
+} {
+	let markStarted: (() => void) | undefined
+	let release: (() => void) | undefined
+	const started = new Promise<void>(resolve => {
+		markStarted = resolve
+	})
+	const blocked = new Promise<void>(resolve => {
+		release = resolve
+	})
+	return {
+		evaluator: {
+			id: 'blocking-reviewer',
+			async evaluate(
+				input: EvaluationInput,
+				signal: AbortSignal,
+			): Promise<EvaluationResult> {
+				assert.equal(input.objective.length > 0, true)
+				assert.equal(input.candidatePatch.includes('src/generated.ts'), true)
+				assert.equal(Number.isFinite(input.deadlineMs), true)
+				markStarted?.()
+				await blocked
+				signal.throwIfAborted()
+				return {
+					schemaVersion: 1,
+					evaluatorId: this.id,
+					evaluatorKind: 'model',
+					evaluatedAt: new Date().toISOString(),
+					outcome: 'passed',
+					dimensions: [{
+						id: 'correctness',
+						status: 'passed',
+						summary: 'Review completed',
+						evidence: [`Reviewed ${input.baseCommit}`],
+					}],
+				}
+			},
+		},
+		started,
+		release: () => release?.(),
 	}
 }
 
@@ -186,12 +232,20 @@ test('combines mandatory deterministic evidence with an independent reviewer', a
 				evaluatorKind: 'model',
 				evaluatedAt: new Date().toISOString(),
 				outcome: 'failed',
-				dimensions: [{
-					id: 'correctness',
-					status: 'failed',
-					summary: 'Independent review found a defect',
-					evidence: [`Reviewed harness run ${input.runId}`],
-				}],
+				dimensions: [
+					{
+						id: 'correctness',
+						status: 'failed',
+						summary: 'Independent review found a defect',
+						evidence: [`Reviewed harness run ${input.runId}`],
+					},
+					{
+						id: 'patch_size',
+						status: 'failed',
+						summary: 'Untrusted reviewer disputed patch size',
+						evidence: ['Model claims cannot control patch retention.'],
+					},
+				],
 			}
 		},
 	}
@@ -231,6 +285,25 @@ test('combines mandatory deterministic evidence with an independent reviewer', a
 		await assert.rejects(
 			service.applyRun(repositoryPath, report.runId),
 			hasHarnessCode('RUN_NOT_APPLICABLE'),
+		)
+		const tampered = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+			status: string
+			failureCode: string | null
+			evaluation: {
+				outcome: string
+				results: Array<{ evaluatorId: string }>
+			}
+		}
+		tampered.status = 'completed'
+		tampered.failureCode = null
+		tampered.evaluation.outcome = 'passed'
+		tampered.evaluation.results = tampered.evaluation.results.filter(
+			result => result.evaluatorId === 'deterministic-v1',
+		)
+		await writeFile(report.reportPath, `${JSON.stringify(tampered)}\n`)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
 		)
 		assert.ok(report.taskId)
 		const timeline = await service.getTaskTimeline(repositoryPath, report.taskId)
@@ -304,6 +377,98 @@ test('records changed-file limits as evaluation evidence and prevents patch pers
 	}
 })
 
+test('cancels a blocked evaluator without returning an applicable run', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-evaluator-cancel-'))
+	const provider = await startFakeProvider()
+	const blocking = createBlockingEvaluator()
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+		})
+		const service = new WorkerService(config, {
+			evaluators: [blocking.evaluator],
+		})
+		const controller = new AbortController()
+		const operation = service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		}, controller.signal)
+
+		await blocking.started
+		controller.abort()
+		const report = await operation
+		blocking.release()
+
+		assert.equal(report.status, 'cancelled')
+		assert.equal(report.failureCode, 'WORKER_ABORTED')
+		assert.equal(report.evaluation?.results.length, 1)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('RUN_NOT_APPLICABLE'),
+		)
+	} finally {
+		blocking.release()
+		await provider.close()
+	}
+})
+
+test('times out a blocked evaluator and releases the attempt', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-evaluator-timeout-'))
+	const provider = await startFakeProvider()
+	const blocking = createBlockingEvaluator()
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+		})
+		const service = new WorkerService(config, {
+			evaluators: [blocking.evaluator],
+		})
+		const operation = service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 1,
+			allowNetwork: false,
+		})
+
+		await blocking.started
+		const report = await operation
+		blocking.release()
+
+		assert.equal(report.status, 'timed_out')
+		assert.equal(report.failureCode, 'WORKER_ABORTED')
+		assert.equal(report.evaluation?.results.length, 1)
+	} finally {
+		blocking.release()
+		await provider.close()
+	}
+})
+
 test('invalidates a run when deterministic validation mutates the worker patch', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-validation-artifacts-'))
@@ -360,7 +525,7 @@ test('invalidates a run when deterministic validation mutates the worker patch',
 	}
 })
 
-test('applies an authoritative run when its task history is corrupt', async function () {
+test('rejects a version 3 run when evaluation history is corrupt', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-history-corrupt-'))
 	const provider = await startFakeProvider()
@@ -400,18 +565,17 @@ test('applies an authoritative run when its task history is corrupt', async func
 		assert.ok(firstEvent)
 		await writeFile(path.join(eventDirectory, firstEvent), '{corrupt\n')
 
-		const application = await service.applyRun(repositoryPath, report.runId)
-		assert.equal(application.applied, true)
-		assert.equal(application.historyRecorded, false)
-		assert.ok(application.warnings.some(warning =>
-			warning.includes('PatchApplicationRequested'),
-		))
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('EVALUATION_HISTORY_INVALID'),
+		)
+		await assert.rejects(access(path.join(repositoryPath, 'src/generated.ts')))
 	} finally {
 		await provider.close()
 	}
 })
 
-test('does not attach a forged report to another task journal', async function () {
+test('rejects a version 3 report attached to another task journal', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-history-link-'))
 	const provider = await startFakeProvider()
@@ -454,12 +618,11 @@ test('does not attach a forged report to another task journal', async function (
 		storedReport.taskId = unrelated.taskId
 		await writeFile(report.reportPath, `${JSON.stringify(storedReport)}\n`)
 
-		const application = await service.applyRun(repositoryPath, report.runId)
-		assert.equal(application.applied, true)
-		assert.equal(application.historyRecorded, false)
-		assert.ok(application.warnings.some(warning =>
-			warning.includes('does not match the authoritative run report'),
-		))
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
+		)
+		await assert.rejects(access(path.join(repositoryPath, 'src/generated.ts')))
 		const unrelatedTimeline = await journal.timeline(
 			effectiveRoot,
 			unrelated.taskId,

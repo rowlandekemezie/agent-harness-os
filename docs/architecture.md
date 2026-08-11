@@ -85,6 +85,8 @@ The kernel captures the candidate patch before deterministic validation. It pers
 patch, changed-file, criterion, warning, and policy evidence into explicit
 dimensions. `WorkerService` always runs it before optional injected reviewers,
 validates every result, and aggregates outcomes without consulting the router.
+Reviewers receive a bounded candidate patch and task evidence, plus a deadline
+and cancellation signal; they receive no repository or command capability.
 See [Evaluation](evaluation.md).
 
 ### Task journal
@@ -114,7 +116,7 @@ Fallback occurs outside an attempt. The repository lease remains held, while the
 
 ### Artifact and apply boundary
 
-Every attempt has its own immutable audit record. Only a completed run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, and patch deterministically. History events are recorded only after report-to-task linkage succeeds, but history failure cannot grant or revoke patch authority.
+Every attempt has its own immutable audit record. Only a completed run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, and patch deterministically. Version 3 application also binds evaluator IDs, outcome, and status to the validated task chain, so removing a failed reviewer from `report.json` cannot make a patch applicable. Legacy reports keep their prior degraded-history behavior. Failure to append later patch-lifecycle events does not change patch authority.
 
 ## Why this remains one package
 

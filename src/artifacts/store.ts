@@ -10,6 +10,7 @@ import type {
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
+import { truncateUtf8 } from '../lib/text.js'
 import { isEvaluationSummary } from '../evaluation/schema.js'
 import {
 	createPrivateDirectory,
@@ -37,6 +38,34 @@ export class ArtifactStore {
 
 	async persist(input: PersistRunInput): Promise<WorkerRunReport> {
 		const runDirectory = path.join(input.artifactRoot, input.report.runId)
+		const patchPath = path.join(runDirectory, 'changes.patch')
+		const reportPath = path.join(runDirectory, 'report.json')
+		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
+
+		if (input.patch !== '') {
+			if (Buffer.byteLength(input.patch, 'utf8') > maxArtifactPatchBytes) {
+				throw new HarnessError(
+					'ARTIFACT_FILE_TOO_LARGE',
+					`Worker patch exceeds the ${maxArtifactPatchBytes}-byte artifact limit`,
+				)
+			}
+		}
+
+		const persistedReport: WorkerRunReport = {
+			...redactReport(input.report, this.redactor),
+			patchPath: input.patch === '' ? null : patchPath,
+			patchSha256: input.patch === '' ? null : sha256(input.patch),
+			reportPath,
+		}
+		validateReport(persistedReport, reportPath, input.report.runId)
+		const reportContents = `${JSON.stringify(persistedReport, null, 2)}\n`
+		if (Buffer.byteLength(reportContents, 'utf8') > maxReportBytes) {
+			throw new HarnessError(
+				'ARTIFACT_FILE_TOO_LARGE',
+				`Run report exceeds the ${maxReportBytes}-byte artifact limit`,
+			)
+		}
+
 		await ensurePrivateDirectory(input.artifactRoot, input.artifactRoot, {
 			recursive: true,
 		})
@@ -49,18 +78,8 @@ export class ArtifactStore {
 				{ cause: error instanceof Error ? error.message : String(error) },
 			)
 		}
-		const patchPath = path.join(runDirectory, 'changes.patch')
-		const reportPath = path.join(runDirectory, 'report.json')
-		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
 
 		if (input.patch !== '') {
-			if (Buffer.byteLength(input.patch, 'utf8') > maxArtifactPatchBytes) {
-				throw new HarnessError(
-					'ARTIFACT_FILE_TOO_LARGE',
-					`Worker patch exceeds the ${maxArtifactPatchBytes}-byte artifact limit`,
-				)
-			}
-
 			// Patches must remain byte-faithful. Access is restricted by file mode.
 			await writeExclusiveRegularFile(
 				input.artifactRoot,
@@ -75,17 +94,10 @@ export class ArtifactStore {
 			this.redactor.redact(input.workerTranscript),
 		)
 
-		const persistedReport: WorkerRunReport = {
-			...redactReport(input.report, this.redactor),
-			patchPath: input.patch === '' ? null : patchPath,
-			patchSha256: input.patch === '' ? null : sha256(input.patch),
-			reportPath,
-		}
-
 		await writeExclusiveRegularFile(
 			input.artifactRoot,
 			reportPath,
-			`${JSON.stringify(persistedReport, null, 2)}\n`,
+			reportContents,
 		)
 
 		return persistedReport
@@ -197,8 +209,13 @@ function redactReport(
 					...result,
 					dimensions: result.dimensions.map(dimension => ({
 						...dimension,
-						summary: redactor.redact(dimension.summary),
-						evidence: dimension.evidence.map(value => redactor.redact(value)),
+						summary: truncateUtf8(
+							redactor.redact(dimension.summary),
+							500,
+						),
+						evidence: dimension.evidence.map(value =>
+							truncateUtf8(redactor.redact(value), 1_000),
+						),
 					})),
 				})),
 			} }),
