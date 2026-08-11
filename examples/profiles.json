@@ -1,0 +1,26 @@
+[
+  {
+    "id": "codex-implementation",
+    "worker": "codex-subscription",
+    "role": "implementation",
+    "maxIterations": 20,
+    "allowedCapabilities": [
+      "implementation",
+      "testing",
+      "tool-calling",
+      "long-context"
+    ],
+    "evaluationPolicy": "strict"
+  },
+  {
+    "id": "codex-review",
+    "worker": "codex-subscription",
+    "role": "review",
+    "maxIterations": 12,
+    "allowedCapabilities": [
+      "review",
+      "tool-calling",
+      "long-context"
+    ]
+  }
+]

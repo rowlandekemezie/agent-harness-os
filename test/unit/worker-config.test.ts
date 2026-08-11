@@ -61,6 +61,125 @@ test('keeps legacy QWEN configuration operational', function () {
 	assert.doesNotThrow(() => assertWorkersConfigured(config))
 })
 
+test('expands one backing worker into bounded role profiles', function () {
+	const config = loadConfig({
+		AGENT_OS_DEFAULT_WORKER: 'codex-implementation',
+		AGENT_OS_WORKERS_JSON: JSON.stringify([{
+			id: 'codex-subscription',
+			adapter: 'codex',
+			capabilities: [
+				'implementation',
+				'testing',
+				'review',
+				'tool-calling',
+				'long-context',
+			],
+		}]),
+		AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([
+			{
+				id: 'codex-implementation',
+				worker: 'codex-subscription',
+				role: 'implementation',
+				maxIterations: 20,
+				allowedCapabilities: [
+					'implementation',
+					'tool-calling',
+					'long-context',
+				],
+				evaluationPolicy: 'strict',
+			},
+			{
+				id: 'codex-review',
+				worker: 'codex-subscription',
+				role: 'review',
+				allowedCapabilities: ['review', 'tool-calling'],
+			},
+		]),
+	})
+
+	assert.equal(config.routing.defaultWorkerId, 'codex-implementation')
+	assert.deepEqual(config.workers.map(worker => worker.id), [
+		'codex-implementation',
+		'codex-review',
+	])
+	assert.deepEqual(config.workers[0]?.profile, {
+		backingWorkerId: 'codex-subscription',
+		role: 'implementation',
+		maxIterations: 20,
+		evaluationPolicy: 'strict',
+	})
+	assert.deepEqual(config.workers[1]?.profile, {
+		backingWorkerId: 'codex-subscription',
+		role: 'review',
+		maxIterations: 20,
+		evaluationPolicy: 'default',
+	})
+	assert.equal(config.workers[0]?.adapter, 'codex')
+	assert.deepEqual(config.workers[0]?.capabilities, [
+		'implementation',
+		'tool-calling',
+		'long-context',
+	])
+})
+
+test('rejects worker profiles that reference or authorize unsupported work', function () {
+	const workers = JSON.stringify([{
+		id: 'bounded',
+		adapter: 'codex',
+		capabilities: ['implementation', 'tool-calling'],
+	}])
+	const profile = {
+		id: 'bounded-implementation',
+		worker: 'bounded',
+		role: 'implementation',
+		allowedCapabilities: ['implementation', 'tool-calling'],
+	}
+
+	for (const invalidProfile of [
+		{ ...profile, worker: 'missing' },
+		{ ...profile, role: 'review' },
+		{
+			...profile,
+			allowedCapabilities: [
+				'implementation',
+				'review',
+				'tool-calling',
+			],
+		},
+		{ ...profile, allowedCapabilities: ['implementation'] },
+		{ ...profile, maxIterations: 65 },
+		{ ...profile, evaluationPolicy: 'permissive' },
+		{ ...profile, typo: true },
+	]) {
+		assert.throws(
+			() => loadConfig({
+				AGENT_OS_WORKERS_JSON: workers,
+				AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([invalidProfile]),
+			}),
+			hasCode('INVALID_CONFIGURATION'),
+		)
+	}
+	assert.throws(
+		() => loadConfig({
+			AGENT_OS_WORKERS_JSON: workers,
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([profile, profile]),
+		}),
+		hasCode('INVALID_CONFIGURATION'),
+	)
+	assert.throws(
+		() => loadConfig({
+			AGENT_OS_WORKERS_JSON: workers,
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify(
+				Array.from({ length: 65 }, (_, index) => ({
+					...profile,
+					id: `bounded-${index}`,
+				})),
+			),
+		}),
+		hasCode('INVALID_CONFIGURATION'),
+	)
+})
+
 test('rejects duplicate workers and plaintext remote endpoints', function () {
 	const duplicate = {
 		id: 'same',

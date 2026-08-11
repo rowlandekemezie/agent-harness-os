@@ -20,9 +20,16 @@ test('includes custom worker secret environment names in generated Codex configu
 				headerEnv: { 'x-tenant-token': 'CUSTOM_TENANT_TOKEN' },
 				capabilities: ['implementation', 'tool-calling'],
 			}]),
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'custom-implementation',
+				worker: 'custom',
+				role: 'implementation',
+				allowedCapabilities: ['implementation', 'tool-calling'],
+			}]),
 		},
 	})
 
 	assert.match(stdout, /"CUSTOM_PROVIDER_KEY"/)
 	assert.match(stdout, /"CUSTOM_TENANT_TOKEN"/)
+	assert.match(stdout, /"AGENT_OS_WORKER_PROFILES_JSON"/)
 })

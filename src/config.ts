@@ -10,6 +10,7 @@ import type {
 	WorkerCapability,
 	WorkerCostTier,
 	WorkerLatencyTier,
+	WorkerMode,
 } from './domain/types.js'
 import { HarnessError } from './lib/errors.js'
 import { isRecord, parseJsonObject } from './lib/json.js'
@@ -27,6 +28,15 @@ export type OpenAiMaxOutputTokensParameter =
 export type WorkerPricing = {
 	inputPerMillion: number | null
 	outputPerMillion: number | null
+}
+
+export type WorkerEvaluationPolicy = 'default' | 'strict'
+
+export type WorkerProfile = {
+	backingWorkerId: string
+	role: WorkerMode
+	maxIterations: number
+	evaluationPolicy: WorkerEvaluationPolicy
 }
 
 export type WorkerConfig = {
@@ -57,6 +67,7 @@ export type WorkerConfig = {
 	codexCommand: string | null
 	codexAuthMode: CodexAuthMode | null
 	configurationIssues: Array<string>
+	profile: WorkerProfile | null
 }
 
 export type HarnessConfig = {
@@ -97,7 +108,8 @@ export function loadConfig(
 	const backend = parseExecutionBackend(
 		environment['AGENT_HARNESS_EXECUTION_BACKEND'] ?? 'local',
 	)
-	const workers = loadWorkers(environment)
+	const backingWorkers = loadWorkers(environment)
+	const workers = loadWorkerProfiles(environment, backingWorkers)
 	const requestedDefaultWorkerId =
 		environment['AGENT_OS_DEFAULT_WORKER']?.trim() || null
 
@@ -406,6 +418,7 @@ function parseLegacyQwenWorker(environment: NodeJS.ProcessEnv): WorkerConfig {
 		codexCommand: null,
 		codexAuthMode: null,
 		configurationIssues: issues,
+		profile: null,
 	}
 }
 
@@ -609,6 +622,7 @@ function parseWorkerDefinition(
 		codexCommand: null,
 		codexAuthMode: null,
 		configurationIssues: issues,
+		profile: null,
 	}
 }
 
@@ -719,7 +733,194 @@ function parseCodexWorkerDefinition(
 			`${prefix}.authMode`,
 		),
 		configurationIssues: issues,
+		profile: null,
 	}
+}
+
+function loadWorkerProfiles(
+	environment: NodeJS.ProcessEnv,
+	backingWorkers: Array<WorkerConfig>,
+): Array<WorkerConfig> {
+	const profilesJson = environment['AGENT_OS_WORKER_PROFILES_JSON']?.trim()
+
+	if (profilesJson === undefined || profilesJson === '') {
+		return backingWorkers
+	}
+	if (Buffer.byteLength(profilesJson, 'utf8') > 1_048_576) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'AGENT_OS_WORKER_PROFILES_JSON may not exceed 1 MiB',
+		)
+	}
+
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(profilesJson)
+	} catch {
+		throw new HarnessError(
+			'INVALID_JSON',
+			'AGENT_OS_WORKER_PROFILES_JSON must contain valid JSON',
+		)
+	}
+	if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 64) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			'AGENT_OS_WORKER_PROFILES_JSON must be an array containing 1 to 64 profiles',
+		)
+	}
+
+	const workerById = new Map(
+		backingWorkers.map(worker => [worker.id, worker]),
+	)
+	const profileIds = new Set<string>()
+
+	return parsed.map((value, index) => {
+		const prefix = `AGENT_OS_WORKER_PROFILES_JSON[${index}]`
+		if (!isRecord(value)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${prefix} must be an object`,
+			)
+		}
+		assertProfileFields(value, prefix)
+		const id = requireConfigString(value['id'], `${prefix}.id`)
+		assertWorkerId(id, `${prefix}.id`)
+		if (profileIds.has(id)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`Worker profile IDs must be unique: ${id}`,
+			)
+		}
+		profileIds.add(id)
+
+		const backingWorkerId = requireConfigString(
+			value['worker'],
+			`${prefix}.worker`,
+		)
+		const backingWorker = workerById.get(backingWorkerId)
+		if (backingWorker === undefined) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${prefix}.worker references an unknown worker: ${backingWorkerId}`,
+			)
+		}
+		const role = parseWorkerMode(value['role'], `${prefix}.role`)
+		const allowedCapabilities = parseCapabilities(
+			value['allowedCapabilities'],
+			`${prefix}.allowedCapabilities`,
+		)
+		if (!allowedCapabilities.includes(role)) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${prefix}.allowedCapabilities must include the profile role ${role}`,
+			)
+		}
+		if (!allowedCapabilities.includes('tool-calling')) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${prefix}.allowedCapabilities must include tool-calling`,
+			)
+		}
+		const excessiveCapabilities = allowedCapabilities.filter(
+			capability => !backingWorker.capabilities.includes(capability),
+		)
+		if (excessiveCapabilities.length > 0) {
+			throw new HarnessError(
+				'INVALID_CONFIGURATION',
+				`${prefix}.allowedCapabilities exceeds worker ${backingWorkerId}: ${excessiveCapabilities.join(', ')}`,
+			)
+		}
+
+		return {
+			...backingWorker,
+			id,
+			enabled: backingWorker.enabled && parseOptionalBoolean(
+				value['enabled'],
+				true,
+				`${prefix}.enabled`,
+			),
+			capabilities: allowedCapabilities,
+			profile: {
+				backingWorkerId,
+				role,
+				maxIterations: parseOptionalInteger(
+					value['maxIterations'],
+					20,
+					1,
+					64,
+					`${prefix}.maxIterations`,
+				),
+				evaluationPolicy: parseEvaluationPolicy(
+					value['evaluationPolicy'],
+					`${prefix}.evaluationPolicy`,
+				),
+			},
+		}
+	})
+}
+
+function assertProfileFields(
+	value: Record<string, unknown>,
+	prefix: string,
+): void {
+	const allowedFields = new Set([
+		'id',
+		'worker',
+		'role',
+		'enabled',
+		'maxIterations',
+		'allowedCapabilities',
+		'evaluationPolicy',
+	])
+	const unknownFields = Object.keys(value).filter(
+		field => !allowedFields.has(field),
+	)
+	if (unknownFields.length > 0) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${prefix} contains unsupported fields: ${unknownFields.join(', ')}`,
+		)
+	}
+}
+
+function assertWorkerId(value: string, fieldName: string): void {
+	if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)) {
+		throw new HarnessError(
+			'INVALID_CONFIGURATION',
+			`${fieldName} must contain only lowercase letters, digits, dots, underscores, and hyphens`,
+		)
+	}
+}
+
+function parseWorkerMode(value: unknown, fieldName: string): WorkerMode {
+	if (
+		value === 'research' ||
+		value === 'implementation' ||
+		value === 'testing' ||
+		value === 'review'
+	) {
+		return value
+	}
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be research, implementation, testing, or review`,
+	)
+}
+
+function parseEvaluationPolicy(
+	value: unknown,
+	fieldName: string,
+): WorkerEvaluationPolicy {
+	if (value === undefined || value === 'default') {
+		return 'default'
+	}
+	if (value === 'strict') {
+		return 'strict'
+	}
+	throw new HarnessError(
+		'INVALID_CONFIGURATION',
+		`${fieldName} must be default or strict`,
+	)
 }
 
 function repositoryKey(repositoryPath: string): string {

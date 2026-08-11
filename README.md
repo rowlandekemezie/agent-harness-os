@@ -30,6 +30,7 @@ your clean checkout
 ## What Agent Harness OS provides
 
 - A worker registry configured through `AGENT_OS_WORKERS_JSON`
+- Optional role profiles configured through `AGENT_OS_WORKER_PROFILES_JSON`
 - ChatGPT-authenticated Codex CLI, OpenAI-compatible, and native Anthropic adapters
 - Capability-based routing for research, implementation, testing, review, tool calling, long context, and private execution
 - Deterministic `balanced`, `cost`, `latency`, and `quality` strategies
@@ -109,6 +110,36 @@ export AGENT_OS_DEFAULT_WORKER='codex-subscription'
 The adapter invokes `codex exec` with an ephemeral, read-only scratch workspace. It does not give nested Codex direct repository authority. Repository reads and writes still happen through Agent Harness OS tools, path policy, detached worktrees, validation, and the separate patch-application gate.
 
 By default, `authMode` is `chatgpt`. If `codex login status` reports API-key authentication, the worker refuses to run so an API-billed Codex session is not used accidentally. `authMode: "any"` is an explicit opt-in for either saved auth mode.
+
+### Specialize one worker into profiles
+
+Profiles give one provider/model configuration several bounded identities. When
+profiles are configured, route and default-worker IDs refer to profiles:
+
+```bash
+export AGENT_OS_WORKER_PROFILES_JSON='[
+  {
+    "id": "codex-implementation",
+    "worker": "codex-subscription",
+    "role": "implementation",
+    "maxIterations": 20,
+    "allowedCapabilities": ["implementation", "testing", "tool-calling", "long-context"],
+    "evaluationPolicy": "strict"
+  },
+  {
+    "id": "codex-review",
+    "worker": "codex-subscription",
+    "role": "review",
+    "maxIterations": 12,
+    "allowedCapabilities": ["review", "tool-calling", "long-context"]
+  }
+]'
+export AGENT_OS_DEFAULT_WORKER='codex-implementation'
+```
+
+A profile cannot gain capabilities the backing worker did not declare. Its role
+must match the task mode, its iteration setting is a cap, and `strict`
+evaluation makes inconclusive work fail closed. See [Worker registry](docs/worker-registry.md).
 
 ### Add external workers or fallbacks
 
@@ -219,7 +250,11 @@ Generate a configuration block:
 agent-harness-os codex-config
 ```
 
-The generated server name is `agent_os`. Run the command with `AGENT_OS_WORKERS_JSON` loaded; it forwards common provider credential names and every custom `apiKeyEnv` or `headerEnv` name declared by that registry. Regenerate the block whenever those names change.
+The generated server name is `agent_os`. Run the command with
+`AGENT_OS_WORKERS_JSON` and optional `AGENT_OS_WORKER_PROFILES_JSON` loaded; it
+forwards both configuration values, common provider credential names, and every
+custom `apiKeyEnv` or `headerEnv` name used by the effective registry.
+Regenerate the block whenever those names change.
 
 The eight MCP tools are:
 

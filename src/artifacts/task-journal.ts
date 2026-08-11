@@ -62,6 +62,7 @@ export type RunHistoryLink = {
 	evaluation: {
 		evaluatorIds: Array<string>
 		outcome: EvaluationOutcome
+		evaluationPolicy: 'default' | 'strict'
 	} | null
 }
 
@@ -101,7 +102,7 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(2, taskId, 1, null, {
+		const event = createEvent(3, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
@@ -238,6 +239,8 @@ export class TaskJournal {
 			(input.evaluation === null ||
 				(evaluation?.type === 'EvaluationCompleted' &&
 					evaluation.data.outcome === input.evaluation.outcome &&
+					(evaluation.data.evaluationPolicy ?? 'default') ===
+						input.evaluation.evaluationPolicy &&
 					arraysEqual(
 						evaluation.data.evaluatorIds,
 						input.evaluation.evaluatorIds,
@@ -598,7 +601,7 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
-	schemaVersion: 1 | 2,
+	schemaVersion: 1 | 2 | 3,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,

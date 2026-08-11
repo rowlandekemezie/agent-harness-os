@@ -50,6 +50,7 @@ function renderCodexConfig(config: ReturnType<typeof loadConfig>): string {
 	const nodePath = process.execPath.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
 	const envVars = [...new Set([
 		'AGENT_OS_WORKERS_JSON',
+		'AGENT_OS_WORKER_PROFILES_JSON',
 		'AGENT_OS_DEFAULT_WORKER',
 		'AGENT_OS_ROUTING_STRATEGY',
 		'AGENT_OS_MAX_WORKER_ATTEMPTS',

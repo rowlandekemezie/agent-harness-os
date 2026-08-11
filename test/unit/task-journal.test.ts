@@ -95,6 +95,7 @@ test('persists and projects an append-only task timeline', async function () {
 			runId,
 			evaluatorIds: ['deterministic-v1'],
 			outcome: 'passed',
+			evaluationPolicy: 'default',
 			failedDimensions: [],
 			unknownDimensions: [],
 		},
@@ -199,7 +200,7 @@ test('rejects a re-digested event that skips the attempt lifecycle', async funct
 	)
 })
 
-test('requires evaluation evidence before completing a version 2 attempt', async function () {
+test('requires evaluation evidence before completing a current-schema attempt', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-evaluation-order-'))
 	const journal = new TaskJournal()
 	const task = await createTask(journal, artifactRoot, 'Require evaluation evidence')
@@ -277,6 +278,7 @@ test('rejects contradictory evaluation dimension evidence', async function () {
 				runId,
 				evaluatorIds: ['deterministic-v1'],
 				outcome: 'failed',
+				evaluationPolicy: 'default',
 				failedDimensions: ['worker_execution'],
 				unknownDimensions: ['worker_execution'],
 			},
@@ -290,6 +292,7 @@ test('rejects contradictory evaluation dimension evidence', async function () {
 				runId,
 				evaluatorIds: ['model-only'],
 				outcome: 'failed',
+				evaluationPolicy: 'default',
 				failedDimensions: ['correctness'],
 				unknownDimensions: [],
 			},
@@ -334,6 +337,7 @@ test('rejects a failed attempt paired with a non-failed evaluation', async funct
 			runId,
 			evaluatorIds: ['deterministic-v1'],
 			outcome: 'passed',
+			evaluationPolicy: 'default',
 			failedDimensions: [],
 			unknownDimensions: [],
 		},
@@ -346,6 +350,67 @@ test('rejects a failed attempt paired with a non-failed evaluation', async funct
 		}),
 		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
 	)
+})
+
+test('records strict-profile rejection of inconclusive evaluation evidence', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-strict-profile-'))
+	const journal = new TaskJournal()
+	const task = await createTask(journal, artifactRoot, 'Require conclusive evidence')
+	const runId = randomUUID()
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['strict-worker'],
+			maxAttempts: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerStarted',
+		data: { runId, workerId: 'strict-worker', attemptNumber: 1 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerCompleted',
+		data: {
+			runId,
+			outcome: 'succeeded',
+			failureCode: null,
+			requestCount: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'ValidationCompleted',
+		data: { runId, outcome: 'skipped', commandCount: 0 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'EvaluationCompleted',
+		data: {
+			runId,
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'inconclusive',
+			evaluationPolicy: 'strict',
+			failedDimensions: [],
+			unknownDimensions: ['acceptance_criteria'],
+		},
+	})
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'AttemptCompleted',
+			data: { runId, status: 'completed', failureCode: null },
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'AttemptCompleted',
+		data: {
+			runId,
+			status: 'failed',
+			failureCode: 'EVALUATION_INCONCLUSIVE',
+		},
+	})
+
+	const timeline = await journal.timeline(artifactRoot, task.taskId)
+	assert.equal(timeline.events.at(-1)?.type, 'AttemptCompleted')
 })
 
 test('ignores unpublished staging entries during active reads', async function () {
@@ -878,6 +943,7 @@ test('rejects fallback history after a policy failure', async function () {
 			runId: firstRunId,
 			evaluatorIds: ['deterministic-v1'],
 			outcome: 'failed',
+			evaluationPolicy: 'default',
 			failedDimensions: ['security_policy_compliance'],
 			unknownDimensions: [],
 		},

@@ -33,6 +33,12 @@ Treat `AGENT_OS_WORKERS_JSON` as production configuration. Review changes to:
 
 Capability and pricing changes can alter routing without changing application code. Keep the registry under configuration management and audit its effective value at startup.
 
+Treat `AGENT_OS_WORKER_PROFILES_JSON` the same way. Review each profile's backing
+worker, exact role, capability subset, iteration cap, enabled state, and
+evaluation policy. When this variable is present, only profile IDs are routable;
+set `AGENT_OS_DEFAULT_WORKER` and task preferences to profile IDs. Removing the
+variable restores one implicit profile per backing worker.
+
 ## Credential rotation
 
 Credentials are read at process startup. Rotate by updating the referenced environment variable and restarting the MCP process. Do not place credentials in the worker JSON, endpoint query strings, command arguments, repository files, or Codex prompts.
@@ -50,6 +56,12 @@ Use route preview before high-cost, privacy-sensitive, or high-blast-radius work
 - fallback policy and maximum attempts
 
 A route is deterministic for a fixed registry and policy. It is not based on live provider health, benchmark history, or current prices.
+
+`list_workers` and `route_worker` expose profile metadata without credentials.
+Confirm the selected profile role and effective iteration limit before a
+high-impact delegation. `evaluationPolicy: strict` turns an inconclusive
+evaluation into a failed, non-applicable run with
+`EVALUATION_INCONCLUSIVE`; it never triggers fallback.
 
 ## Fallback incidents
 

@@ -203,6 +203,12 @@ export type WorkerRunReport = {
 	provider: {
 		workerId?: string
 		adapter?: WorkerAdapter
+		profile?: {
+			backingWorkerId: string
+			role: WorkerMode
+			maxIterations: number
+			evaluationPolicy: 'default' | 'strict'
+		}
 		baseUrl: string
 		model: string
 		requestCount: number
@@ -234,7 +240,7 @@ export type TaskSummary = {
 }
 
 export type TaskEventBase = {
-	schemaVersion: 1 | 2
+	schemaVersion: 1 | 2 | 3
 	eventId: string
 	taskId: string
 	sequence: number
@@ -318,6 +324,7 @@ export type EvaluationCompletedEvent = TaskEventBase & {
 		runId: string
 		evaluatorIds: Array<string>
 		outcome: EvaluationOutcome
+		evaluationPolicy?: 'default' | 'strict'
 		failedDimensions: Array<EvaluationDimensionId>
 		unknownDimensions: Array<EvaluationDimensionId>
 	}

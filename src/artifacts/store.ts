@@ -299,7 +299,9 @@ function validateReport(
 		!isReportEvaluationConsistent(
 			schemaVersion,
 			value['status'],
+			value['failureCode'],
 			value['evaluation'],
+			value['provider'],
 		) ||
 		!isWorkerMode(value['mode']) ||
 		requireReportString(value['reportPath']) !== expectedPath ||
@@ -335,7 +337,9 @@ function validateReport(
 function isReportEvaluationConsistent(
 	schemaVersion: unknown,
 	status: unknown,
+	failureCode: unknown,
 	evaluation: unknown,
+	provider: unknown,
 ): boolean {
 	if (schemaVersion !== 3) {
 		return true
@@ -343,7 +347,24 @@ function isReportEvaluationConsistent(
 	if (!isRunStatus(status) || !isEvaluationSummary(evaluation)) {
 		return false
 	}
-	return (status === 'completed') === (evaluation.outcome !== 'failed')
+	if (status === 'completed') {
+		return evaluation.outcome !== 'failed' &&
+			(!isStrictWorkerProfile(provider) || evaluation.outcome === 'passed')
+	}
+	if (evaluation.outcome === 'failed') {
+		return true
+	}
+	return (
+		status === 'failed' &&
+		failureCode === 'EVALUATION_INCONCLUSIVE' &&
+		isStrictWorkerProfile(provider)
+	)
+}
+
+function isStrictWorkerProfile(provider: unknown): boolean {
+	return isRecord(provider) &&
+		isRecord(provider['profile']) &&
+		provider['profile']['evaluationPolicy'] === 'strict'
 }
 
 function isUuid(value: unknown): value is string {
@@ -410,6 +431,7 @@ function isProviderMetadata(value: unknown): boolean {
 			[
 				'workerId',
 				'adapter',
+				'profile',
 				'inputTokens',
 				'outputTokens',
 				'totalTokens',
@@ -430,6 +452,7 @@ function isProviderMetadata(value: unknown): boolean {
 			value['adapter'] === 'openai-compatible' ||
 			value['adapter'] === 'anthropic' ||
 			value['adapter'] === 'codex') &&
+		isOptionalWorkerProfile(value['profile']) &&
 		isOptionalNonNegativeInteger(value['inputTokens']) &&
 		isOptionalNonNegativeInteger(value['outputTokens']) &&
 		isOptionalNonNegativeInteger(value['totalTokens']) &&
@@ -439,6 +462,28 @@ function isProviderMetadata(value: unknown): boolean {
 			(typeof value['estimatedCostUsd'] === 'number' &&
 				Number.isFinite(value['estimatedCostUsd']) &&
 				value['estimatedCostUsd'] >= 0))
+	)
+}
+
+function isOptionalWorkerProfile(value: unknown): boolean {
+	if (value === undefined) {
+		return true
+	}
+	return (
+		isRecord(value) &&
+		hasExpectedKeys(value, [
+			'backingWorkerId',
+			'role',
+			'maxIterations',
+			'evaluationPolicy',
+		], []) &&
+		typeof value['backingWorkerId'] === 'string' &&
+		/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value['backingWorkerId']) &&
+		isWorkerMode(value['role']) &&
+		isPositiveInteger(value['maxIterations']) &&
+		(value['maxIterations'] as number) <= 64 &&
+		(value['evaluationPolicy'] === 'default' ||
+			value['evaluationPolicy'] === 'strict')
 	)
 }
 

@@ -490,6 +490,8 @@ export class WorkerService {
 							result => result.evaluatorId,
 						),
 						outcome: report.evaluation.outcome,
+						evaluationPolicy:
+							report.provider.profile?.evaluationPolicy ?? 'default',
 					}
 					: null,
 			})
@@ -633,8 +635,17 @@ export class WorkerService {
 			}
 
 			try {
+				const profileTask = worker.profile === null
+					? task
+					: {
+						...task,
+						maxIterations: Math.min(
+							task.maxIterations,
+							worker.profile.maxIterations,
+						),
+					}
 				const loopResult = await runAgentLoop(
-					task,
+					profileTask,
 					provider,
 					toolExecutor,
 					{
@@ -888,9 +899,18 @@ export class WorkerService {
 
 			validateEvaluationSummary(evaluation)
 
-			if (evaluation.outcome === 'failed' && status === 'completed') {
+			if (
+				status === 'completed' &&
+				(
+					evaluation.outcome === 'failed' ||
+					(worker.profile?.evaluationPolicy === 'strict' &&
+						evaluation.outcome === 'inconclusive')
+				)
+			) {
 				status = 'failed'
-				failureCode = 'EVALUATION_FAILED'
+				failureCode = evaluation.outcome === 'failed'
+					? 'EVALUATION_FAILED'
+					: 'EVALUATION_INCONCLUSIVE'
 			}
 			if (hasDeterministicFailedDimension(evaluation, 'patch_size')) {
 				patch = ''
@@ -905,6 +925,8 @@ export class WorkerService {
 					runId: worktree.runId,
 					evaluatorIds: evaluation.results.map(result => result.evaluatorId),
 					outcome: evaluation.outcome,
+					evaluationPolicy:
+						worker.profile?.evaluationPolicy ?? 'default',
 					failedDimensions: collectDimensionIds(evaluation, 'failed'),
 					unknownDimensions: collectDimensionIds(evaluation, 'unknown'),
 				},
@@ -939,6 +961,9 @@ export class WorkerService {
 				provider: {
 					workerId: worker.id,
 					adapter: worker.adapter,
+					...(worker.profile === null
+						? {}
+						: { profile: { ...worker.profile } }),
 					baseUrl: worker.endpointUrl ?? worker.baseUrl,
 					model: worker.model,
 					requestCount: usage.requestCount,
@@ -1230,10 +1255,13 @@ function buildAcceptanceResults(
 
 function isPolicyCode(code: string): boolean {
 	return (
-		code.includes('DENIED') ||
-		code.includes('NOT_ALLOWED') ||
-		code.endsWith('_LIMIT') ||
-		code === 'READ_ONLY_TASK'
+		code !== 'WORKER_ITERATION_LIMIT' &&
+		(
+			code.includes('DENIED') ||
+			code.includes('NOT_ALLOWED') ||
+			code.endsWith('_LIMIT') ||
+			code === 'READ_ONLY_TASK'
+		)
 	)
 }
 

@@ -362,6 +362,62 @@ test('rejects a completed version 3 report with a failed evaluation', async func
 	)
 })
 
+test('binds strict-profile rejection to an inconclusive evaluation', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-profile-policy-'))
+	const evaluation = createEvaluationSummary()
+	evaluation.outcome = 'inconclusive'
+	evaluation.results[0]!.outcome = 'inconclusive'
+	evaluation.results[0]!.dimensions[0]!.status = 'unknown'
+	const report: WorkerRunReport = {
+		...createReport('45454545-4545-4454-8454-454545454545'),
+		schemaVersion: 3,
+		taskId: '56565656-5656-4565-8565-565656565656',
+		status: 'failed',
+		failureCode: 'EVALUATION_INCONCLUSIVE',
+		evaluation,
+		provider: {
+			baseUrl: 'http://provider',
+			model: 'qwen',
+			requestCount: 1,
+			profile: {
+				backingWorkerId: 'qwen',
+				role: 'implementation',
+				maxIterations: 20,
+				evaluationPolicy: 'strict',
+			},
+		},
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		status: string
+		failureCode: string | null
+		provider: { profile: { evaluationPolicy: string } }
+	}
+	value.status = 'completed'
+	value.failureCode = null
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+
+	value.status = 'failed'
+	value.failureCode = 'EVALUATION_INCONCLUSIVE'
+	value.provider.profile.evaluationPolicy = 'default'
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+})
+
 test('redacts evaluator summaries and evidence before persistence', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-redact-'))
 	const secret = 'private-evaluator-secret'
