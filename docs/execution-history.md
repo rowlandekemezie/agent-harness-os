@@ -73,6 +73,10 @@ token, and estimated-cost measurements in `AttemptCompleted`. These fields feed
 deterministic routing; older events remain replayable but are not treated as
 measured samples.
 
+Workflow-created tasks use event schema version 6. `TaskCreated` then binds the
+workflow ID, stage, execution ID, stage-contract digest, and source candidate to
+the run report and task history. Approval fails closed if any binding differs.
+
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
 and immediately before Git is invoked. Its source is `mcp_call`; it records the
@@ -114,7 +118,7 @@ a second mutable source of truth. One timeline is bounded to 10,000 events and
 8 MiB. Task listing is bounded to 10,000 directory entries, 25,000 events, and 8 MiB of
 event bytes per request.
 
-Event-schema-version-5 tasks also publish a small immutable routing-index entry
+Event-schema-version-5 and version-6 tasks also publish a small immutable routing-index entry
 after `TaskCreated` becomes visible. Evidence reads sort those names newest
 first, validate each entry against the task's ready marker and event chain, and
 read at most the configured sample window. The index avoids reparsing all

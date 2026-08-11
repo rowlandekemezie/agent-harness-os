@@ -14,10 +14,12 @@ import type {
 	TaskSummary,
 	TaskTimeline,
 	WorkerMode,
+	WorkflowTaskProvenance,
 } from '../domain/types.js'
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
+import { workflowProvenanceEquals } from '../workflow/provenance.js'
 import {
 	projectTaskEvent,
 	type TaskEventProjection,
@@ -53,6 +55,7 @@ export type CreateTaskInput = {
 	repositoryPath: string
 	baseCommit: string
 	policy?: ResolvedPolicy
+	workflowProvenance?: WorkflowTaskProvenance
 }
 
 export type RunHistoryLink = {
@@ -61,6 +64,8 @@ export type RunHistoryLink = {
 	runId: string
 	repositoryPath: string
 	baseCommit: string
+	mode: WorkerMode
+	workflowProvenance: WorkflowTaskProvenance | null
 	status: RunStatus
 	patchSha256: string | null
 	changedFileCount: number
@@ -113,13 +118,19 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(input.policy === undefined ? 3 : 5, taskId, 1, null, {
+		const schemaVersion = input.workflowProvenance === undefined
+			? input.policy === undefined ? 3 : 5
+			: 6
+		const event = createEvent(schemaVersion, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
 				mode: input.mode,
 				repositoryPath: input.repositoryPath,
 				baseCommit: input.baseCommit,
+				...(input.workflowProvenance === undefined
+					? {}
+					: { workflowProvenance: { ...input.workflowProvenance } }),
 				...(input.policy === undefined
 					? {}
 					: {
@@ -276,6 +287,13 @@ export class TaskJournal {
 			created?.type === 'TaskCreated' &&
 			created.data.repositoryPath === input.repositoryPath &&
 			created.data.baseCommit === input.baseCommit &&
+			created.data.mode === input.mode &&
+			(created.schemaVersion >= 6
+				? workflowProvenanceEquals(
+					created.data.workflowProvenance ?? null,
+					input.workflowProvenance,
+				)
+				: input.workflowProvenance === null) &&
 			(created.schemaVersion >= 4
 				? created.data.policySha256 === (input.policySha256 ?? null)
 				: (input.policySha256 ?? null) === null) &&
@@ -886,7 +904,7 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
-	schemaVersion: 1 | 2 | 3 | 4 | 5,
+	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,

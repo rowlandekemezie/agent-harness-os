@@ -34,6 +34,7 @@ export type WorkflowProjection = {
 	definition: WorkflowDefinition
 	summary: WorkflowSummary
 	approvalRequested: boolean
+	completedStageAttempts: Partial<Record<WorkflowWorkerStageName, number>>
 }
 
 export function createWorkflowEvent(
@@ -160,6 +161,7 @@ export function projectWorkflowEvent(
 			: 'plan'
 		return {
 			definition: event.data.definition,
+			completedStageAttempts: {},
 			summary: {
 				schemaVersion: 1,
 				workflowId: event.workflowId,
@@ -289,20 +291,21 @@ function projectStageStarted(
 	appendOperation: boolean,
 ): void {
 	const previousAttempts = next.summary.stageAttempts[event.data.stage] ?? 0
+	const completedAttempts = next.completedStageAttempts[event.data.stage] ?? 0
 	const expectedSource = event.data.stage === 'plan' || event.data.stage === 'implement'
 		? null
 		: next.summary.candidateRunId
 	const stage = next.definition.stages[event.data.stage]
-	const attemptLimit = event.data.stage === 'repair'
-		? next.definition.maxRepairAttempts
-		: (stage?.retryLimit ?? 0) + 1
+	const attemptLimitReached = event.data.stage === 'repair'
+		? completedAttempts >= next.definition.maxRepairAttempts
+		: completedAttempts > (stage?.retryLimit ?? 0)
 	if (
 		stage === null ||
 		next.summary.currentStage !== event.data.stage ||
 		next.summary.activeExecutionId !== null ||
 		next.approvalRequested ||
 		event.data.attemptNumber !== previousAttempts + 1 ||
-		event.data.attemptNumber > attemptLimit ||
+		attemptLimitReached ||
 		event.data.sourceRunId !== expectedSource ||
 		next.summary.transitionCount >= next.definition.maxTransitions
 	) {
@@ -313,9 +316,6 @@ function projectStageStarted(
 	}
 	next.summary.stageAttempts[event.data.stage] = event.data.attemptNumber
 	next.summary.transitionCount += 1
-	if (event.data.stage === 'repair') {
-		next.summary.repairAttemptCount += 1
-	}
 	next.summary.activeExecutionId = event.data.executionId
 	next.summary.status = 'running'
 }
@@ -351,14 +351,13 @@ function projectStageCompleted(
 			event.data.candidateRunId !== next.summary.candidateRunId) ||
 		(event.data.status !== 'completed' &&
 			event.data.nextStage === 'repair' &&
-			event.data.candidateRunId === null) ||
-		(event.data.status !== 'completed' &&
-			event.data.nextStage === 'repair' &&
-			event.data.candidateRunId !== next.summary.candidateRunId &&
-			event.data.candidateRunId !== event.data.runId) ||
+			(event.data.taskId === null ||
+				event.data.runId === null ||
+				event.data.candidateRunId !== event.data.runId)) ||
 		!isAllowedNextStage(
 			next.definition,
 			next.summary,
+			next.completedStageAttempts,
 			event.data.stage,
 			event.data.status,
 			event.data.failureCode,
@@ -371,6 +370,11 @@ function projectStageCompleted(
 		)
 	}
 	next.summary.activeExecutionId = null
+	next.completedStageAttempts[event.data.stage] =
+		(next.completedStageAttempts[event.data.stage] ?? 0) + 1
+	if (event.data.stage === 'repair') {
+		next.summary.repairAttemptCount += 1
+	}
 	next.summary.candidateRunId = event.data.candidateRunId
 	next.summary.currentStage = event.data.nextStage
 	next.summary.lastFailureCode = event.data.failureCode
@@ -439,6 +443,7 @@ function cloneProjection(
 	return {
 		definition: current.definition,
 		approvalRequested: current.approvalRequested,
+		completedStageAttempts: { ...current.completedStageAttempts },
 		summary: {
 			...current.summary,
 			stageAttempts: { ...current.summary.stageAttempts },
@@ -557,6 +562,7 @@ function validateWorkflowEventData(type: unknown, data: Record<string, unknown>)
 function isAllowedNextStage(
 	definition: WorkflowDefinition,
 	summary: WorkflowSummary,
+	completedStageAttempts: Partial<Record<WorkflowWorkerStageName, number>>,
 	stage: WorkflowWorkerStageName,
 	status: RunStatus,
 	failureCode: string | null,
@@ -572,16 +578,19 @@ function isAllowedNextStage(
 		if (failureCode === null) {
 			return false
 		}
+		if (nextStage === 'repair') {
+			const completedRepairAttempts = summary.repairAttemptCount +
+				(stage === 'repair' ? 1 : 0)
+			return definition.stages.repair !== null &&
+				isRepairableWorkflowFailure(failureCode) &&
+				completedRepairAttempts < definition.maxRepairAttempts
+		}
 		if (nextStage === stage) {
 			const retryLimit = definition.stages[stage]?.retryLimit ?? 0
-			return stage !== 'repair' &&
-				isRetryableWorkflowFailure(failureCode) &&
-				(summary.stageAttempts[stage] ?? 0) <= retryLimit
+			return isRetryableWorkflowFailure(failureCode) &&
+				(completedStageAttempts[stage] ?? 0) < retryLimit
 		}
-		return nextStage === 'repair' &&
-			definition.stages.repair !== null &&
-			isRepairableWorkflowFailure(failureCode) &&
-			summary.repairAttemptCount < definition.maxRepairAttempts
+		return false
 	}
 	switch (stage) {
 		case 'plan':

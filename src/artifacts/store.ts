@@ -11,6 +11,7 @@ import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
 import { truncateUtf8 } from '../lib/text.js'
+import { isWorkflowTaskProvenance } from '../workflow/provenance.js'
 import { isEvaluationSummary } from '../evaluation/schema.js'
 import { isResolvedPolicy } from '../policy/engine.js'
 import {
@@ -289,7 +290,7 @@ function validateReport(
 					? [...requiredKeys, 'taskId']
 					: [...requiredKeys, 'taskId', 'evaluation'],
 			schemaVersion === 3
-				? ['failureCode', 'routing', 'policy']
+				? ['failureCode', 'routing', 'policy', 'workflowProvenance']
 				: ['failureCode', 'routing'],
 		) ||
 		(schemaVersion === 1 &&
@@ -299,6 +300,9 @@ function validateReport(
 		(schemaVersion === 3 &&
 			(!isUuid(value['taskId']) || !isEvaluationSummary(value['evaluation']))) ||
 		(value['policy'] !== undefined && !isResolvedPolicy(value['policy'])) ||
+		(value['workflowProvenance'] !== undefined &&
+			value['workflowProvenance'] !== null &&
+			!isWorkflowTaskProvenance(value['workflowProvenance'])) ||
 		!isRunStatus(value['status']) ||
 		!isReportEvaluationConsistent(
 			schemaVersion,

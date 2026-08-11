@@ -8,12 +8,15 @@ import { loadConfig, resolveArtifactRoot } from '../../src/config.js'
 import type {
 	WorkflowEvent,
 	WorkflowEventInput,
+	WorkflowTaskProvenance,
 	WorkflowWorkerStage,
+	WorkerMode,
 	WorkerRunReport,
 	WorkerTask,
 } from '../../src/domain/types.js'
 import { resolveCommit, resolveRepositoryRoot } from '../../src/git/repository.js'
 import { WorkflowJournal } from '../../src/workflow/journal.js'
+import { createWorkflowTaskProvenance } from '../../src/workflow/provenance.js'
 import {
 	WorkflowService,
 	type CreateWorkflowInput,
@@ -69,6 +72,7 @@ class FakeWorkerService {
 		if (report === undefined) {
 			throw new Error('No fake worker report remains')
 		}
+		report.workflowProvenance = task.workflowProvenance ?? null
 		return report
 	}
 
@@ -84,6 +88,8 @@ class FakeWorkerService {
 		_repositoryPath: string,
 		runId: string,
 		_baseCommit: string,
+		expectedMode: WorkerMode,
+		expectedWorkflowProvenance: WorkflowTaskProvenance | null,
 		signal?: AbortSignal,
 	): Promise<WorkerRunReport> {
 		this.validationCalls.push(runId)
@@ -107,6 +113,13 @@ class FakeWorkerService {
 		) {
 			throw new Error('Invalid fake candidate')
 		}
+		if (report.mode !== expectedMode) {
+			throw new Error('Unexpected fake run mode')
+		}
+		assert.deepEqual(
+			report.workflowProvenance ?? null,
+			expectedWorkflowProvenance,
+		)
 		return report
 	}
 
@@ -115,6 +128,8 @@ class FakeWorkerService {
 		runId: string,
 		_baseCommit: string,
 		expectedStatus: WorkerRunReport['status'],
+		expectedMode: WorkerMode,
+		expectedWorkflowProvenance: WorkflowTaskProvenance | null,
 		signal?: AbortSignal,
 	): Promise<WorkerRunReport> {
 		this.validationCalls.push(runId)
@@ -134,6 +149,13 @@ class FakeWorkerService {
 		if (report.status !== expectedStatus) {
 			throw new Error('Unexpected fake run status')
 		}
+		if (report.mode !== expectedMode) {
+			throw new Error('Unexpected fake run mode')
+		}
+		assert.deepEqual(
+			report.workflowProvenance ?? null,
+			expectedWorkflowProvenance,
+		)
 		return report
 	}
 }
@@ -169,6 +191,25 @@ class BlockingWorkflowJournal extends WorkflowJournal {
 			await this.release
 		}
 		return await super.append(artifactRoot, workflowId, input, signal)
+	}
+}
+
+class AbortAfterAppendWorkflowJournal extends WorkflowJournal {
+	constructor(private readonly controller: AbortController) {
+		super()
+	}
+
+	override async append(
+		artifactRoot: string,
+		workflowId: string,
+		input: WorkflowEventInput,
+		signal?: AbortSignal,
+	): Promise<WorkflowEvent> {
+		const event = await super.append(artifactRoot, workflowId, input, signal)
+		if (input.type === 'WorkflowCompleted') {
+			this.controller.abort(new DOMException('Cancelled after commit', 'AbortError'))
+		}
+		return event
 	}
 }
 
@@ -243,12 +284,19 @@ test('rejects a candidate into a bounded repair loop with cumulative input', asy
 
 test('advances each configured optional stage exactly once', async function () {
 	const repositoryPath = await createTestRepository()
-	const implementation = report('completed', true)
-	const testing = report('completed', false)
-	const review = report('completed', false)
-	const worker = new FakeWorkerService([implementation, testing, review])
+	const planning = report('completed', false, 'research')
+	const implementation = report('completed', true, 'implementation')
+	const testing = report('completed', false, 'testing')
+	const review = report('completed', false, 'review')
+	const worker = new FakeWorkerService([
+		planning,
+		implementation,
+		testing,
+		review,
+	])
 	const service = await createService(worker)
 	const input = workflowInput(repositoryPath)
+	input.stages.plan = stage('Plan the candidate.')
 	input.stages.test = stage('Test the candidate.')
 	input.stages.review = stage('Review the candidate.')
 	const created = await service.create(input)
@@ -256,13 +304,15 @@ test('advances each configured optional stage exactly once', async function () {
 	const waiting = await service.run(repositoryPath, created.summary.workflowId)
 	assert.equal(waiting.summary.status, 'waiting_for_approval')
 	assert.deepEqual(worker.tasks.map(task => task.mode), [
+		'research',
 		'implementation',
 		'testing',
 		'review',
 	])
-	assert.equal(worker.tasks[1]?.candidateRunId, implementation.runId)
 	assert.equal(worker.tasks[2]?.candidateRunId, implementation.runId)
+	assert.equal(worker.tasks[3]?.candidateRunId, implementation.runId)
 	assert.deepEqual(worker.validationCalls, [
+		planning.runId,
 		implementation.runId,
 		testing.runId,
 		review.runId,
@@ -290,7 +340,9 @@ test('resumes an interrupted stage as a fresh bounded delegation', async functio
 	const journal = new WorkflowJournal()
 	const worker = new FakeWorkerService([report('completed', true)])
 	const service = await createService(worker, journal)
-	const created = await service.create(workflowInput(repositoryPath))
+	const input = workflowInput(repositoryPath)
+	input.stages.implement.retryLimit = 0
+	const created = await service.create(input)
 	const workflowId = created.summary.workflowId
 	const artifactRoot = artifactRootFor(service, created.summary.repositoryPath)
 	const executionId = randomUUID()
@@ -453,6 +505,13 @@ test('blocks crash recovery when approval evidence does not match candidate hist
 		stages: input.stages,
 	})
 	const executionId = randomUUID()
+	candidate.workflowProvenance = createWorkflowTaskProvenance(
+		created.summary.workflowId,
+		'implement',
+		executionId,
+		input.stages.implement,
+		null,
+	)
 	await journal.append(artifactRoot, created.summary.workflowId, {
 		type: 'WorkflowStageStarted',
 		data: {
@@ -495,12 +554,13 @@ test('blocks crash recovery when approval evidence does not match candidate hist
 	assert.deepEqual(worker.validationCalls, [candidate.runId])
 })
 
-test('blocks approval when later stage evidence cannot be validated', async function () {
+test('blocks approval when valid run evidence comes from another stage', async function () {
 	const repositoryPath = await createTestRepository()
 	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
 	const journal = new WorkflowJournal()
 	const candidate = report('completed', true)
-	const worker = new FakeWorkerService([candidate])
+	const substitutedReview = report('completed', false, 'review')
+	const worker = new FakeWorkerService([candidate, substitutedReview])
 	const service = await createService(worker, journal)
 	const input = workflowInput(repositoryRoot)
 	input.stages.review = stage('Review the candidate.')
@@ -517,6 +577,13 @@ test('blocks approval when later stage evidence cannot be validated', async func
 		stages: input.stages,
 	})
 	const implementationExecutionId = randomUUID()
+	candidate.workflowProvenance = createWorkflowTaskProvenance(
+		created.summary.workflowId,
+		'implement',
+		implementationExecutionId,
+		input.stages.implement,
+		null,
+	)
 	await journal.append(artifactRoot, created.summary.workflowId, {
 		type: 'WorkflowStageStarted',
 		data: {
@@ -540,7 +607,13 @@ test('blocks approval when later stage evidence cannot be validated', async func
 		},
 	})
 	const reviewExecutionId = randomUUID()
-	const forgedReviewRunId = randomUUID()
+	substitutedReview.workflowProvenance = createWorkflowTaskProvenance(
+		randomUUID(),
+		'review',
+		randomUUID(),
+		input.stages.review,
+		candidate.runId,
+	)
 	await journal.append(artifactRoot, created.summary.workflowId, {
 		type: 'WorkflowStageStarted',
 		data: {
@@ -555,8 +628,8 @@ test('blocks approval when later stage evidence cannot be validated', async func
 		data: {
 			stage: 'review',
 			executionId: reviewExecutionId,
-			taskId: randomUUID(),
-			runId: forgedReviewRunId,
+			taskId: substitutedReview.taskId ?? null,
+			runId: substitutedReview.runId,
 			status: 'completed',
 			failureCode: null,
 			candidateRunId: candidate.runId,
@@ -567,7 +640,10 @@ test('blocks approval when later stage evidence cannot be validated', async func
 	const blocked = await service.run(repositoryRoot, created.summary.workflowId)
 	assert.equal(blocked.summary.status, 'blocked')
 	assert.equal(blocked.summary.lastFailureCode, 'WORKFLOW_CANDIDATE_INVALID')
-	assert.deepEqual(worker.validationCalls, [candidate.runId, forgedReviewRunId])
+	assert.deepEqual(worker.validationCalls, [
+		candidate.runId,
+		substitutedReview.runId,
+	])
 	assert.equal(
 		blocked.events.some(event => event.type === 'WorkflowApprovalRequested'),
 		false,
@@ -627,6 +703,32 @@ test('keeps cancellation authoritative during candidate validation', async funct
 	)
 	assert.equal(cancellation.summary.status, 'cancelled')
 	assert.equal((await run).summary.status, 'cancelled')
+})
+
+test('cancels an active approval during candidate validation', async function () {
+	const repositoryPath = await createTestRepository()
+	const worker = new FakeWorkerService([report('completed', true)])
+	const service = await createService(worker)
+	const created = await service.create(workflowInput(repositoryPath))
+	const waiting = await service.run(repositoryPath, created.summary.workflowId)
+	assert.equal(waiting.summary.status, 'waiting_for_approval')
+	worker.blockValidation()
+	const approval = service.approve(
+		repositoryPath,
+		created.summary.workflowId,
+		'approved',
+		'',
+	)
+	await waitUntil(() => worker.validationCalls.length >= 2)
+
+	const cancellation = service.cancel(repositoryPath, created.summary.workflowId)
+	const [approvalResult, cancelResult] = await Promise.all([
+		approval,
+		cancellation,
+	])
+	assert.equal(approvalResult.summary.status, 'cancelled')
+	assert.equal(cancelResult.summary.status, 'cancelled')
+	assert.equal(approvalResult.summary.approvalDecision, null)
 })
 
 test('keeps the absolute deadline active during candidate validation', async function () {
@@ -729,6 +831,127 @@ test('keeps cancellation authoritative during terminal publication', async funct
 
 	const cancellation = service.cancel(repositoryPath, created.summary.workflowId)
 	journal.continue()
+	const [runResult, cancelResult] = await Promise.all([run, cancellation])
+	assert.equal(runResult.summary.status, 'cancelled')
+	assert.equal(cancelResult.summary.status, 'cancelled')
+	assert.equal(runResult.summary.lastFailureCode, 'WORKFLOW_CANCELLED')
+})
+
+test('keeps a terminal outcome committed before a later cancellation', async function () {
+	const repositoryPath = await createTestRepository()
+	const worker = new FakeWorkerService([report('failed', false)])
+	const controller = new AbortController()
+	const journal = new AbortAfterAppendWorkflowJournal(controller)
+	const service = await createService(worker, journal)
+	const input = workflowInput(repositoryPath)
+	input.stages.implement.retryLimit = 0
+	const created = await service.create(input)
+
+	const result = await service.run(
+		repositoryPath,
+		created.summary.workflowId,
+		controller.signal,
+	)
+	assert.equal(controller.signal.aborted, true)
+	assert.equal(result.summary.status, 'failed')
+	assert.equal(result.summary.lastFailureCode, 'EVALUATION_FAILED')
+	assert.equal(
+		result.events.filter(event => event.type === 'WorkflowCompleted').length,
+		1,
+	)
+})
+
+test('keeps cancellation authoritative during limit publication', async function () {
+	const repositoryPath = await createTestRepository()
+	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+	const worker = new FakeWorkerService([])
+	const journal = new BlockingWorkflowJournal('WorkflowCompleted')
+	const service = await createService(worker, journal)
+	const input = workflowInput(repositoryRoot)
+	const artifactRoot = artifactRootFor(service, repositoryRoot)
+	const created = await journal.create(artifactRoot, {
+		schemaVersion: 1,
+		objective: input.objective,
+		repositoryPath: repositoryRoot,
+		baseCommit: await resolveCommit(repositoryRoot, 'HEAD'),
+		deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+		maxTransitions: 1,
+		maxRepairAttempts: 0,
+		dependencyWorkflowIds: [],
+		stages: input.stages,
+	})
+	const executionId = randomUUID()
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageInterrupted',
+		data: { stage: 'implement', executionId, reason: 'resume' },
+	})
+	const run = service.run(repositoryRoot, created.summary.workflowId)
+	await journal.blocked
+	const cancellation = service.cancel(repositoryRoot, created.summary.workflowId)
+	journal.continue()
+
+	const [runResult, cancelResult] = await Promise.all([run, cancellation])
+	assert.equal(runResult.summary.status, 'cancelled')
+	assert.equal(cancelResult.summary.status, 'cancelled')
+	assert.equal(runResult.summary.lastFailureCode, 'WORKFLOW_CANCELLED')
+})
+
+test('keeps cancellation authoritative during recovered terminal publication', async function () {
+	const repositoryPath = await createTestRepository()
+	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+	const worker = new FakeWorkerService([])
+	const journal = new BlockingWorkflowJournal('WorkflowCompleted')
+	const service = await createService(worker, journal)
+	const input = workflowInput(repositoryRoot)
+	const artifactRoot = artifactRootFor(service, repositoryRoot)
+	const created = await journal.create(artifactRoot, {
+		schemaVersion: 1,
+		objective: input.objective,
+		repositoryPath: repositoryRoot,
+		baseCommit: await resolveCommit(repositoryRoot, 'HEAD'),
+		deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+		maxTransitions: input.maxTransitions,
+		maxRepairAttempts: 0,
+		dependencyWorkflowIds: [],
+		stages: input.stages,
+	})
+	const executionId = randomUUID()
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'implement',
+			executionId,
+			taskId: null,
+			runId: null,
+			status: 'failed',
+			failureCode: 'PROVIDER_RESPONSE_INVALID',
+			candidateRunId: null,
+			nextStage: null,
+		},
+	})
+	const run = service.run(repositoryRoot, created.summary.workflowId)
+	await journal.blocked
+	const cancellation = service.cancel(repositoryRoot, created.summary.workflowId)
+	journal.continue()
+
 	const [runResult, cancelResult] = await Promise.all([run, cancellation])
 	assert.equal(runResult.summary.status, 'cancelled')
 	assert.equal(cancelResult.summary.status, 'cancelled')
@@ -999,6 +1222,7 @@ function stage(objective: string, retryLimit = 1): WorkflowWorkerStage {
 function report(
 	status: 'completed' | 'failed',
 	withPatch: boolean,
+	mode: WorkerMode = 'implementation',
 ): WorkerRunReport {
 	const runId = randomUUID()
 	return {
@@ -1008,7 +1232,7 @@ function report(
 		status,
 		failureCode: status === 'completed' ? null : 'EVALUATION_FAILED',
 		objective: 'Fake stage.',
-		mode: 'implementation',
+		mode,
 		repositoryPath: '/tmp/fake',
 		baseRef: 'a'.repeat(40),
 		startedAt: new Date().toISOString(),
@@ -1044,4 +1268,14 @@ function hasCode(code: string): (error: unknown) => boolean {
 		error !== null &&
 		'code' in error &&
 		error.code === code
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 200; attempt += 1) {
+		if (predicate()) {
+			return
+		}
+		await new Promise(resolve => setTimeout(resolve, 5))
+	}
+	throw new Error('Timed out waiting for workflow test condition')
 }

@@ -273,6 +273,75 @@ export async function removeRegularFileIfContentsMatch(
 	return true
 }
 
+export async function removePublicationStagingIfContentsMatch(
+	rootPath: string,
+	filePath: string,
+	temporaryPath: string,
+	expectedContents: Buffer,
+	maxBytes: number,
+): Promise<boolean> {
+	assertPathInside(rootPath, filePath)
+	assertPathInside(rootPath, temporaryPath)
+	if (path.dirname(filePath) !== path.dirname(temporaryPath)) {
+		throw new HarnessError(
+			'ARTIFACT_PATH_INVALID',
+			'Publication links must share a directory',
+		)
+	}
+
+	const finalHandle = await open(filePath, constants.O_RDONLY | noFollowFlag)
+	const temporaryHandle = await open(
+		temporaryPath,
+		constants.O_RDONLY | noFollowFlag,
+	)
+	let device: string
+	let inode: string
+	try {
+		const [finalStats, temporaryStats] = await Promise.all([
+			assertHandleMatchesPath(rootPath, filePath, finalHandle, 'file', 2),
+			assertHandleMatchesPath(
+				rootPath,
+				temporaryPath,
+				temporaryHandle,
+				'file',
+				2,
+			),
+		])
+		if (
+			finalStats.dev !== temporaryStats.dev ||
+			finalStats.ino !== temporaryStats.ino
+		) {
+			throw new HarnessError(
+				'ARTIFACT_HARD_LINK_DENIED',
+				'Publication links must reference the same file',
+			)
+		}
+		const contents = await readBoundedHandle(
+			finalHandle,
+			finalStats.size,
+			maxBytes,
+		)
+		if (!contents.equals(expectedContents)) {
+			return false
+		}
+		device = finalStats.dev.toString()
+		inode = finalStats.ino.toString()
+	} finally {
+		await Promise.all([finalHandle.close(), temporaryHandle.close()])
+	}
+
+	const parentPath = path.dirname(filePath)
+	const identity = await getDirectoryIdentity(rootPath, parentPath)
+	await runHelper(rootPath, parentPath, identity, [
+		'unlink-file',
+		path.basename(temporaryPath),
+		device,
+		inode,
+		'2',
+	])
+	return true
+}
+
 export function assertPathInside(rootPath: string, candidatePath: string): void {
 	const relative = path.relative(
 		path.resolve(rootPath),

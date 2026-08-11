@@ -140,9 +140,11 @@ policy, routing, evaluation, artifact, and fresh-worktree gates still apply.
 
 Patch-bearing stages are chained by run ID. `WorkerService` validates the source
 report and task history, seeds the exact patch into a fresh worktree, and checks
-the regenerated cumulative patch before provider execution. Workflow approval
-records intent only; the patch application service remains the sole checkout
-mutation boundary. See [Durable coding workflows](workflows.md).
+the regenerated cumulative patch before provider execution. Task history and
+the report bind each run to its workflow, stage, execution, stage-contract
+digest, and source candidate. Workflow approval records intent only; the patch
+application service remains the sole checkout mutation boundary. See
+[Durable coding workflows](workflows.md).
 
 ### Secure artifact I/O
 

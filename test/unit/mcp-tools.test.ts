@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -130,6 +131,38 @@ test('requires an implementation stage for durable workflows', async function ()
 
 	assert.equal(result.isError, true)
 	assert.equal(result.structuredContent?.['error'], 'INVALID_ARGUMENT')
+})
+
+test('forwards MCP cancellation to workflow approval', async function () {
+	const tools = new McpTools(loadConfig({}))
+	let receivedSignal: AbortSignal | undefined
+	const mutableTools = tools as unknown as {
+		workflowService: {
+			approve(
+				repositoryPath: string,
+				workflowId: string,
+				decision: 'approved' | 'rejected',
+				feedback: string,
+				signal?: AbortSignal,
+			): Promise<Record<string, unknown>>
+		}
+	}
+	mutableTools.workflowService = {
+		async approve(_repositoryPath, _workflowId, _decision, _feedback, signal) {
+			receivedSignal = signal
+			return { status: 'waiting_for_approval' }
+		},
+	}
+	const controller = new AbortController()
+
+	const response = await tools.call('approve_workflow', {
+		repositoryPath: '/tmp/repository',
+		workflowId: randomUUID(),
+		decision: 'approved',
+	}, controller.signal)
+
+	assert.notEqual(response.isError, true)
+	assert.equal(receivedSignal, controller.signal)
 })
 
 test('creates and reads a durable workflow without invoking a provider', async function () {

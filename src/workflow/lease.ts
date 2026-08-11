@@ -6,6 +6,8 @@ import {
 	assertPrivateDirectory,
 	ensurePrivateDirectory,
 	readBoundedRegularFile,
+	readBoundedPublicationFile,
+	removePublicationStagingIfContentsMatch,
 	removeRegularFileIfContentsMatch,
 	writeExclusiveRegularFile,
 } from '../artifacts/secure-io.js'
@@ -17,6 +19,7 @@ const staleRemoteLockMs = 24 * 60 * 60 * 1_000
 const maxClaimsPerWorkflow = 128
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const claimFilePattern = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.lock$/i
+const pendingFilePattern = /^\.publish-[0-9a-f-]{36}-([0-9a-f-]{36}\.lock)$/i
 
 type WorkflowLockRecord = {
 	token: string
@@ -60,14 +63,52 @@ export async function acquireWorkflowLease(
 		if (!names.includes(path.basename(lockPath))) {
 			throw invalidLease('Workflow lease claim disappeared during acquisition')
 		}
-		const staleClaims: Array<{ path: string, contents: Buffer }> = []
+		const pendingByFinalName = collectPendingClaims(names)
+		const staleClaims: Array<{
+			path: string
+			temporaryPath: string | null
+			contents: Buffer
+		}> = []
+		for (const [finalName, pendingName] of pendingByFinalName) {
+			if (names.includes(finalName)) {
+				continue
+			}
+			const pendingPath = path.join(lockDirectory, pendingName)
+			const pending = await readLock(artifactRoot, pendingPath)
+			const match = claimFilePattern.exec(finalName)
+			if (
+				pending === null ||
+				pending.record === null ||
+				match === null ||
+				pending.record.token !== match[1]
+			) {
+				throw invalidLease('Workflow lease staging claim is invalid')
+			}
+			if (isLive(pending.record)) {
+				throw new HarnessError(
+					'WORKFLOW_BUSY',
+					'Another process is publishing a workflow lease claim',
+				)
+			}
+			await removeMatchingLock(artifactRoot, pendingPath, pending.contents)
+		}
 		for (const name of names) {
+			if (pendingFilePattern.test(name)) {
+				continue
+			}
 			const match = claimFilePattern.exec(name)
 			if (match === null) {
 				throw invalidLease('Workflow lease directory contains an invalid entry')
 			}
 			const existingPath = path.join(lockDirectory, name)
-			const existing = await readLock(artifactRoot, existingPath)
+			const pendingName = pendingByFinalName.get(name)
+			const existing = await readLock(
+				artifactRoot,
+				existingPath,
+				pendingName === undefined
+					? undefined
+					: path.join(lockDirectory, pendingName),
+			)
 			if (existing === null) {
 				continue
 			}
@@ -88,9 +129,27 @@ export async function acquireWorkflowLease(
 					},
 				)
 			}
-			staleClaims.push({ path: existingPath, contents: existing.contents })
+			staleClaims.push({
+				path: existingPath,
+				temporaryPath: pendingName === undefined
+					? null
+					: path.join(lockDirectory, pendingName),
+				contents: existing.contents,
+			})
 		}
 		for (const stale of staleClaims) {
+			if (stale.temporaryPath !== null) {
+				const removed = await removePublicationStagingIfContentsMatch(
+					artifactRoot,
+					stale.path,
+					stale.temporaryPath,
+					stale.contents,
+					maxLockBytes,
+				)
+				if (!removed) {
+					throw invalidLease('Workflow lease changed during stale recovery')
+				}
+			}
 			await removeMatchingLock(artifactRoot, stale.path, stale.contents)
 		}
 		return {
@@ -111,14 +170,18 @@ function invalidLease(message: string): HarnessError {
 async function readLock(
 	artifactRoot: string,
 	lockPath: string,
+	temporaryPath?: string,
 ): Promise<{ contents: Buffer, record: WorkflowLockRecord | null } | null> {
 	let contents: Buffer
 	try {
-		contents = await readBoundedRegularFile(
-			artifactRoot,
-			lockPath,
-			maxLockBytes,
-		)
+		contents = temporaryPath === undefined
+			? await readBoundedRegularFile(artifactRoot, lockPath, maxLockBytes)
+			: await readBoundedPublicationFile(
+				artifactRoot,
+				lockPath,
+				temporaryPath,
+				maxLockBytes,
+			)
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
 			return null
@@ -147,6 +210,22 @@ async function readLock(
 	} catch {
 		return { contents, record: null }
 	}
+}
+
+function collectPendingClaims(names: Array<string>): Map<string, string> {
+	const pending = new Map<string, string>()
+	for (const name of names) {
+		const match = pendingFilePattern.exec(name)
+		if (match === null) {
+			continue
+		}
+		const finalName = match[1]
+		if (finalName === undefined || pending.has(finalName)) {
+			throw invalidLease('Workflow lease staging state is invalid')
+		}
+		pending.set(finalName, name)
+	}
+	return pending
 }
 
 async function removeMatchingLock(

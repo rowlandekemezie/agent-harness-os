@@ -173,6 +173,7 @@ export type WorkerTask = {
 	allowNetwork: boolean
 	routing?: WorkerRoutingPolicy
 	candidateRunId?: string
+	workflowProvenance?: WorkflowTaskProvenance
 }
 
 export type WorkflowWorkerStageName =
@@ -195,6 +196,14 @@ export type WorkflowWorkerStage = {
 	allowNetwork: boolean
 	routing: WorkerRoutingPolicy
 	retryLimit: number
+}
+
+export type WorkflowTaskProvenance = {
+	workflowId: string
+	stage: WorkflowWorkerStageName
+	executionId: string
+	stageContractSha256: string
+	sourceRunId: string | null
 }
 
 export type WorkflowDefinition = {
@@ -441,6 +450,7 @@ export type WorkerRunReport = {
 	acceptanceCriteria: Array<AcceptanceCriterionResult>
 	policyViolations: Array<string>
 	warnings: Array<string>
+	workflowProvenance?: WorkflowTaskProvenance | null
 	evaluation?: EvaluationSummary
 	policy?: ResolvedPolicy
 	provider: {
@@ -484,7 +494,7 @@ export type TaskSummary = {
 }
 
 export type TaskEventBase = {
-	schemaVersion: 1 | 2 | 3 | 4 | 5
+	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6
 	eventId: string
 	taskId: string
 	sequence: number
@@ -501,6 +511,7 @@ export type TaskCreatedEvent = TaskEventBase & {
 		baseCommit: string
 		policySha256?: string
 		policySourceCount?: number
+		workflowProvenance?: WorkflowTaskProvenance | null
 	}
 }
 

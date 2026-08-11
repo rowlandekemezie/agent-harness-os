@@ -23,8 +23,10 @@ Test, review, and repair receive the candidate in a fresh detached worktree at
 the workflow's verified base commit. The harness checks the source report, task
 history, patch digest, changed files, and next-stage path policy before
 contacting a provider. Before requesting or recording approval, it revalidates
-the candidate and every completed stage run against task history. Later stages
-return a cumulative patch against the original base.
+the candidate and every completed stage run against task history. Each run is
+bound to the workflow ID, stage, execution ID, stage-contract digest, and source
+candidate, so another valid run cannot be substituted during replay. Later
+stages return a cumulative patch against the original base.
 
 Every later stage's `allowedPaths` must therefore cover the whole candidate,
 not only files that stage might add. A failed deterministic evaluation may feed
@@ -38,8 +40,9 @@ status, and the MCP caller must inspect the review run before approval.
 
 Workflow state is replayed from an append-only, digest-chained journal. A stage
 left active by a crash is recorded as interrupted on resume, then starts a new
-bounded delegation; provider processes are never resumed in place. Each
-workflow also has:
+bounded delegation; provider processes are never resumed in place. Interrupted
+starts remain auditable but do not consume the stage retry or repair-attempt
+budget. They still consume the total transition bound. Each workflow also has:
 
 - an absolute deadline of 60 seconds to 24 hours
 - 1 to 64 total stage starts
@@ -48,8 +51,9 @@ workflow also has:
 - up to sixteen previously created, same-repository dependencies
 - at most 128 lease claims inspected for one workflow during recovery
 
-The absolute deadline covers delegation, approval evidence validation, and
-approval-event publication.
+The absolute deadline covers delegation, evidence validation, approval events,
+and terminal publication. Cancellation covers active runs and approvals; the
+first committed terminal event wins.
 
 The journal records `WorkflowCreated`, dependency state changes, stage starts,
 interruptions and completions, approval requests and decisions, and one terminal
@@ -61,10 +65,11 @@ workflow. Definitions are immutable, so requiring an existing dependency also
 prevents cycles.
 
 Owner-private, uniquely named workflow claims prevent concurrent runners
-without reusing a reclaimed claim pathname. A local claim from a dead process
-is reclaimed; an invalid or live claim fails closed. Cancellation aborts an
-active delegation only after repository ownership is validated. After a crash,
-resume or cancel once the stale claim is reclaimable.
+without reusing a reclaimed claim pathname. A local claim from a dead process,
+including a validated crash-left publication link, is reclaimed; an invalid or
+live claim fails closed. Cancellation aborts an active delegation or approval
+only after repository ownership is validated. After a crash, resume or cancel
+once the stale claim is reclaimable.
 
 ## Tools
 

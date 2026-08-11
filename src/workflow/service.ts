@@ -31,6 +31,7 @@ import { WorkerService } from '../worker/service.js'
 import { validateWorkflowDefinition } from './event-model.js'
 import { WorkflowJournal } from './journal.js'
 import { acquireWorkflowLease } from './lease.js'
+import { createWorkflowTaskProvenance } from './provenance.js'
 import {
 	isRepairableWorkflowFailure,
 	isRetryableWorkflowFailure,
@@ -212,86 +213,141 @@ export class WorkflowService {
 		workflowId: string,
 		decision: 'approved' | 'rejected',
 		feedback: string,
+		externalSignal?: AbortSignal,
 	): Promise<WorkflowTimeline> {
 		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
-		const artifactRoot = await this.getArtifactRoot(repositoryRoot)
-		const lease = await acquireWorkflowLease(artifactRoot, workflowId)
+		const activeKey = activeWorkflowKey(repositoryRoot, workflowId)
+		if (this.activeWorkflows.has(activeKey)) {
+			throw new HarnessError('WORKFLOW_BUSY', 'Workflow is already active')
+		}
+		const controller = new AbortController()
+		let resolveCompletion = (): void => undefined
+		const completion = new Promise<void>(resolve => {
+			resolveCompletion = resolve
+		})
+		this.activeWorkflows.set(activeKey, {
+			controller,
+			completion,
+			resolveCompletion,
+		})
+		const signal = externalSignal === undefined
+			? controller.signal
+			: AbortSignal.any([externalSignal, controller.signal])
 		try {
-			const timeline = await this.loadForRepository(
-				artifactRoot,
-				repositoryRoot,
-				workflowId,
-			)
-			if (timeline.summary.status !== 'waiting_for_approval') {
-				throw new HarnessError(
-					'WORKFLOW_NOT_WAITING_FOR_APPROVAL',
-					'Workflow does not have a pending approval stage',
+			const artifactRoot = await this.getArtifactRoot(repositoryRoot)
+			const lease = await acquireWorkflowLease(artifactRoot, workflowId)
+			try {
+				const timeline = await this.loadForRepository(
+					artifactRoot,
+					repositoryRoot,
+					workflowId,
 				)
-			}
-			if (Date.now() >= Date.parse(timeline.definition.deadlineAt)) {
-				await this.journal.append(artifactRoot, workflowId, {
-					type: 'WorkflowCompleted',
-					data: {
-						status: 'timed_out',
-						failureCode: 'WORKFLOW_DEADLINE_EXCEEDED',
-						candidateRunId: timeline.summary.candidateRunId,
-					},
-				})
-				return await this.journal.timeline(artifactRoot, workflowId)
-			}
-			if (!await this.validateCandidateForApproval(
-				artifactRoot,
-				workflowId,
-				timeline,
-			)) {
-				return await this.journal.timeline(artifactRoot, workflowId)
-			}
-			const canRepair = decision === 'rejected' &&
-				timeline.definition.stages.repair !== null &&
-				timeline.summary.repairAttemptCount <
-					timeline.definition.maxRepairAttempts &&
-				timeline.summary.transitionCount < timeline.definition.maxTransitions &&
-				Date.now() < Date.parse(timeline.definition.deadlineAt)
-			const decisionCommitted = await this.appendBeforeDeadline(
-				artifactRoot,
-				workflowId,
-				timeline.definition.deadlineAt,
-				{
-					type: 'WorkflowApprovalDecided',
-					data: {
-						decision,
-						feedback,
-						source: 'mcp_call',
-						nextStage: canRepair ? 'repair' : null,
-					},
-				},
-			)
-			if (!decisionCommitted) {
-				await this.complete(
+				if (timeline.summary.status !== 'waiting_for_approval') {
+					throw new HarnessError(
+						'WORKFLOW_NOT_WAITING_FOR_APPROVAL',
+						'Workflow does not have a pending approval stage',
+					)
+				}
+				if (signal.aborted) {
+					await this.complete(
+						artifactRoot,
+						workflowId,
+						timeline,
+						'cancelled',
+						'WORKFLOW_CANCELLED',
+					)
+					return await this.journal.timeline(artifactRoot, workflowId)
+				}
+				if (Date.now() >= Date.parse(timeline.definition.deadlineAt)) {
+					await this.complete(
+						artifactRoot,
+						workflowId,
+						timeline,
+						'timed_out',
+						'WORKFLOW_DEADLINE_EXCEEDED',
+					)
+					return await this.journal.timeline(artifactRoot, workflowId)
+				}
+				if (!await this.validateCandidateForApproval(
 					artifactRoot,
 					workflowId,
 					timeline,
-					'timed_out',
-					'WORKFLOW_DEADLINE_EXCEEDED',
+					signal,
+				)) {
+					return await this.journal.timeline(artifactRoot, workflowId)
+				}
+				const canRepair = decision === 'rejected' &&
+					timeline.definition.stages.repair !== null &&
+					timeline.summary.repairAttemptCount <
+						timeline.definition.maxRepairAttempts &&
+					timeline.summary.transitionCount <
+						timeline.definition.maxTransitions
+				const decisionCommitted = await this.appendBeforeDeadline(
+					artifactRoot,
+					workflowId,
+					timeline.definition.deadlineAt,
+					{
+						type: 'WorkflowApprovalDecided',
+						data: {
+							decision,
+							feedback,
+							source: 'mcp_call',
+							nextStage: canRepair ? 'repair' : null,
+						},
+					},
+					signal,
 				)
-				return await this.journal.timeline(artifactRoot, workflowId)
-			}
-			const decidedTimeline = await this.journal.timeline(artifactRoot, workflowId)
-			if (decision === 'approved' || !canRepair) {
-				await this.journal.append(artifactRoot, workflowId, {
-					type: 'WorkflowCompleted',
-					data: {
-						status: decision === 'approved' ? 'completed' : 'failed',
-						failureCode: decision === 'approved'
+				if (!decisionCommitted) {
+					await this.complete(
+						artifactRoot,
+						workflowId,
+						timeline,
+						signal.aborted ? 'cancelled' : 'timed_out',
+						signal.aborted
+							? 'WORKFLOW_CANCELLED'
+							: 'WORKFLOW_DEADLINE_EXCEEDED',
+					)
+					return await this.journal.timeline(artifactRoot, workflowId)
+				}
+				const decidedTimeline = await this.journal.timeline(
+					artifactRoot,
+					workflowId,
+				)
+				if (decision === 'approved' || !canRepair) {
+					await this.completeBeforeDeadline(
+						artifactRoot,
+						workflowId,
+						decidedTimeline,
+						decision === 'approved' ? 'completed' : 'failed',
+						decision === 'approved'
 							? null
 							: 'WORKFLOW_APPROVAL_REJECTED',
-						candidateRunId: decidedTimeline.summary.candidateRunId,
-					},
-				})
+						signal,
+					)
+				} else if (signal.aborted) {
+					await this.complete(
+						artifactRoot,
+						workflowId,
+						decidedTimeline,
+						'cancelled',
+						'WORKFLOW_CANCELLED',
+					)
+				} else if (Date.now() >= Date.parse(timeline.definition.deadlineAt)) {
+					await this.complete(
+						artifactRoot,
+						workflowId,
+						decidedTimeline,
+						'timed_out',
+						'WORKFLOW_DEADLINE_EXCEEDED',
+					)
+				}
+				return await this.journal.timeline(artifactRoot, workflowId)
+			} finally {
+				await lease.release()
 			}
-			return await this.journal.timeline(artifactRoot, workflowId)
 		} finally {
-			await lease.release()
+			this.activeWorkflows.delete(activeKey)
+			resolveCompletion()
 		}
 	}
 
@@ -480,12 +536,13 @@ export class WorkflowService {
 			return timeline
 		}
 		if (dependencyState === 'failed') {
-			await this.complete(
+			await this.completeBeforeDeadline(
 				artifactRoot,
 				workflowId,
 				timeline,
 				'blocked',
 				'WORKFLOW_DEPENDENCY_FAILED',
+				signal,
 			)
 			return await this.journal.timeline(artifactRoot, workflowId)
 		}
@@ -590,28 +647,32 @@ export class WorkflowService {
 				)
 			}
 			if (timeline.summary.transitionCount >= timeline.definition.maxTransitions) {
-				await this.complete(
+				await this.completeBeforeDeadline(
 					artifactRoot,
 					workflowId,
 					timeline,
 					'failed',
 					'WORKFLOW_TRANSITION_LIMIT',
+					signal,
 				)
 				return await this.journal.timeline(artifactRoot, workflowId)
 			}
 
 			const executionId = randomUUID()
 			const attemptNumber = (timeline.summary.stageAttempts[stageName] ?? 0) + 1
-			const attemptLimit = stageName === 'repair'
-				? timeline.definition.maxRepairAttempts
-				: (timeline.definition.stages[stageName]?.retryLimit ?? 0) + 1
-			if (attemptNumber > attemptLimit) {
-				await this.complete(
+			const completedAttempts = completedStageAttemptCount(timeline, stageName)
+			const attemptLimitReached = stageName === 'repair'
+				? completedAttempts >= timeline.definition.maxRepairAttempts
+				: completedAttempts >
+					(timeline.definition.stages[stageName]?.retryLimit ?? 0)
+			if (attemptLimitReached) {
+				await this.completeBeforeDeadline(
 					artifactRoot,
 					workflowId,
 					timeline,
 					'failed',
 					'WORKFLOW_STAGE_RETRY_LIMIT',
+					signal,
 				)
 				return await this.journal.timeline(artifactRoot, workflowId)
 			}
@@ -650,6 +711,7 @@ export class WorkflowService {
 						timeline,
 						stageName,
 						stage,
+						executionId,
 						sourceRunId,
 						remainingMs,
 					)
@@ -688,29 +750,23 @@ export class WorkflowService {
 			}
 			timeline = await this.journal.timeline(artifactRoot, workflowId)
 			if (result.nextStage === null) {
-				const completionCommitted = await this.appendBeforeDeadline(
-					artifactRoot,
-					workflowId,
-					timeline.definition.deadlineAt,
-					{
-						type: 'WorkflowCompleted',
-						data: {
-							status: workflowTerminalStatus(result.status),
-							failureCode: result.failureCode ?? 'WORKFLOW_STAGE_FAILED',
-							candidateRunId: timeline.summary.candidateRunId,
-						},
-					},
-					signal,
-				)
-				if (!completionCommitted) {
+				const terminalStatus = workflowTerminalStatus(result.status)
+				if (terminalStatus === 'cancelled' || terminalStatus === 'timed_out') {
 					await this.complete(
 						artifactRoot,
 						workflowId,
 						timeline,
-						signal.aborted ? 'cancelled' : 'timed_out',
-						signal.aborted
-							? 'WORKFLOW_CANCELLED'
-							: 'WORKFLOW_DEADLINE_EXCEEDED',
+						terminalStatus,
+						result.failureCode ?? 'WORKFLOW_STAGE_FAILED',
+					)
+				} else {
+					await this.completeBeforeDeadline(
+						artifactRoot,
+						workflowId,
+						timeline,
+						terminalStatus,
+						result.failureCode ?? 'WORKFLOW_STAGE_FAILED',
+						signal,
 					)
 				}
 				return await this.journal.timeline(artifactRoot, workflowId)
@@ -806,11 +862,11 @@ export class WorkflowService {
 			}
 		}
 
-		const attemptNumber = (timeline.summary.stageAttempts[stageName] ?? 0) + 1
+		const completedAttempts = completedStageAttemptCount(timeline, stageName)
 		if (
 			stageName !== 'repair' &&
 			(status === 'failed' || status === 'blocked') &&
-			attemptNumber <= stage.retryLimit &&
+			completedAttempts < stage.retryLimit &&
 			failureCode !== null &&
 				isRetryableWorkflowFailure(failureCode)
 		) {
@@ -828,7 +884,7 @@ export class WorkflowService {
 			report.patchPath !== null &&
 			report.patchSha256 !== null
 			? report.runId
-			: candidateRunId
+			: null
 		if (
 			repairCandidateRunId !== null &&
 			failureCode !== null &&
@@ -852,6 +908,7 @@ export class WorkflowService {
 		timeline: WorkflowTimeline,
 		stageName: WorkflowWorkerStageName,
 		stage: WorkflowWorkerStage,
+		executionId: string,
 		sourceRunId: string | null,
 		remainingMs: number,
 	): Promise<WorkerTask> {
@@ -877,6 +934,13 @@ export class WorkflowService {
 				Math.min(stage.timeoutSeconds, Math.floor(remainingMs / 1_000)),
 			),
 			allowNetwork: stage.allowNetwork,
+			workflowProvenance: createWorkflowTaskProvenance(
+				timeline.summary.workflowId,
+				stageName,
+				executionId,
+				stage,
+				sourceRunId,
+			),
 			routing: {
 				...stage.routing,
 				requiredCapabilities: [...stage.routing.requiredCapabilities],
@@ -989,6 +1053,46 @@ export class WorkflowService {
 		})
 	}
 
+	private async completeBeforeDeadline(
+		artifactRoot: string,
+		workflowId: string,
+		timeline: WorkflowTimeline,
+		status: 'completed' | 'failed' | 'blocked',
+		failureCode: string | null,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const committed = await this.appendBeforeDeadline(
+			artifactRoot,
+			workflowId,
+			timeline.definition.deadlineAt,
+			{
+				type: 'WorkflowCompleted',
+				data: {
+					status,
+					failureCode,
+					candidateRunId: timeline.summary.candidateRunId,
+				},
+			},
+			signal,
+		)
+		if (committed) {
+			return
+		}
+		const latest = await this.journal.timeline(artifactRoot, workflowId)
+		if (isTerminal(latest.summary.status)) {
+			return
+		}
+		await this.complete(
+			artifactRoot,
+			workflowId,
+			latest,
+			signal?.aborted === true ? 'cancelled' : 'timed_out',
+			signal?.aborted === true
+				? 'WORKFLOW_CANCELLED'
+				: 'WORKFLOW_DEADLINE_EXCEEDED',
+		)
+	}
+
 	private async appendBeforeDeadline(
 		artifactRoot: string,
 		workflowId: string,
@@ -1017,9 +1121,6 @@ export class WorkflowService {
 				input,
 				signal,
 			)
-			if (signal.aborted) {
-				return false
-			}
 			return true
 		} catch (error) {
 			if (
@@ -1079,14 +1180,24 @@ export class WorkflowService {
 		} else {
 			return null
 		}
-		await this.journal.append(artifactRoot, workflowId, {
-			type: 'WorkflowCompleted',
-			data: {
+		if (status === 'cancelled' || status === 'timed_out') {
+			await this.complete(
+				artifactRoot,
+				workflowId,
+				timeline,
+				status,
+				failureCode ?? 'WORKFLOW_STAGE_FAILED',
+			)
+		} else {
+			await this.completeBeforeDeadline(
+				artifactRoot,
+				workflowId,
+				timeline,
 				status,
 				failureCode,
-				candidateRunId: timeline.summary.candidateRunId,
-			},
-		})
+				signal,
+			)
+		}
 		return await this.journal.timeline(artifactRoot, workflowId)
 	}
 
@@ -1139,6 +1250,28 @@ export class WorkflowService {
 					)
 				}
 				seenRunIds.add(event.data.runId)
+				const started = timeline.events.find(candidate =>
+					candidate.type === 'WorkflowStageStarted' &&
+					candidate.data.stage === event.data.stage &&
+					candidate.data.executionId === event.data.executionId
+				)
+				const stageContract = timeline.definition.stages[event.data.stage]
+				if (
+					started?.type !== 'WorkflowStageStarted' ||
+					stageContract === null
+				) {
+					throw new HarnessError(
+						'WORKFLOW_RUN_PROVENANCE_MISSING',
+						'Workflow stage evidence has no originating stage contract',
+					)
+				}
+				const expectedProvenance = createWorkflowTaskProvenance(
+					timeline.summary.workflowId,
+					event.data.stage,
+					event.data.executionId,
+					stageContract,
+					started.data.sourceRunId,
+				)
 				const candidateSource = event.data.status === 'completed' &&
 					event.data.runId === candidateRunId &&
 					event.data.candidateRunId === candidateRunId
@@ -1148,6 +1281,8 @@ export class WorkflowService {
 							timeline.summary.repositoryPath,
 							event.data.runId as string,
 							timeline.summary.baseCommit,
+							stageMode(event.data.stage),
+							expectedProvenance,
 							validationSignal,
 						)
 						: async () => await this.workerService.validateWorkflowRun(
@@ -1155,6 +1290,8 @@ export class WorkflowService {
 							event.data.runId as string,
 							timeline.summary.baseCommit,
 							event.data.status,
+							stageMode(event.data.stage),
+							expectedProvenance,
 							validationSignal,
 						),
 					validationSignal,
@@ -1179,17 +1316,26 @@ export class WorkflowService {
 			const deadlineExpired = Date.now() >= Date.parse(
 				timeline.definition.deadlineAt,
 			)
-			await this.complete(
-				artifactRoot,
-				workflowId,
-				timeline,
-				cancelled ? 'cancelled' : deadlineExpired ? 'timed_out' : 'blocked',
-				cancelled
-					? 'WORKFLOW_CANCELLED'
-					: deadlineExpired
-						? 'WORKFLOW_DEADLINE_EXCEEDED'
-						: 'WORKFLOW_CANDIDATE_INVALID',
-			)
+			if (cancelled || deadlineExpired) {
+				await this.complete(
+					artifactRoot,
+					workflowId,
+					timeline,
+					cancelled ? 'cancelled' : 'timed_out',
+					cancelled
+						? 'WORKFLOW_CANCELLED'
+						: 'WORKFLOW_DEADLINE_EXCEEDED',
+				)
+			} else {
+				await this.completeBeforeDeadline(
+					artifactRoot,
+					workflowId,
+					timeline,
+					'blocked',
+					'WORKFLOW_CANDIDATE_INVALID',
+					signal,
+				)
+			}
 			return false
 		} finally {
 			clearTimeout(deadlineTimer)
@@ -1281,6 +1427,16 @@ function workflowTerminalStatus(
 		return 'blocked'
 	}
 	return 'failed'
+}
+
+function completedStageAttemptCount(
+	timeline: WorkflowTimeline,
+	stageName: WorkflowWorkerStageName,
+): number {
+	return timeline.events.filter(event =>
+		event.type === 'WorkflowStageCompleted' &&
+		event.data.stage === stageName
+	).length
 }
 
 function classifyStageError(error: unknown): RunStatus {

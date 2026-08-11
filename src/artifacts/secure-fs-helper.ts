@@ -63,6 +63,9 @@ async function main(): Promise<void> {
 				requireName(argumentsList[0]),
 				requireValue(argumentsList[1]),
 				requireValue(argumentsList[2]),
+				argumentsList[3] === undefined
+					? 1n
+					: parseLinkCount(argumentsList[3]),
 				destination,
 			)
 			return
@@ -75,6 +78,7 @@ async function removeFile(
 	name: string,
 	expectedDevice: string,
 	expectedInode: string,
+	expectedLinkCount: bigint,
 	destination: DestinationIdentity,
 ): Promise<void> {
 	await assertWorkingDirectory(destination)
@@ -83,7 +87,7 @@ async function removeFile(
 		const fileStats = await handle.stat({ bigint: true })
 		if (
 			!fileStats.isFile() ||
-			fileStats.nlink !== 1n ||
+			fileStats.nlink !== expectedLinkCount ||
 			fileStats.dev.toString() !== expectedDevice ||
 			fileStats.ino.toString() !== expectedInode
 		) {
@@ -96,6 +100,13 @@ async function removeFile(
 	await unlink(name)
 	await assertWorkingDirectory(destination)
 	await syncWorkingDirectory()
+}
+
+function parseLinkCount(value: string): bigint {
+	if (value !== '1' && value !== '2') {
+		throw new Error('Secure filesystem helper received an invalid link count')
+	}
+	return BigInt(value)
 }
 
 type DestinationIdentity = {

@@ -190,6 +190,8 @@ test('links completed task history that produced no patch', async function () {
 		runId,
 		repositoryPath: '/tmp/repository',
 		baseCommit: 'a'.repeat(40),
+		mode: 'implementation',
+		workflowProvenance: null,
 		status: 'completed',
 		patchSha256: null,
 		changedFileCount: 0,
@@ -202,6 +204,26 @@ test('links completed task history that produced no patch', async function () {
 			unknownDimensions: [],
 		},
 	}), true)
+	assert.equal(await journal.isRunLinked({
+		artifactRoot,
+		taskId: task.taskId,
+		runId,
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		mode: 'review',
+		workflowProvenance: null,
+		status: 'completed',
+		patchSha256: null,
+		changedFileCount: 0,
+		workerId: 'worker-one',
+		evaluation: {
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			evaluationPolicy: 'default',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	}), false)
 })
 
 test('binds a resolved policy to current task history', async function () {

@@ -72,10 +72,12 @@ test('persists and projects a complete workflow timeline', async function () {
 	assert.deepEqual(page.workflows.map(item => item.workflowId), [workflowId])
 })
 
-test('records interrupted stages and bounds fresh resume attempts', async function () {
+test('records interrupted stages without consuming the retry budget', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-resume-'))
 	const journal = new WorkflowJournal()
-	const created = await journal.create(artifactRoot, definition())
+	const workflowDefinition = definition()
+	workflowDefinition.stages.implement.retryLimit = 0
+	const created = await journal.create(artifactRoot, workflowDefinition)
 	const workflowId = created.summary.workflowId
 	const firstExecutionId = randomUUID()
 	const secondExecutionId = randomUUID()
@@ -117,18 +119,17 @@ test('records interrupted stages and bounds fresh resume attempts', async functi
 			reason: 'resume',
 		},
 	})
-	await assert.rejects(
-		journal.append(artifactRoot, workflowId, {
-			type: 'WorkflowStageStarted',
-			data: {
-				stage: 'implement',
-				executionId: randomUUID(),
-				attemptNumber: 3,
-				sourceRunId: null,
-			},
-		}),
-		hasCode('INVALID_WORKFLOW_TRANSITION'),
-	)
+	await journal.append(artifactRoot, workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId: randomUUID(),
+			attemptNumber: 3,
+			sourceRunId: null,
+		},
+	})
+	const resumed = await journal.timeline(artifactRoot, workflowId)
+	assert.equal(resumed.summary.stageAttempts.implement, 3)
 })
 
 test('rejects completed stage evidence without a worker task and run', async function () {
@@ -267,6 +268,83 @@ test('rejects repair transitions without a validated candidate run', async funct
 	)
 })
 
+test('rejects repair transitions without failed-run patch evidence', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-repair-evidence-'))
+	const journal = new WorkflowJournal()
+	const ready = await createRepairReadyWorkflow(journal, artifactRoot, 2)
+	const executionId = randomUUID()
+	await journal.append(artifactRoot, ready.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'repair',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: ready.candidateRunId,
+		},
+	})
+
+	await assert.rejects(
+		journal.append(artifactRoot, ready.workflowId, {
+			type: 'WorkflowStageCompleted',
+			data: {
+				stage: 'repair',
+				executionId,
+				taskId: null,
+				runId: null,
+				status: 'failed',
+				failureCode: 'EVALUATION_FAILED',
+				candidateRunId: ready.candidateRunId,
+				nextStage: 'repair',
+			},
+		}),
+		hasCode('INVALID_WORKFLOW_TRANSITION'),
+	)
+})
+
+test('allows bounded repair attempts to consume retained failed patches', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-repair-loop-'))
+	const journal = new WorkflowJournal()
+	const ready = await createRepairReadyWorkflow(journal, artifactRoot, 2)
+	const firstExecutionId = randomUUID()
+	await journal.append(artifactRoot, ready.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'repair',
+			executionId: firstExecutionId,
+			attemptNumber: 1,
+			sourceRunId: ready.candidateRunId,
+		},
+	})
+	const retainedRunId = randomUUID()
+	await journal.append(artifactRoot, ready.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'repair',
+			executionId: firstExecutionId,
+			taskId: randomUUID(),
+			runId: retainedRunId,
+			status: 'failed',
+			failureCode: 'EVALUATION_FAILED',
+			candidateRunId: retainedRunId,
+			nextStage: 'repair',
+		},
+	})
+	await journal.append(artifactRoot, ready.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'repair',
+			executionId: randomUUID(),
+			attemptNumber: 2,
+			sourceRunId: retainedRunId,
+		},
+	})
+
+	const timeline = await journal.timeline(artifactRoot, ready.workflowId)
+	assert.equal(timeline.summary.currentStage, 'repair')
+	assert.equal(timeline.summary.candidateRunId, retainedRunId)
+	assert.equal(timeline.summary.stageAttempts.repair, 2)
+})
+
 test('fails closed on tampered events and unsafe read permissions', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-hostile-'))
 	const journal = new WorkflowJournal()
@@ -395,6 +473,59 @@ function definition(): WorkflowDefinition {
 			repair: null,
 		},
 	}
+}
+
+async function createRepairReadyWorkflow(
+	journal: WorkflowJournal,
+	artifactRoot: string,
+	maxRepairAttempts: number,
+): Promise<{ workflowId: string, candidateRunId: string }> {
+	const workflowDefinition = definition()
+	workflowDefinition.stages.repair = {
+		...stage(),
+		objective: 'Repair the candidate.',
+		retryLimit: 0,
+	}
+	workflowDefinition.maxRepairAttempts = maxRepairAttempts
+	const created = await journal.create(artifactRoot, workflowDefinition)
+	const executionId = randomUUID()
+	const candidateRunId = randomUUID()
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'implement',
+			executionId,
+			taskId: randomUUID(),
+			runId: candidateRunId,
+			status: 'completed',
+			failureCode: null,
+			candidateRunId,
+			nextStage: 'approval',
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowApprovalRequested',
+		data: { candidateRunId },
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowApprovalDecided',
+		data: {
+			decision: 'rejected',
+			feedback: 'Repair the failed candidate.',
+			source: 'mcp_call',
+			nextStage: 'repair',
+		},
+	})
+	return { workflowId: created.summary.workflowId, candidateRunId }
 }
 
 function stage(): WorkflowWorkerStage {

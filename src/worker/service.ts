@@ -11,9 +11,11 @@ import type {
 	TaskPage,
 	TaskTimeline,
 	WorkerAttemptSummary,
+	WorkerMode,
 	WorkerProvider,
 	WorkerRunReport,
 	WorkerTask,
+	WorkflowTaskProvenance,
 } from '../domain/types.js'
 import type { HarnessConfig, WorkerConfig } from '../config.js'
 import {
@@ -42,6 +44,10 @@ import { WorktreeManager } from '../git/worktree.js'
 import { HarnessError, getErrorMessage } from '../lib/errors.js'
 import { Logger } from '../lib/logger.js'
 import { Redactor } from '../lib/redaction.js'
+import {
+	isWorkflowTaskProvenance,
+	workflowProvenanceEquals,
+} from '../workflow/provenance.js'
 import { acquireRepositoryLease } from '../lib/repository-lock.js'
 import { Semaphore } from '../lib/semaphore.js'
 import { WorkerRegistry } from '../provider/registry.js'
@@ -196,6 +202,9 @@ export class WorkerService {
 					repositoryPath,
 					baseCommit,
 					policy: resolvedTask.policy,
+					...(resolvedTask.workflowProvenance === undefined
+						? {}
+						: { workflowProvenance: resolvedTask.workflowProvenance }),
 				})
 				await this.taskJournal.append(artifactRoot, taskSummary.taskId, {
 					type: 'RouteSelected',
@@ -307,6 +316,8 @@ export class WorkerService {
 		repositoryPath: string,
 		runId: string,
 		baseCommit: string,
+		expectedMode: WorkerMode,
+		expectedWorkflowProvenance: WorkflowTaskProvenance | null,
 		signal?: AbortSignal,
 	): Promise<WorkerRunReport> {
 		signal?.throwIfAborted()
@@ -324,6 +335,8 @@ export class WorkerService {
 			repositoryRoot,
 			resolvedBaseCommit,
 			['completed'],
+			expectedMode,
+			expectedWorkflowProvenance,
 		)
 		signal?.throwIfAborted()
 		await this.loadCandidateSeed(
@@ -343,6 +356,8 @@ export class WorkerService {
 		runId: string,
 		baseCommit: string,
 		expectedStatus: RunStatus,
+		expectedMode: WorkerMode,
+		expectedWorkflowProvenance: WorkflowTaskProvenance | null,
 		signal?: AbortSignal,
 	): Promise<WorkerRunReport> {
 		signal?.throwIfAborted()
@@ -359,6 +374,8 @@ export class WorkerService {
 			repositoryRoot,
 			resolvedBaseCommit,
 			[expectedStatus],
+			expectedMode,
+			expectedWorkflowProvenance,
 		)
 		signal?.throwIfAborted()
 		return report
@@ -601,6 +618,8 @@ export class WorkerService {
 				runId: report.runId,
 				repositoryPath: report.repositoryPath,
 				baseCommit: report.baseRef,
+				mode: report.mode,
+				workflowProvenance: report.workflowProvenance ?? null,
 				status: report.status,
 				patchSha256: report.patchSha256,
 				changedFileCount: report.changedFiles.length,
@@ -1127,6 +1146,9 @@ export class WorkerService {
 				acceptanceCriteria,
 				policyViolations,
 				warnings,
+				...(task.workflowProvenance === undefined
+					? {}
+					: { workflowProvenance: task.workflowProvenance }),
 				evaluation,
 				policy: task.policy,
 				provider: {
@@ -1318,6 +1340,8 @@ export class WorkerService {
 		repositoryPath: string,
 		baseCommit: string,
 		allowedStatuses: Array<RunStatus>,
+		expectedMode?: WorkerMode,
+		expectedWorkflowProvenance?: WorkflowTaskProvenance | null,
 	): Promise<void> {
 		if (
 			report.runId !== runId ||
@@ -1343,6 +1367,24 @@ export class WorkerService {
 				'Workflow run uses a different base commit',
 			)
 		}
+		if (expectedMode !== undefined && report.mode !== expectedMode) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_MODE_MISMATCH',
+				`Workflow run mode does not match its stage: ${report.mode}`,
+			)
+		}
+		if (
+			expectedWorkflowProvenance !== undefined &&
+			!workflowProvenanceEquals(
+				report.workflowProvenance ?? null,
+				expectedWorkflowProvenance,
+			)
+		) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_PROVENANCE_MISMATCH',
+				'Workflow run provenance does not match its recorded stage',
+			)
+		}
 		if (!allowedStatuses.includes(report.status)) {
 			throw new HarnessError(
 				'CANDIDATE_STATUS_INVALID',
@@ -1355,6 +1397,8 @@ export class WorkerService {
 			runId: report.runId,
 			repositoryPath: report.repositoryPath,
 			baseCommit: report.baseRef,
+			mode: report.mode,
+			workflowProvenance: report.workflowProvenance ?? null,
 			status: report.status,
 			patchSha256: report.patchSha256,
 			changedFileCount: report.changedFiles.length,
@@ -1502,6 +1546,17 @@ export class WorkerService {
 	}
 
 	private assertTaskContract(task: WorkerTask): void {
+		if (
+			task.workflowProvenance !== undefined &&
+			(!isWorkflowTaskProvenance(task.workflowProvenance) ||
+				task.workflowProvenance.sourceRunId !==
+					(task.candidateRunId ?? null))
+		) {
+			throw new HarnessError(
+				'INVALID_WORKFLOW_PROVENANCE',
+				'Workflow provenance must match the task candidate context',
+			)
+		}
 		if (
 			task.candidateRunId !== undefined &&
 			!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(task.candidateRunId)

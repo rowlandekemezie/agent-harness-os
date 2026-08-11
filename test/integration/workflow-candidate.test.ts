@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { loadConfig } from '../../src/config.js'
-import type { WorkerRunReport, WorkerTask } from '../../src/domain/types.js'
+import type {
+	WorkerRunReport,
+	WorkerTask,
+	WorkflowTaskProvenance,
+} from '../../src/domain/types.js'
 import { WorkerService } from '../../src/worker/service.js'
 import { createTestRepository } from '../helpers/git.js'
 
@@ -70,9 +75,19 @@ test('feeds a validated cumulative candidate into a fresh workflow stage', async
 		}]),
 	})
 	const service = new WorkerService(config)
+	const workflowProvenance: WorkflowTaskProvenance = {
+		workflowId: randomUUID(),
+		stage: 'implement',
+		executionId: randomUUID(),
+		stageContractSha256: 'c'.repeat(64),
+		sourceRunId: null,
+	}
 
 	try {
-		const implementation = await service.delegate(task(repositoryPath, 'implementation'))
+		const implementation = await service.delegate({
+			...task(repositoryPath, 'implementation'),
+			workflowProvenance,
+		})
 		assert.equal(implementation.status, 'completed')
 		assert.ok(implementation.patchPath)
 		assert.ok(implementation.patchSha256)
@@ -94,9 +109,53 @@ test('feeds a validated cumulative candidate into a fresh workflow stage', async
 			repositoryPath,
 			implementation.runId,
 			implementation.baseRef,
+			'implementation',
+			workflowProvenance,
 		)
 		assert.equal(approvalReportReads, 1)
 		artifactStore.loadReport = originalLoadReport
+		await assert.rejects(
+			service.validateCandidateRun(
+				repositoryPath,
+				implementation.runId,
+				implementation.baseRef,
+				'review',
+				workflowProvenance,
+			),
+			hasCode('WORKFLOW_RUN_MODE_MISMATCH'),
+		)
+		await assert.rejects(
+			service.validateCandidateRun(
+				repositoryPath,
+				implementation.runId,
+				implementation.baseRef,
+				'implementation',
+				{ ...workflowProvenance, executionId: randomUUID() },
+			),
+			hasCode('WORKFLOW_RUN_PROVENANCE_MISMATCH'),
+		)
+		const originalReport = await readFile(implementation.reportPath, 'utf8')
+		const forgedProvenance = {
+			...workflowProvenance,
+			executionId: randomUUID(),
+		}
+		const forgedReport = JSON.parse(originalReport) as WorkerRunReport
+		forgedReport.workflowProvenance = forgedProvenance
+		await writeFile(
+			implementation.reportPath,
+			`${JSON.stringify(forgedReport)}\n`,
+		)
+		await assert.rejects(
+			service.validateCandidateRun(
+				repositoryPath,
+				implementation.runId,
+				implementation.baseRef,
+				'implementation',
+				forgedProvenance,
+			),
+			hasCode('CANDIDATE_HISTORY_MISMATCH'),
+		)
+		await writeFile(implementation.reportPath, originalReport)
 
 		const review = await service.delegate({
 			...task(repositoryPath, 'review'),

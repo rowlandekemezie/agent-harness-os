@@ -384,6 +384,7 @@ export class McpTools {
 						requireString(argumentsRecord['workflowId'], 'workflowId', { minLength: 36, maxLength: 36 }),
 						decision,
 						requireString(argumentsRecord['feedback'] ?? '', 'feedback', { maxLength: 4_000 }),
+						signal,
 					))
 				}
 				case 'cancel_workflow': {

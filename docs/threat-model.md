@@ -78,10 +78,10 @@
 - Definitions, events, dependencies, transitions, retries, repairs, and deadlines are schema- and count-bounded
 - Digest-chained append-only events are replayed instead of trusting mutable workflow status
 - Dependency workflows must already exist in the same repository scope; immutable definitions prevent cycles
-- Active stages left by a crash are recorded as interrupted and resumed as fresh delegations
-- Owner-private, uniquely named per-workflow claims serialize runners, avoid stale-path reuse, and fail closed on invalid or live ownership
+- Active stages left by a crash are recorded as interrupted and resumed as fresh delegations without consuming completed-attempt retry budgets
+- Owner-private, uniquely named per-workflow claims serialize runners, avoid stale-path reuse, recover validated crash-left publication links, and fail closed on invalid or live ownership
 - Candidate runs are report/history validated before delegation and approval; they require the same repository and base commit, an exact patch digest, and next-stage path authority
-- Every completed stage run is history-bound before approval, and repair always requires a retained candidate
+- Every completed stage run is history-bound to its workflow, stage, execution, stage-contract digest, and source candidate before approval; repair always requires a retained candidate
 - Candidate patches are applied only inside fresh detached worktrees and regenerated against the original base before provider invocation
 - Workflow deadlines reach active delegation, while cancellation is terminal and never fallback-eligible
 - Credential-bearing definitions and events are rejected rather than redacted into false history

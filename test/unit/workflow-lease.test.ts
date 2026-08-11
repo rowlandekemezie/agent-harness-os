@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import os, { hostname } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -74,6 +74,47 @@ test('reclaims a well-formed lease owned by a dead local process', async functio
 	assert.deepEqual(await readdir(lockDirectory), [])
 })
 
+test('reclaims a committed lease with a crash-left publication link', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-lease-pair-'))
+	const workflowId = randomUUID()
+	const first = await acquireWorkflowLease(artifactRoot, workflowId)
+	await first.release()
+	const lockDirectory = path.join(artifactRoot, 'workflow-locks', workflowId)
+	const token = randomUUID()
+	const finalName = `${token}.lock`
+	const lockPath = path.join(lockDirectory, finalName)
+	const pendingPath = path.join(
+		lockDirectory,
+		`.publish-${randomUUID()}-${finalName}`,
+	)
+	const contents = staleLockContents(token)
+	await writeFile(lockPath, contents, { mode: 0o600 })
+	await link(lockPath, pendingPath)
+
+	const reclaimed = await acquireWorkflowLease(artifactRoot, workflowId)
+	await reclaimed.release()
+	assert.deepEqual(await readdir(lockDirectory), [])
+})
+
+test('reclaims a crash-left staging-only lease claim', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-lease-stage-'))
+	const workflowId = randomUUID()
+	const first = await acquireWorkflowLease(artifactRoot, workflowId)
+	await first.release()
+	const lockDirectory = path.join(artifactRoot, 'workflow-locks', workflowId)
+	const token = randomUUID()
+	const finalName = `${token}.lock`
+	const pendingPath = path.join(
+		lockDirectory,
+		`.publish-${randomUUID()}-${finalName}`,
+	)
+	await writeFile(pendingPath, staleLockContents(token), { mode: 0o600 })
+
+	const reclaimed = await acquireWorkflowLease(artifactRoot, workflowId)
+	await reclaimed.release()
+	assert.deepEqual(await readdir(lockDirectory), [])
+})
+
 test('never grants more than one concurrent workflow claim', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-lease-race-'))
 	const workflowId = randomUUID()
@@ -99,4 +140,13 @@ function hasCode(code: string): (error: unknown) => boolean {
 		error !== null &&
 		'code' in error &&
 		error.code === code
+}
+
+function staleLockContents(token: string): string {
+	return `${JSON.stringify({
+		token,
+		pid: 2_147_483_647,
+		hostname: hostname(),
+		createdAt: new Date().toISOString(),
+	})}\n`
 }
