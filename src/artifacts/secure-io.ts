@@ -227,11 +227,17 @@ export async function writeExclusiveRegularFile(
 		buffer,
 		signal,
 	)
-	const handle = await open(filePath, constants.O_RDONLY | noFollowFlag)
-	try {
-		await assertHandleMatchesPath(rootPath, filePath, handle, 'file')
-	} finally {
-		await handle.close()
+	const published = await readBoundedPublicationFile(
+		rootPath,
+		filePath,
+		path.join(parentPath, temporaryName),
+		buffer.length,
+	)
+	if (!published.equals(buffer)) {
+		throw new HarnessError(
+			'ARTIFACT_WRITE_FAILED',
+			'Published artifact contents do not match the requested write',
+		)
 	}
 }
 
