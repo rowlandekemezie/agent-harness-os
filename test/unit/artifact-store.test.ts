@@ -333,6 +333,56 @@ test('requires a valid evaluation summary on version 3 run reports', async funct
 	)
 })
 
+test('rejects a version 3 report relabeled as a legacy schema', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-downgrade-'))
+	const report: WorkerRunReport = {
+		...createReport('23232323-2323-4232-8232-232323232323'),
+		schemaVersion: 3,
+		taskId: '45454545-4545-4454-8454-454545454545',
+		evaluation: createEvaluationSummary(),
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as
+		Record<string, unknown>
+	value['schemaVersion'] = 2
+	delete value['evaluation']
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('RUN_REPORT_SCHEMA_DOWNGRADE'),
+	)
+})
+
+test('requires the publication manifest for version 3 reports', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-manifest-'))
+	const report: WorkerRunReport = {
+		...createReport('67676767-6767-4676-8676-676767676767'),
+		schemaVersion: 3,
+		taskId: '89898989-8989-4898-8898-898989898989',
+		evaluation: createEvaluationSummary(),
+	}
+	const store = new ArtifactStore()
+	await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	await rm(path.join(root, report.runId, 'run-manifest.json'))
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_MANIFEST'),
+	)
+})
+
 test('rejects a completed version 3 report with a failed evaluation', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-status-'))
 	const report: WorkerRunReport = {

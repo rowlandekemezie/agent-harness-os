@@ -116,7 +116,7 @@ Fallback occurs outside an attempt. The repository lease remains held, while the
 
 ### Artifact and apply boundary
 
-Every attempt has its own immutable audit record. Only a completed run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, and patch deterministically. Version 3 application also binds evaluator IDs, outcome, and status to the validated task chain, so removing a failed reviewer from `report.json` cannot make a patch applicable. Legacy reports keep their prior degraded-history behavior. Failure to append later patch-lifecycle events does not change patch authority.
+Every attempt has its own immutable audit record. Only a completed run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, and patch deterministically. Version 3 application also binds evaluator IDs, outcome, and status to the validated task chain, so removing a failed reviewer from `report.json` cannot make a patch applicable. A separate run manifest prevents a version 3 report from being relabeled as legacy to evade that check. Genuine legacy reports keep their prior degraded-history behavior. Failure to append later patch-lifecycle events does not change patch authority.
 
 ## Why this remains one package
 

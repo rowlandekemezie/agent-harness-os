@@ -26,6 +26,7 @@ All notable changes are documented here.
 - Keep run reports and deterministic patch gates authoritative when history is unavailable
 - Validate evaluator output as hostile input and prevent evaluation failures from falling back or applying
 - Bind version 3 evaluation metadata to task history before patch application
+- Bind version 3 publications to their schema with a separate run manifest
 - Bound evaluator execution by cancellation and deadline, and final reports by post-redaction UTF-8 bytes
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses

@@ -70,6 +70,7 @@ Do not broaden fallback to include policy or validation failures. Those failures
 Run artifacts are stored outside repositories under the user-private state directory, or under `AGENT_HARNESS_ARTIFACT_ROOT`. Each run may contain:
 
 - `report.json`
+- `run-manifest.json` for version 3 reports
 - `changes.patch`
 - `worker-transcript.txt`
 
@@ -84,7 +85,9 @@ delegated source paths.
 Version 3 application requires report evaluation metadata to match the
 validated task timeline. Treat `EVALUATION_HISTORY_INVALID` and
 `EVALUATION_HISTORY_MISMATCH` as fail-closed integrity incidents; do not repair
-one artifact in isolation.
+one artifact in isolation. Its separately published manifest binds the run to
+report schema version 3, so relabeling the report as a legacy schema also fails
+closed.
 
 Task journals live under `tasks/<taskId>/events/`. Use `list_tasks` for bounded
 discovery and `get_task_timeline` for the validated event chain. An

@@ -20,7 +20,14 @@ import {
 } from './secure-io.js'
 
 const maxReportBytes = 4_194_304
+const maxManifestBytes = 1_024
 export const maxArtifactPatchBytes = 20_000_000
+
+type RunManifest = {
+	schemaVersion: 1
+	runId: string
+	reportSchemaVersion: 3
+}
 
 export type PersistRunInput = {
 	artifactRoot: string
@@ -39,6 +46,7 @@ export class ArtifactStore {
 	async persist(input: PersistRunInput): Promise<WorkerRunReport> {
 		const runDirectory = path.join(input.artifactRoot, input.report.runId)
 		const patchPath = path.join(runDirectory, 'changes.patch')
+		const manifestPath = path.join(runDirectory, 'run-manifest.json')
 		const reportPath = path.join(runDirectory, 'report.json')
 		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
 
@@ -65,6 +73,9 @@ export class ArtifactStore {
 				`Run report exceeds the ${maxReportBytes}-byte artifact limit`,
 			)
 		}
+		const manifest = persistedReport.schemaVersion === 3
+			? createRunManifest(persistedReport)
+			: null
 
 		await ensurePrivateDirectory(input.artifactRoot, input.artifactRoot, {
 			recursive: true,
@@ -94,6 +105,14 @@ export class ArtifactStore {
 			this.redactor.redact(input.workerTranscript),
 		)
 
+		if (manifest !== null) {
+			await writeExclusiveRegularFile(
+				input.artifactRoot,
+				manifestPath,
+				`${JSON.stringify(manifest, null, 2)}\n`,
+			)
+		}
+
 		await writeExclusiveRegularFile(
 			input.artifactRoot,
 			reportPath,
@@ -108,6 +127,8 @@ export class ArtifactStore {
 		runId: string,
 	): Promise<WorkerRunReport> {
 		validateRunId(runId)
+		const runDirectory = path.join(artifactRoot, runId)
+		const manifestPath = path.join(runDirectory, 'run-manifest.json')
 		const reportPath = path.join(artifactRoot, runId, 'report.json')
 
 		let contents: Buffer
@@ -139,7 +160,10 @@ export class ArtifactStore {
 
 		try {
 			const parsed: unknown = JSON.parse(contents.toString('utf8'))
-			return validateReport(parsed, reportPath, runId)
+			const report = validateReport(parsed, reportPath, runId)
+			const manifest = await loadRunManifest(artifactRoot, manifestPath)
+			validateRunManifest(manifest, report)
+			return report
 		} catch (error) {
 			if (error instanceof HarnessError) {
 				throw error
@@ -177,6 +201,76 @@ export class ArtifactStore {
 			artifactRoot,
 			expectedPatchPath,
 			maxArtifactPatchBytes,
+		)
+	}
+}
+
+function createRunManifest(
+	report: WorkerRunReport,
+): RunManifest {
+	return {
+		schemaVersion: 1,
+		runId: report.runId,
+		reportSchemaVersion: 3,
+	}
+}
+
+async function loadRunManifest(
+	artifactRoot: string,
+	manifestPath: string,
+): Promise<unknown | null> {
+	let contents: Buffer
+	try {
+		contents = await readBoundedRegularFile(
+			artifactRoot,
+			manifestPath,
+			maxManifestBytes,
+		)
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return null
+		}
+		throw error
+	}
+
+	try {
+		return JSON.parse(contents.toString('utf8')) as unknown
+	} catch {
+		throw new HarnessError(
+			'INVALID_RUN_MANIFEST',
+			'Run manifest does not contain valid JSON',
+		)
+	}
+}
+
+function validateRunManifest(
+	value: unknown | null,
+	report: WorkerRunReport,
+): void {
+	if (report.schemaVersion !== 3) {
+		if (value !== null) {
+			throw new HarnessError(
+				'RUN_REPORT_SCHEMA_DOWNGRADE',
+				'Run report schema does not match its publication manifest',
+			)
+		}
+		return
+	}
+
+	if (
+		!isRecord(value) ||
+		!hasExpectedKeys(value, [
+			'schemaVersion',
+			'runId',
+			'reportSchemaVersion',
+		], []) ||
+		value['schemaVersion'] !== 1 ||
+		value['runId'] !== report.runId ||
+		value['reportSchemaVersion'] !== 3
+	) {
+		throw new HarnessError(
+			'INVALID_RUN_MANIFEST',
+			'Run manifest does not match the persisted report',
 		)
 	}
 }

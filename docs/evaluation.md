@@ -77,8 +77,9 @@ require `EvaluationCompleted` between validation and attempt completion.
 Version 1 journals remain replayable without synthesizing evaluation evidence.
 Patch application for a version 3 report additionally requires its evaluator
 IDs, aggregate outcome, and completed status to match the validated task event
-chain. Legacy version 1 and 2 reports retain their prior degraded-history
-behavior.
+chain. A version 3 run also publishes `run-manifest.json`; the report cannot be
+relabeled as version 1 or 2 to bypass that binding. Legacy version 1 and 2
+reports without a manifest retain their prior degraded-history behavior.
 
 Model-based dimensions such as correctness, maintainability, architecture fit,
 and test quality are reserved by the schema, but no built-in model evaluator is
