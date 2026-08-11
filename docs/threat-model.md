@@ -21,6 +21,7 @@
 - An evaluator returning malformed, contradictory, oversized, or hostile evidence
 - A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
 - Incorrect or malicious worker profile, capability, cost, latency, priority, endpoint, or pricing configuration
+- Malformed, unsafe, mutable-checkout, or authority-expanding policy input
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
 - Concurrent tasks or external processes targeting the same repository
@@ -47,6 +48,17 @@
 - Fallback is limited to eligible provider/empty-response failures and bounded attempts
 - Every fallback attempt starts from the original base in a fresh worktree
 - Failed attempts are persisted for audit but cannot be applied
+
+### Policies as code
+
+- Organization policy is an absolute-path, owner-owned, single-link regular file with no group or other write access
+- Repository policy is read from the verified base commit as one non-executable regular Git blob
+- Policy files are exact-schema UTF-8 JSON bounded to 64 KiB
+- Numeric limits use the minimum; deny paths and capabilities use a union; permissions require every source to allow them
+- `.agent-os` is outside worker read and write authority
+- Invalid policy fails before provider invocation
+- Policy metadata containing configured credentials fails instead of being persisted or transformed
+- Reports retain effective policy and source digests; event schema version 4 binds the policy digest before patch application
 
 
 ### Filesystem

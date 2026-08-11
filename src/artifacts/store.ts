@@ -12,6 +12,7 @@ import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
 import { truncateUtf8 } from '../lib/text.js'
 import { isEvaluationSummary } from '../evaluation/schema.js'
+import { isResolvedPolicy } from '../policy/engine.js'
 import {
 	createPrivateDirectory,
 	ensurePrivateDirectory,
@@ -287,7 +288,9 @@ function validateReport(
 				: schemaVersion === 2
 					? [...requiredKeys, 'taskId']
 					: [...requiredKeys, 'taskId', 'evaluation'],
-			['failureCode', 'routing'],
+			schemaVersion === 3
+				? ['failureCode', 'routing', 'policy']
+				: ['failureCode', 'routing'],
 		) ||
 		(schemaVersion === 1 &&
 			(value['taskId'] !== undefined || value['evaluation'] !== undefined)) ||
@@ -295,6 +298,7 @@ function validateReport(
 			(!isUuid(value['taskId']) || value['evaluation'] !== undefined)) ||
 		(schemaVersion === 3 &&
 			(!isUuid(value['taskId']) || !isEvaluationSummary(value['evaluation']))) ||
+		(value['policy'] !== undefined && !isResolvedPolicy(value['policy'])) ||
 		!isRunStatus(value['status']) ||
 		!isReportEvaluationConsistent(
 			schemaVersion,

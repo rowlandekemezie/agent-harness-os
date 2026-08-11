@@ -16,6 +16,8 @@ All notable changes are documented here.
 - Explicit worker profiles that separate routable roles from backing provider/model configuration
 - Redaction retains credentials from every configured backing worker, including workers without a routable profile
 - Profile capability subsets, iteration caps, and default or strict evaluation policies
+- Restrictive organization and fixed-base repository policies for execution, path, network, and routing limits
+- Digest-bound effective policy provenance in run reports and event-schema-version-4 task history
 
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
 - ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
@@ -36,6 +38,7 @@ All notable changes are documented here.
 - Order cancellation against atomic event publication with an explicit commit grant
 - Reject profile authority expansion, unknown backing workers, role mismatches, and malformed profile fields
 - Keep worker iteration exhaustion as a non-fallback policy failure
+- Reject unsafe or malformed policy files before worker selection and block patch application when policy evidence is removed or changed
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

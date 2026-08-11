@@ -39,7 +39,7 @@ export type TaskEventProjection = {
 	lastAttempt: AttemptProjection | null
 	knownRunIds: Set<string>
 	applicationRunId: string | null
-	eventSchemaVersion: 1 | 2 | 3
+	eventSchemaVersion: 1 | 2 | 3 | 4
 }
 
 export function validateTaskEvent(
@@ -61,7 +61,8 @@ export function validateTaskEvent(
 		]) ||
 		(value['schemaVersion'] !== 1 &&
 			value['schemaVersion'] !== 2 &&
-			value['schemaVersion'] !== 3) ||
+			value['schemaVersion'] !== 3 &&
+			value['schemaVersion'] !== 4) ||
 		!isUuid(value['eventId']) ||
 		value['taskId'] !== expectedTaskId ||
 		value['sequence'] !== expectedSequence ||
@@ -79,17 +80,33 @@ export function validateTaskEvent(
 	switch (value['type']) {
 		case 'TaskCreated':
 			if (
-			expectedSequence !== 1 ||
-				!hasExactKeys(data, [
-					'objective',
-					'mode',
-					'repositoryPath',
-					'baseCommit',
-				]) ||
+				expectedSequence !== 1 ||
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] >= 4
+						? [
+							'objective',
+							'mode',
+							'repositoryPath',
+							'baseCommit',
+							'policySha256',
+							'policySourceCount',
+						]
+						: [
+							'objective',
+							'mode',
+							'repositoryPath',
+							'baseCommit',
+						],
+				) ||
 				!isBoundedString(data['objective'], 4_000) ||
 				!isWorkerMode(data['mode']) ||
 				!isBoundedString(data['repositoryPath'], 4_096) ||
-				!isBoundedString(data['baseCommit'], 1_024)
+				!isBoundedString(data['baseCommit'], 1_024) ||
+				(value['schemaVersion'] >= 4 &&
+					(typeof data['policySha256'] !== 'string' ||
+						!sha256Pattern.test(data['policySha256']) ||
+						!isIntegerInRange(data['policySourceCount'], 0, 2)))
 			) {
 				throw invalidJournal('TaskCreated event has invalid data')
 			}
@@ -194,10 +211,12 @@ export function validateTaskEvent(
 			return
 		case 'EvaluationCompleted':
 			if (
-				(value['schemaVersion'] !== 2 && value['schemaVersion'] !== 3) ||
+				(value['schemaVersion'] !== 2 &&
+					value['schemaVersion'] !== 3 &&
+					value['schemaVersion'] !== 4) ||
 				!hasExactKeys(
 					data,
-					value['schemaVersion'] === 3
+					value['schemaVersion'] >= 3
 						? [
 							'runId',
 							'evaluatorIds',
@@ -218,7 +237,7 @@ export function validateTaskEvent(
 				!isUniqueBoundedStringArray(data['evaluatorIds'], 8, 100) ||
 				data['evaluatorIds'][0] !== 'deterministic-v1' ||
 				!isEvaluationOutcome(data['outcome']) ||
-				(value['schemaVersion'] === 3 &&
+				(value['schemaVersion'] >= 3 &&
 					data['evaluationPolicy'] !== 'default' &&
 					data['evaluationPolicy'] !== 'strict') ||
 				!isEvaluationDimensionIds(data['failedDimensions']) ||
@@ -321,6 +340,7 @@ export function projectTaskEvent(
 				eventCount: 1,
 				latestEventSha256: eventSha256,
 				patchApplicationStatus: 'not_requested',
+				policySha256: event.data.policySha256 ?? null,
 			},
 			strategy: null,
 			candidateWorkerIds: [],
@@ -476,7 +496,7 @@ export function projectTaskEvent(
 				(next.eventSchemaVersion >= 2 &&
 					event.data.status !== 'completed' &&
 					activeAttempt.evaluationOutcome !== 'failed' &&
-					!(next.eventSchemaVersion === 3 &&
+					!(next.eventSchemaVersion >= 3 &&
 						event.data.status === 'failed' &&
 						activeAttempt.evaluationPolicy === 'strict' &&
 						activeAttempt.evaluationOutcome === 'inconclusive' &&

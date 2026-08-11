@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "maxChangedFiles": 30,
+  "maxIterations": 20,
+  "maxTaskSeconds": 900,
+  "allowNetwork": false,
+  "prohibitedPaths": [
+    "infra/**",
+    "migrations/**"
+  ],
+  "routing": {
+    "maxCostTier": "medium",
+    "allowFallback": false,
+    "maxAttempts": 1
+  }
+}

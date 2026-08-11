@@ -70,6 +70,18 @@ test('rejects partially parsed integer configuration values', function () {
 	}
 })
 
+test('requires an absolute organization policy path', function () {
+	assert.throws(
+		() => loadConfig({ AGENT_OS_ORGANIZATION_POLICY_PATH: 'policy.json' }),
+		hasHarnessCode('INVALID_CONFIGURATION'),
+	)
+	assert.equal(
+		loadConfig({ AGENT_OS_ORGANIZATION_POLICY_PATH: '/etc/agent-os/policy.json' })
+			.policy.organizationPolicyPath,
+		'/etc/agent-os/policy.json',
+	)
+})
+
 test('requires run artifacts to remain outside the target repository', async function () {
 	const repositoryPath = await mkdtemp(
 		path.join(os.tmpdir(), 'artifact-root-repository-'),

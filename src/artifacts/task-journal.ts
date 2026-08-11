@@ -4,6 +4,7 @@ import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import type {
 	EvaluationOutcome,
+	ResolvedPolicy,
 	TaskEvent,
 	TaskEventInput,
 	TaskListQuery,
@@ -47,6 +48,7 @@ export type CreateTaskInput = {
 	mode: WorkerMode
 	repositoryPath: string
 	baseCommit: string
+	policy?: ResolvedPolicy
 }
 
 export type RunHistoryLink = {
@@ -64,6 +66,7 @@ export type RunHistoryLink = {
 		outcome: EvaluationOutcome
 		evaluationPolicy: 'default' | 'strict'
 	} | null
+	policySha256?: string | null
 }
 
 type TimelineReadResult = {
@@ -102,13 +105,19 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(3, taskId, 1, null, {
+		const event = createEvent(input.policy === undefined ? 3 : 4, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
 				mode: input.mode,
 				repositoryPath: input.repositoryPath,
 				baseCommit: input.baseCommit,
+				...(input.policy === undefined
+					? {}
+					: {
+						policySha256: input.policy.digest,
+						policySourceCount: input.policy.sources.length,
+					}),
 			},
 		})
 		const serializedEvent = serializeEvent(event)
@@ -229,6 +238,9 @@ export class TaskJournal {
 			created?.type === 'TaskCreated' &&
 			created.data.repositoryPath === input.repositoryPath &&
 			created.data.baseCommit === input.baseCommit &&
+			(created.schemaVersion >= 4
+				? created.data.policySha256 === (input.policySha256 ?? null)
+				: (input.policySha256 ?? null) === null) &&
 			started?.type === 'WorkerStarted' &&
 			started.data.workerId === input.workerId &&
 			produced?.type === 'PatchProduced' &&
@@ -601,7 +613,7 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
-	schemaVersion: 1 | 2 | 3,
+	schemaVersion: 1 | 2 | 3 | 4,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,

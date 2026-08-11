@@ -54,6 +54,10 @@ export const defaultProhibitedPaths = [
 	'.agent-harness/**',
 	'**/.agent-harness',
 	'**/.agent-harness/**',
+	'.agent-os',
+	'.agent-os/**',
+	'**/.agent-os',
+	'**/.agent-os/**',
 ]
 
 export const defaultWriteProhibitedPaths = [

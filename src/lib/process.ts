@@ -10,13 +10,18 @@ export type RunProcessOptions = {
 	maxOutputBytes: number
 	signal?: AbortSignal
 	input?: string | Buffer
+	requireValidUtf8?: boolean
+}
+
+export type ProcessResult = CommandResult & {
+	invalidUtf8?: boolean
 }
 
 export async function runProcess(
 	command: string,
 	args: Array<string>,
 	options: RunProcessOptions,
-): Promise<CommandResult> {
+): Promise<ProcessResult> {
 	if (options.signal?.aborted === true) {
 		throw new DOMException('Process aborted before start', 'AbortError')
 	}
@@ -27,8 +32,15 @@ export async function runProcess(
 	let stderr = ''
 	let timedOut = false
 	let outputTruncated = false
+	let invalidUtf8 = false
+	const stdoutDecoder = options.requireValidUtf8 === true
+		? new TextDecoder('utf-8', { fatal: true })
+		: null
+	const stderrDecoder = options.requireValidUtf8 === true
+		? new TextDecoder('utf-8', { fatal: true })
+		: null
 
-	return await new Promise<CommandResult>((resolve, reject) => {
+	return await new Promise<ProcessResult>((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd: options.cwd,
 			env: options.environment,
@@ -36,13 +48,26 @@ export async function runProcess(
 			shell: false,
 		})
 
-		function appendOutput(current: string, chunk: Buffer): string {
+		function appendOutput(
+			current: string,
+			chunk: Buffer,
+			decoder: TextDecoder | null,
+		): string {
 			if (Buffer.byteLength(current) >= options.maxOutputBytes) {
 				outputTruncated = true
 				return current
 			}
 
-			const combined = current + chunk.toString('utf8')
+			let decoded: string
+			try {
+				decoded = decoder === null
+					? chunk.toString('utf8')
+					: decoder.decode(chunk, { stream: true })
+			} catch {
+				invalidUtf8 = true
+				return current
+			}
+			const combined = current + decoded
 			const buffer = Buffer.from(combined, 'utf8')
 
 			if (buffer.byteLength <= options.maxOutputBytes) {
@@ -59,11 +84,11 @@ export async function runProcess(
 		}
 
 		child.stdout?.on('data', (chunk: Buffer) => {
-			stdout = appendOutput(stdout, chunk)
+			stdout = appendOutput(stdout, chunk, stdoutDecoder)
 		})
 
 		child.stderr?.on('data', (chunk: Buffer) => {
-			stderr = appendOutput(stderr, chunk)
+			stderr = appendOutput(stderr, chunk, stderrDecoder)
 		})
 
 		function terminate(): void {
@@ -105,6 +130,15 @@ export async function runProcess(
 		child.on('close', (exitCode, signal) => {
 			clearTimeout(timer)
 			options.signal?.removeEventListener('abort', abort)
+			for (const decoder of [stdoutDecoder, stderrDecoder]) {
+				if (decoder !== null && !invalidUtf8) {
+					try {
+						decoder.decode()
+					} catch {
+						invalidUtf8 = true
+					}
+				}
+			}
 			resolve({
 				command,
 				args,
@@ -115,6 +149,7 @@ export async function runProcess(
 				durationMs: Date.now() - startedAt,
 				timedOut,
 				outputTruncated,
+				...(options.requireValidUtf8 === true ? { invalidUtf8 } : {}),
 			})
 		})
 	})

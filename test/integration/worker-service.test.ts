@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { access, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -253,6 +253,8 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		assert.ok(report.taskId)
 		assert.deepEqual(report.changedFiles, ['src/generated.ts'])
 		assert.ok(report.patchPath)
+		assert.ok(report.policy)
+		assert.equal(report.policy.sources.length, 0)
 		const originalPatch = await readFile(report.patchPath, 'utf8')
 		await writeFile(report.patchPath, `${originalPatch}\n# tampered\n`)
 		await assert.rejects(
@@ -260,6 +262,16 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 			hasHarnessCode('PATCH_INTEGRITY_FAILED'),
 		)
 		await writeFile(report.patchPath, originalPatch)
+
+		const originalReport = await readFile(report.reportPath, 'utf8')
+		const reportWithoutPolicy = JSON.parse(originalReport) as Record<string, unknown>
+		delete reportWithoutPolicy['policy']
+		await writeFile(report.reportPath, `${JSON.stringify(reportWithoutPolicy)}\n`)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
+		)
+		await writeFile(report.reportPath, originalReport)
 
 		await writeFile(path.join(repositoryPath, 'NEXT.md'), 'new head\n')
 		await runGit(repositoryPath, ['add', 'NEXT.md'])
@@ -284,6 +296,7 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		)
 		assert.equal(timeline.task.status, 'completed')
 		assert.equal(timeline.task.patchApplicationStatus, 'applied')
+		assert.equal(timeline.task.policySha256, report.policy.digest)
 		assert.deepEqual(
 			timeline.events.map(event => event.type),
 			[
@@ -583,6 +596,7 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 		const downgraded = tampered as unknown as Record<string, unknown>
 		downgraded['schemaVersion'] = 2
 		delete downgraded['evaluation']
+		delete downgraded['policy']
 		await writeFile(report.reportPath, `${JSON.stringify(downgraded)}\n`)
 		await assert.rejects(
 			service.applyRun(repositoryPath, report.runId),
@@ -609,7 +623,7 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 	}
 })
 
-test('records changed-file limits as evaluation evidence and prevents patch persistence', async function () {
+test('enforces repository policy as evaluation evidence and prevents patch persistence', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-scope-limit-'))
 	const provider = await startFakeProvider([
@@ -618,6 +632,13 @@ test('records changed-file limits as evaluation evidence and prevents patch pers
 	])
 
 	try {
+		await mkdir(path.join(repositoryPath, '.agent-os'))
+		await writeFile(
+			path.join(repositoryPath, '.agent-os/policy.json'),
+			'{"schemaVersion":1,"maxChangedFiles":1}',
+		)
+		await runGit(repositoryPath, ['add', '.agent-os/policy.json'])
+		await runGit(repositoryPath, ['commit', '-m', 'Add repository policy'])
 		const config = loadConfig({
 			QWEN_BASE_URL: provider.baseUrl,
 			QWEN_API_KEY: 'test-api-key-123456',
@@ -625,7 +646,6 @@ test('records changed-file limits as evaluation evidence and prevents patch pers
 			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
 			AGENT_HARNESS_EXECUTION_BACKEND: 'local',
 			AGENT_HARNESS_ALLOW_UNSANDBOXED_LOCAL: 'false',
-			AGENT_HARNESS_MAX_CHANGED_FILES: '1',
 		})
 		const service = new WorkerService(config)
 		const report = await service.delegate({
@@ -646,6 +666,10 @@ test('records changed-file limits as evaluation evidence and prevents patch pers
 		assert.equal(report.failureCode, 'WORKER_POLICY_VIOLATION')
 		assert.deepEqual(report.changedFiles, ['src/extra.ts', 'src/generated.ts'])
 		assert.equal(report.patchPath, null)
+		assert.equal(report.policy?.maxChangedFiles, 1)
+		assert.deepEqual(report.policy?.sources.map(source => source.scope), [
+			'repository',
+		])
 		assert.ok(report.policyViolations.some(violation =>
 			violation.startsWith('CHANGED_FILE_LIMIT:'),
 		))
@@ -662,6 +686,72 @@ test('records changed-file limits as evaluation evidence and prevents patch pers
 			service.applyRun(repositoryPath, report.runId),
 			hasHarnessCode('RUN_NOT_APPLICABLE'),
 		)
+	} finally {
+		await provider.close()
+	}
+})
+
+test('rejects an invalid repository policy before invoking a worker', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-invalid-policy-'))
+	const provider = await startFakeProvider()
+
+	try {
+		await mkdir(path.join(repositoryPath, '.agent-os'))
+		await writeFile(
+			path.join(repositoryPath, '.agent-os/policy.json'),
+			'{"schemaVersion":1,"unknown":true}',
+		)
+		await runGit(repositoryPath, ['add', '.agent-os/policy.json'])
+		await runGit(repositoryPath, ['commit', '-m', 'Add invalid policy'])
+		const service = new WorkerService(loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+		}))
+
+		await assert.rejects(
+			service.delegate({
+				objective: 'Do not run with an invalid policy.',
+				repositoryPath,
+				mode: 'implementation',
+				allowedPaths: ['src/**'],
+				prohibitedPaths: [],
+				acceptanceCriteria: [],
+				requiredCommands: [],
+				baseRef: 'HEAD',
+				maxIterations: 4,
+				timeoutSeconds: 60,
+				allowNetwork: false,
+			}),
+			hasHarnessCode('INVALID_POLICY'),
+		)
+		assert.equal(provider.requestCount(), 0)
+
+		await writeFile(
+			path.join(repositoryPath, '.agent-os/policy.json'),
+			'{"schemaVersion":1,"prohibitedPaths":["test-api-key-123456"]}',
+		)
+		await runGit(repositoryPath, ['add', '.agent-os/policy.json'])
+		await runGit(repositoryPath, ['commit', '-m', 'Add unsafe policy evidence'])
+		await assert.rejects(
+			service.delegate({
+				objective: 'Do not persist credentials from policy.',
+				repositoryPath,
+				mode: 'implementation',
+				allowedPaths: ['src/**'],
+				prohibitedPaths: [],
+				acceptanceCriteria: [],
+				requiredCommands: [],
+				baseRef: 'HEAD',
+				maxIterations: 4,
+				timeoutSeconds: 60,
+				allowNetwork: false,
+			}),
+			hasHarnessCode('POLICY_CONTAINS_SECRET'),
+		)
+		assert.equal(provider.requestCount(), 0)
 	} finally {
 		await provider.close()
 	}

@@ -15,6 +15,10 @@ Before calling `delegate_to_worker`, preview routing when cost, privacy, latency
 - a bounded timeout and iteration limit
 - explicit routing constraints only when they are material; otherwise use the configured deterministic defaults
 
+Check `.agent-os/policy.json` when present. A route preview does not read the
+repository; delegation may narrow its result using organization and fixed-base
+repository policy. Confirm the resolved policy and source digests in the report.
+
 Never delegate product interpretation, architecture approval, secret handling, production operations, database migration execution, dependency or CI control-plane changes, merge decisions, or final acceptance. The worker receives file tools only and cannot choose or run commands.
 
 After delegation:

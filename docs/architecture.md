@@ -11,6 +11,10 @@ MCP tools
   health, registry inspection, route preview, delegation, history, report, apply
         |
         v
+Policy resolver
+  fixed-base repository policy, organization policy, restrictive task composition
+        |
+        v
 Worker registry and deterministic router
   provider configuration, role profiles, budgets, candidate ordering, fallback limits
         |
@@ -60,6 +64,12 @@ backing workers. Model names never drive the execution kernel.
 
 It then scores the remaining candidates using an explicit strategy and deterministic tie breaking. No LLM participates in routing.
 
+Before routing, `src/policy/engine.ts` reads the repository policy from the
+verified base commit and combines it with the optional host-managed organization
+policy and task contract. Every merge operation is restrictive. The resolved
+policy and source digests are bound to the report and event history. See
+[Policies as code](policies.md).
+
 The execution kernel caps the task's requested iteration count at the selected
 profile limit. A `strict` evaluation profile also rejects an inconclusive
 evaluation; a `default` profile preserves the explicit inconclusive result for
@@ -88,7 +98,7 @@ Each attempt receives:
 - shared resource and context limits
 - an attempt-specific provider instance
 
-The kernel captures the candidate patch before deterministic validation. It persists the patch, transcript, selected worker, route, prior attempts, provider usage, validation evidence, and evaluation results.
+The kernel captures the candidate patch before deterministic validation. It persists the patch, transcript, selected worker, route, resolved policy, prior attempts, provider usage, validation evidence, and evaluation results.
 
 ### Evaluation
 

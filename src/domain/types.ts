@@ -26,6 +26,30 @@ export type WorkerRoutingPolicy = {
 	maxAttempts: number
 }
 
+export type PolicySource = {
+	scope: 'organization' | 'repository'
+	location: string
+	sha256: string
+}
+
+export type ResolvedPolicy = {
+	schemaVersion: 1
+	digest: string
+	sources: Array<PolicySource>
+	maxChangedFiles: number
+	maxIterations: number
+	maxTaskSeconds: number
+	allowNetwork: boolean
+	prohibitedPaths: Array<string>
+	routing: {
+		requiredCapabilities: Array<WorkerCapability>
+		maxCostTier: WorkerCostTier | null
+		maxLatencyTier: WorkerLatencyTier | null
+		allowFallback: boolean
+		maxAttempts: number
+	}
+}
+
 export type RunStatus =
 	| 'completed'
 	| 'failed'
@@ -200,6 +224,7 @@ export type WorkerRunReport = {
 	policyViolations: Array<string>
 	warnings: Array<string>
 	evaluation?: EvaluationSummary
+	policy?: ResolvedPolicy
 	provider: {
 		workerId?: string
 		adapter?: WorkerAdapter
@@ -237,10 +262,11 @@ export type TaskSummary = {
 	eventCount: number
 	latestEventSha256: string
 	patchApplicationStatus: PatchApplicationStatus
+	policySha256: string | null
 }
 
 export type TaskEventBase = {
-	schemaVersion: 1 | 2 | 3
+	schemaVersion: 1 | 2 | 3 | 4
 	eventId: string
 	taskId: string
 	sequence: number
@@ -255,6 +281,8 @@ export type TaskCreatedEvent = TaskEventBase & {
 		mode: WorkerMode
 		repositoryPath: string
 		baseCommit: string
+		policySha256?: string
+		policySourceCount?: number
 	}
 }
 
