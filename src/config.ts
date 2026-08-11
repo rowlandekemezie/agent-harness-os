@@ -70,8 +70,14 @@ export type WorkerConfig = {
 	profile: WorkerProfile | null
 }
 
+export type WorkerSecrets = {
+	namedSecrets: Record<string, string>
+	additionalSecrets: Array<string>
+}
+
 export type HarnessConfig = {
 	workers: Array<WorkerConfig>
+	redactionSecrets: WorkerSecrets
 	routing: {
 		defaultWorkerId: string | null
 		defaultStrategy: RoutingStrategy
@@ -125,6 +131,7 @@ export function loadConfig(
 
 	return {
 		workers,
+		redactionSecrets: collectWorkerSecrets(backingWorkers),
 		routing: {
 			defaultWorkerId: requestedDefaultWorkerId,
 			defaultStrategy: parseRoutingStrategy(
@@ -257,14 +264,18 @@ export function getConfiguredWorkers(config: HarnessConfig): Array<WorkerConfig>
 	return config.workers.filter(isWorkerConfigured)
 }
 
-export function getWorkerSecrets(config: HarnessConfig): {
-	namedSecrets: Record<string, string>
-	additionalSecrets: Array<string>
-} {
+export function getWorkerSecrets(config: HarnessConfig): WorkerSecrets {
+	return {
+		namedSecrets: { ...config.redactionSecrets.namedSecrets },
+		additionalSecrets: [...config.redactionSecrets.additionalSecrets],
+	}
+}
+
+function collectWorkerSecrets(workers: Array<WorkerConfig>): WorkerSecrets {
 	const namedSecrets: Record<string, string> = {}
 	const additionalSecrets: Array<string> = []
 
-	for (const worker of config.workers) {
+	for (const worker of workers) {
 		if (worker.apiKey !== '') {
 			namedSecrets[worker.apiKeyEnv ?? `${worker.id.toUpperCase()}_API_KEY`] =
 				worker.apiKey

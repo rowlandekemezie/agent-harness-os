@@ -122,6 +122,50 @@ test('expands one backing worker into bounded role profiles', function () {
 	])
 })
 
+test('retains every backing-worker secret for redaction', function () {
+	const config = loadConfig({
+		PROFILED_API_KEY: 'profiled-secret',
+		UNPROFILED_API_KEY: 'unprofiled-secret',
+		UNPROFILED_HEADER: 'unprofiled-header-secret',
+		AGENT_OS_WORKERS_JSON: JSON.stringify([
+			{
+				id: 'profiled',
+				adapter: 'openai-compatible',
+				model: 'profiled-model',
+				baseUrl: 'https://profiled.example/v1',
+				apiKeyEnv: 'PROFILED_API_KEY',
+				capabilities: ['implementation', 'tool-calling'],
+			},
+			{
+				id: 'unprofiled',
+				adapter: 'openai-compatible',
+				model: 'unprofiled-model',
+				baseUrl: 'https://unprofiled.example/v1',
+				apiKeyEnv: 'UNPROFILED_API_KEY',
+				headerEnv: { 'x-provider-secret': 'UNPROFILED_HEADER' },
+				capabilities: ['review', 'tool-calling'],
+			},
+		]),
+		AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+			id: 'profiled-implementation',
+			worker: 'profiled',
+			role: 'implementation',
+			allowedCapabilities: ['implementation', 'tool-calling'],
+		}]),
+	})
+
+	assert.deepEqual(config.workers.map(worker => worker.id), [
+		'profiled-implementation',
+	])
+	assert.deepEqual(getWorkerSecrets(config), {
+		namedSecrets: {
+			PROFILED_API_KEY: 'profiled-secret',
+			UNPROFILED_API_KEY: 'unprofiled-secret',
+		},
+		additionalSecrets: ['unprofiled-header-secret'],
+	})
+})
+
 test('rejects worker profiles that reference or authorize unsupported work', function () {
 	const workers = JSON.stringify([{
 		id: 'bounded',

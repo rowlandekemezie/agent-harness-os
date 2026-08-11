@@ -144,7 +144,7 @@
 - Provider redirects are not followed
 - Provider credential used only in the provider request
 - Child processes never inherit provider credentials
-- Provider error bodies, command output, reports, transcripts, and logs are redacted
+- Provider error bodies, command output, reports, transcripts, and logs are redacted using credentials from every configured backing worker, including workers without a routable profile
 - Request retry, timeout, response-size, context-size, and tool-call bounds
 - Byte-bounded MCP framing, concurrent-request limits, duplicate-request-ID rejection, and cancellation while tools are active
 - MCP standard output contains JSON-RPC only

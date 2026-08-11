@@ -14,6 +14,7 @@ All notable changes are documented here.
 - Version 2 task events with required `EvaluationCompleted` lifecycle evidence
 - Version 3 task events that bind profile evaluation policy to attempt outcomes
 - Explicit worker profiles that separate routable roles from backing provider/model configuration
+- Redaction retains credentials from every configured backing worker, including workers without a routable profile
 - Profile capability subsets, iteration caps, and default or strict evaluation policies
 
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`

@@ -406,6 +406,74 @@ test('enforces profile iteration and strict-evaluation bounds', async function (
 	}
 })
 
+test('redacts credentials from backing workers without a profile', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-profile-redaction-'))
+	const provider = await startFakeProvider()
+	const unprofiledCredential = 'unprofiled-value-48291'
+
+	try {
+		const config = loadConfig({
+			PROFILED_API_KEY: 'profiled-value-73519',
+			UNPROFILED_API_KEY: unprofiledCredential,
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_OS_WORKERS_JSON: JSON.stringify([
+				{
+					id: 'profiled',
+					adapter: 'openai-compatible',
+					model: 'profiled-model',
+					baseUrl: provider.baseUrl,
+					apiKeyEnv: 'PROFILED_API_KEY',
+					capabilities: ['implementation', 'tool-calling'],
+				},
+				{
+					id: 'unprofiled',
+					adapter: 'openai-compatible',
+					model: 'unprofiled-model',
+					baseUrl: 'https://unprofiled.example/v1',
+					apiKeyEnv: 'UNPROFILED_API_KEY',
+					capabilities: ['review', 'tool-calling'],
+				},
+			]),
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'profiled-implementation',
+				worker: 'profiled',
+				role: 'implementation',
+				allowedCapabilities: ['implementation', 'tool-calling'],
+			}]),
+		})
+		const service = new WorkerService(config)
+		const report = await service.delegate({
+			objective: `Create a generated function using ${unprofiledCredential}.`,
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(report.objective.includes(unprofiledCredential), false)
+		assert.ok(report.objective.includes('[REDACTED]'))
+		assert.equal(
+			(await readFile(report.reportPath, 'utf8')).includes(unprofiledCredential),
+			false,
+		)
+		assert.ok(report.taskId)
+		const timeline = await service.getTaskTimeline(repositoryPath, report.taskId)
+		assert.equal(
+			JSON.stringify(timeline).includes(unprofiledCredential),
+			false,
+		)
+	} finally {
+		await provider.close()
+	}
+})
+
 test('binds independent-review evidence and rejects report schema downgrades', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-reviewer-'))
