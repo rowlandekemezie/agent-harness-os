@@ -1,12 +1,26 @@
+import { createHash } from 'node:crypto'
 import type { HarnessConfig, WorkerConfig } from '../config.js'
 import { isWorkerConfigured } from '../config.js'
 import type {
+	RoutingEvidenceSnapshot,
 	RoutingStrategy,
 	WorkerCapability,
 	WorkerMode,
+	WorkerRoutingEvidence,
 	WorkerRoutingPolicy,
 } from '../domain/types.js'
 import { HarnessError } from '../lib/errors.js'
+
+const evidenceWeights: Record<RoutingStrategy, {
+	performance: number
+	cost: number
+	latency: number
+}> = {
+	balanced: { performance: 75_000, cost: 30_000, latency: 30_000 },
+	cost: { performance: 20_000, cost: 60_000, latency: 0 },
+	latency: { performance: 20_000, cost: 0, latency: 60_000 },
+	quality: { performance: 300_000, cost: 0, latency: 0 },
+}
 
 export type WorkerRouteCandidate = {
 	worker: WorkerConfig
@@ -20,13 +34,22 @@ export type WorkerRoute = {
 	candidates: Array<WorkerRouteCandidate>
 	maxAttempts: number
 	fallbackEnabled: boolean
+	evidence?: RoutingEvidenceSnapshot
+	decisionSha256: string
 }
 
 export function routeWorkers(
 	config: HarnessConfig,
 	mode: WorkerMode,
 	policy: WorkerRoutingPolicy,
+	evidence?: RoutingEvidenceSnapshot,
 ): WorkerRoute {
+	if (evidence !== undefined && evidence.mode !== mode) {
+		throw new HarnessError(
+			'ROUTING_EVIDENCE_MODE_MISMATCH',
+			'Historical routing evidence does not match the requested task mode',
+		)
+	}
 	const requiredCapabilities = uniqueCapabilities([
 		mode,
 		'tool-calling',
@@ -63,7 +86,7 @@ export function routeWorkers(
 	}
 
 	const defaultWorkerId = policy.preferredWorkerId ?? config.routing.defaultWorkerId
-	const candidates = configuredWorkers
+	const declaredCandidates = configuredWorkers
 		.filter(worker => workerSatisfiesPolicy(
 			worker,
 			mode,
@@ -75,7 +98,15 @@ export function routeWorkers(
 			policy.strategy,
 			defaultWorkerId,
 		))
-		.sort(compareCandidates)
+	const candidates = applyRoutingEvidence(
+		declaredCandidates,
+		policy.strategy,
+		evidence,
+	).sort((left, right) => compareCandidatesWithPreference(
+		left,
+		right,
+		policy.preferredWorkerId,
+	))
 
 	if (candidates.length === 0) {
 		throw new HarnessError(
@@ -107,13 +138,158 @@ export function routeWorkers(
 		)
 		: 1
 
-	return {
+	const routeWithoutDigest = {
 		strategy: policy.strategy,
 		requiredCapabilities,
 		candidates,
 		maxAttempts,
 		fallbackEnabled,
+		...(evidence === undefined ? {} : { evidence }),
 	}
+	return {
+		...routeWithoutDigest,
+		decisionSha256: routeDecisionSha256(routeWithoutDigest),
+	}
+}
+
+export function routeDecisionSha256(
+	route: Omit<WorkerRoute, 'decisionSha256'>,
+): string {
+	return createHash('sha256').update(JSON.stringify({
+		schemaVersion: 1,
+		strategy: route.strategy,
+		requiredCapabilities: route.requiredCapabilities,
+		candidates: route.candidates.map(candidate => ({
+			workerId: candidate.worker.id,
+			score: candidate.score,
+			reasons: candidate.reasons,
+		})),
+		maxAttempts: route.maxAttempts,
+		fallbackEnabled: route.fallbackEnabled,
+		evidenceSha256: route.evidence?.sha256 ?? null,
+	})).digest('hex')
+}
+
+function applyRoutingEvidence(
+	candidates: Array<WorkerRouteCandidate>,
+	strategy: RoutingStrategy,
+	evidence: RoutingEvidenceSnapshot | undefined,
+): Array<WorkerRouteCandidate> {
+	if (evidence === undefined) {
+		return candidates
+	}
+	const evidenceByWorker = new Map(
+		evidence.workers.map(item => [item.workerId, item]),
+	)
+	const weights = evidenceWeights[strategy]
+	const costAdjustments = rankMetricAdjustments(
+		candidates,
+		evidenceByWorker,
+		item => item.averageEstimatedCostMicroUsd,
+		weights.cost,
+	)
+	const latencyAdjustments = rankMetricAdjustments(
+		candidates,
+		evidenceByWorker,
+		item => item.medianDurationMs,
+		weights.latency,
+	)
+
+	return candidates.map(candidate => {
+		const workerEvidence = evidenceByWorker.get(candidate.worker.id)
+		if (workerEvidence === undefined) {
+			return candidate
+		}
+		const performanceAdjustment = scorePerformance(
+			workerEvidence,
+			weights.performance,
+		)
+		const costAdjustment = costAdjustments.get(candidate.worker.id) ?? 0
+		const latencyAdjustment = latencyAdjustments.get(candidate.worker.id) ?? 0
+		return {
+			...candidate,
+			score: candidate.score + performanceAdjustment +
+				costAdjustment + latencyAdjustment,
+			reasons: [
+				...candidate.reasons,
+				formatEvidenceReason(workerEvidence),
+			],
+		}
+	})
+}
+
+function scorePerformance(
+	evidence: WorkerRoutingEvidence,
+	maximumAdjustment: number,
+): number {
+	const successRate = evidence.successCount / evidence.sampleSize
+	const evaluationRate = evidence.evaluationCount === 0
+		? successRate
+		: evidence.evaluationPassCount / evidence.evaluationCount
+	const performance = (successRate + evaluationRate) / 2
+	return Math.round(
+		(performance - 0.5) * 2 * maximumAdjustment * evidenceConfidence(evidence),
+	)
+}
+
+function rankMetricAdjustments(
+	candidates: Array<WorkerRouteCandidate>,
+	evidenceByWorker: Map<string, WorkerRoutingEvidence>,
+	readMetric: (evidence: WorkerRoutingEvidence) => number | null,
+	maximumAdjustment: number,
+): Map<string, number> {
+	if (maximumAdjustment === 0) {
+		return new Map()
+	}
+	const metrics = candidates.flatMap(candidate => {
+		const evidence = evidenceByWorker.get(candidate.worker.id)
+		const value = evidence === undefined ? null : readMetric(evidence)
+		return value === null || evidence === undefined
+			? []
+			: [{ workerId: candidate.worker.id, value, evidence }]
+	})
+	const uniqueValues = [...new Set(metrics.map(metric => metric.value))]
+		.sort((left, right) => left - right)
+	if (uniqueValues.length < 2) {
+		return new Map()
+	}
+
+	return new Map(metrics.map(metric => {
+		const rank = uniqueValues.indexOf(metric.value)
+		const relative = 1 - (2 * rank) / (uniqueValues.length - 1)
+		return [
+			metric.workerId,
+			Math.round(
+				relative * maximumAdjustment * evidenceConfidence(metric.evidence),
+			),
+		]
+	}))
+}
+
+function evidenceConfidence(evidence: WorkerRoutingEvidence): number {
+	return Math.min(evidence.sampleSize, 20) / 20
+}
+
+function formatEvidenceReason(evidence: WorkerRoutingEvidence): string {
+	const successPercent = Math.round(
+		(evidence.successCount / evidence.sampleSize) * 100,
+	)
+	const evaluationPercent = evidence.evaluationCount === 0
+		? null
+		: Math.round(
+			(evidence.evaluationPassCount / evidence.evaluationCount) * 100,
+		)
+	const patchAcceptance = evidence.patchProducedCount === 0
+		? 'no produced patches'
+		: `${evidence.patchAppliedCount}/${evidence.patchProducedCount} patches applied`
+	const cost = evidence.averageEstimatedCostMicroUsd === null
+		? 'cost unavailable'
+		: `average cost $${(
+			evidence.averageEstimatedCostMicroUsd / 1_000_000
+		).toFixed(6)}`
+	return `history ${evidence.sampleSize}: ${successPercent}% completed, ${
+		evaluationPercent === null ? 'evaluation unavailable' : `${evaluationPercent}% evaluation passed`
+	}, median ${evidence.medianDurationMs} ms, ${cost}, ${patchAcceptance}`
 }
 
 export function describeWorker(worker: WorkerConfig): Record<string, unknown> {
@@ -198,6 +374,20 @@ function compareCandidates(
 	right: WorkerRouteCandidate,
 ): number {
 	return right.score - left.score || left.worker.id.localeCompare(right.worker.id)
+}
+
+function compareCandidatesWithPreference(
+	left: WorkerRouteCandidate,
+	right: WorkerRouteCandidate,
+	preferredWorkerId: string | null,
+): number {
+	if (left.worker.id === preferredWorkerId) {
+		return -1
+	}
+	if (right.worker.id === preferredWorkerId) {
+		return 1
+	}
+	return compareCandidates(left, right)
 }
 
 function uniqueCapabilities(

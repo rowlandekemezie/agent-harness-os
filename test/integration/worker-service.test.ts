@@ -255,6 +255,9 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		assert.ok(report.patchPath)
 		assert.ok(report.policy)
 		assert.equal(report.policy.sources.length, 0)
+		assert.equal(report.routing?.evidence?.sampledAttemptCount, 0)
+		assert.equal(report.routing?.candidates?.[0]?.workerId, 'qwen')
+		assert.match(report.routing?.decisionSha256 ?? '', /^[a-f0-9]{64}$/)
 		const originalPatch = await readFile(report.patchPath, 'utf8')
 		await writeFile(report.patchPath, `${originalPatch}\n# tampered\n`)
 		await assert.rejects(
@@ -270,6 +273,38 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		await assert.rejects(
 			service.applyRun(repositoryPath, report.runId),
 			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
+		)
+		await writeFile(report.reportPath, originalReport)
+
+		const reportWithoutRoutingEvidence = JSON.parse(originalReport) as {
+			routing?: Record<string, unknown>
+		}
+		delete reportWithoutRoutingEvidence.routing?.['evidence']
+		delete reportWithoutRoutingEvidence.routing?.['candidates']
+		delete reportWithoutRoutingEvidence.routing?.['decisionSha256']
+		await writeFile(
+			report.reportPath,
+			`${JSON.stringify(reportWithoutRoutingEvidence)}\n`,
+		)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
+		)
+		await writeFile(report.reportPath, originalReport)
+
+		const reportWithAlteredRoute = JSON.parse(originalReport) as {
+			routing?: { candidates?: Array<{ score: number }> }
+		}
+		const firstCandidate = reportWithAlteredRoute.routing?.candidates?.[0]
+		assert.ok(firstCandidate)
+		firstCandidate.score += 1
+		await writeFile(
+			report.reportPath,
+			`${JSON.stringify(reportWithAlteredRoute)}\n`,
+		)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('INVALID_RUN_REPORT'),
 		)
 		await writeFile(report.reportPath, originalReport)
 
@@ -297,6 +332,31 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		assert.equal(timeline.task.status, 'completed')
 		assert.equal(timeline.task.patchApplicationStatus, 'applied')
 		assert.equal(timeline.task.policySha256, report.policy.digest)
+		assert.equal(timeline.events[0]?.schemaVersion, 5)
+		const routeSelected = timeline.events.find(
+			event => event.type === 'RouteSelected',
+		)
+		assert.equal(
+			routeSelected?.type === 'RouteSelected'
+				? routeSelected.data.evidenceSha256
+				: null,
+			report.routing?.evidence?.sha256,
+		)
+		assert.equal(
+			routeSelected?.type === 'RouteSelected'
+				? routeSelected.data.decisionSha256
+				: null,
+			report.routing?.decisionSha256,
+		)
+		const attemptCompleted = timeline.events.find(
+			event => event.type === 'AttemptCompleted',
+		)
+		assert.equal(
+			attemptCompleted?.type === 'AttemptCompleted'
+				? typeof attemptCompleted.data.durationMs
+				: null,
+			'number',
+		)
 		assert.deepEqual(
 			timeline.events.map(event => event.type),
 			[

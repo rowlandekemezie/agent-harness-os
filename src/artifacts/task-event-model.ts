@@ -39,7 +39,7 @@ export type TaskEventProjection = {
 	lastAttempt: AttemptProjection | null
 	knownRunIds: Set<string>
 	applicationRunId: string | null
-	eventSchemaVersion: 1 | 2 | 3 | 4
+	eventSchemaVersion: 1 | 2 | 3 | 4 | 5
 }
 
 export function validateTaskEvent(
@@ -62,7 +62,8 @@ export function validateTaskEvent(
 		(value['schemaVersion'] !== 1 &&
 			value['schemaVersion'] !== 2 &&
 			value['schemaVersion'] !== 3 &&
-			value['schemaVersion'] !== 4) ||
+			value['schemaVersion'] !== 4 &&
+			value['schemaVersion'] !== 5) ||
 		!isUuid(value['eventId']) ||
 		value['taskId'] !== expectedTaskId ||
 		value['sequence'] !== expectedSequence ||
@@ -113,18 +114,38 @@ export function validateTaskEvent(
 			return
 		case 'RouteSelected':
 			if (
-				!hasExactKeys(data, [
-					'strategy',
-					'candidateWorkerIds',
-					'maxAttempts',
-				]) ||
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] >= 5
+						? [
+							'strategy',
+							'candidateWorkerIds',
+							'maxAttempts',
+							'evidenceSha256',
+							'evidenceTaskCount',
+							'evidenceAttemptCount',
+							'decisionSha256',
+						]
+						: [
+							'strategy',
+							'candidateWorkerIds',
+							'maxAttempts',
+						],
+				) ||
 				!isRoutingStrategy(data['strategy']) ||
 				!isBoundedStringArray(data['candidateWorkerIds'], 64, 64) ||
 				data['candidateWorkerIds'].length === 0 ||
 				new Set(data['candidateWorkerIds']).size !==
 					data['candidateWorkerIds'].length ||
 				!isIntegerInRange(data['maxAttempts'], 1, 8) ||
-				data['maxAttempts'] > data['candidateWorkerIds'].length
+				data['maxAttempts'] > data['candidateWorkerIds'].length ||
+				(value['schemaVersion'] >= 5 &&
+					(typeof data['evidenceSha256'] !== 'string' ||
+						!sha256Pattern.test(data['evidenceSha256']) ||
+						!isIntegerInRange(data['evidenceTaskCount'], 0, 100) ||
+						!isIntegerInRange(data['evidenceAttemptCount'], 0, 800) ||
+						typeof data['decisionSha256'] !== 'string' ||
+						!sha256Pattern.test(data['decisionSha256'])))
 			) {
 				throw invalidJournal('RouteSelected event has invalid data')
 			}
@@ -213,7 +234,8 @@ export function validateTaskEvent(
 			if (
 				(value['schemaVersion'] !== 2 &&
 					value['schemaVersion'] !== 3 &&
-					value['schemaVersion'] !== 4) ||
+					value['schemaVersion'] !== 4 &&
+					value['schemaVersion'] !== 5) ||
 				!hasExactKeys(
 					data,
 					value['schemaVersion'] >= 3
@@ -259,10 +281,29 @@ export function validateTaskEvent(
 			return
 		case 'AttemptCompleted':
 			if (
-				!hasExactKeys(data, ['runId', 'status', 'failureCode']) ||
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] >= 5
+						? [
+							'runId',
+							'status',
+							'failureCode',
+							'durationMs',
+							'providerLatencyMs',
+							'totalTokens',
+							'estimatedCostMicroUsd',
+						]
+						: ['runId', 'status', 'failureCode'],
+				) ||
 				!isUuid(data['runId']) ||
 				!isRunStatus(data['status']) ||
-				!isNullableBoundedString(data['failureCode'], 200)
+				!isNullableBoundedString(data['failureCode'], 200) ||
+				(value['schemaVersion'] >= 5 &&
+					(!isNonNegativeInteger(data['durationMs']) ||
+						!isNonNegativeInteger(data['providerLatencyMs']) ||
+						!isNonNegativeInteger(data['totalTokens']) ||
+						(data['estimatedCostMicroUsd'] !== null &&
+							!isNonNegativeInteger(data['estimatedCostMicroUsd']))))
 			) {
 				throw invalidJournal('AttemptCompleted event has invalid data')
 			}
@@ -731,11 +772,11 @@ function isUniqueBoundedStringArray(
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
-	return typeof value === 'number' && Number.isInteger(value) && value >= 0
+	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function isPositiveInteger(value: unknown): value is number {
-	return typeof value === 'number' && Number.isInteger(value) && value > 0
+	return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
 function isIntegerInRange(

@@ -47,6 +47,11 @@ Treat `AGENT_OS_WORKERS_JSON` as production configuration. Review changes to:
 
 Capability and pricing changes can alter routing without changing application code. Keep the registry under configuration management and audit its effective value at startup.
 
+`AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT` defaults to including 100 recent
+same-mode tasks per repository. Use `0` to disable measured scoring. Inspect the evidence,
+candidate scores, and reasons in each run report. A corrupt journal blocks
+routing before provider invocation rather than silently changing the sample.
+
 Treat `AGENT_OS_WORKER_PROFILES_JSON` the same way. Review each profile's backing
 worker, exact role, capability subset, iteration cap, enabled state, and
 evaluation policy. When this variable is present, only profile IDs are routable;
@@ -69,7 +74,8 @@ Use route preview before high-cost, privacy-sensitive, or high-blast-radius work
 - preferred worker, when strict selection is required
 - fallback policy and maximum attempts
 
-A route is deterministic for a fixed registry and policy. It is not based on live provider health, benchmark history, or current prices.
+A route is deterministic for a fixed registry, policy, and validated history
+snapshot. It is not based on live provider health or current prices.
 
 `list_workers` and `route_worker` expose profile metadata without credentials.
 Confirm the selected profile role and effective iteration limit before a

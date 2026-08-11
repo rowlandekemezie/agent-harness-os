@@ -170,7 +170,7 @@ test('binds a resolved policy to current task history', async function () {
 	const timeline = await journal.timeline(artifactRoot, task.taskId)
 
 	assert.equal(task.policySha256, policy.digest)
-	assert.equal(timeline.events[0]?.schemaVersion, 4)
+	assert.equal(timeline.events[0]?.schemaVersion, 5)
 	assert.equal(
 		timeline.events[0]?.type === 'TaskCreated'
 			? timeline.events[0].data.policySha256

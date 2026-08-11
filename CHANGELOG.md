@@ -18,6 +18,7 @@ All notable changes are documented here.
 - Profile capability subsets, iteration caps, and default or strict evaluation policies
 - Restrictive organization and fixed-base repository policies for execution, path, network, and routing limits
 - Digest-bound effective policy provenance in run reports and event-schema-version-4 task history
+- Confidence-bounded historical outcome, latency, token, cost, and patch-application routing evidence
 
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
 - ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
@@ -40,6 +41,7 @@ All notable changes are documented here.
 - Keep worker iteration exhaustion as a non-fallback policy failure
 - Reject unsafe or malformed policy files before worker selection and block patch application when policy evidence is removed or changed
 - Aggregate-bound hostile glob matching, enforce absolute deadlines between changed paths, and fail closed before transforming invalid Git patch bytes
+- Bind routing evidence to event-schema-version-5 history and fail closed on corrupt evidence inputs
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

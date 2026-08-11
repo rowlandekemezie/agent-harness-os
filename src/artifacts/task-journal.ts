@@ -67,6 +67,8 @@ export type RunHistoryLink = {
 		evaluationPolicy: 'default' | 'strict'
 	} | null
 	policySha256?: string | null
+	routingEvidenceSha256?: string | null
+	routeDecisionSha256?: string | null
 }
 
 type TimelineReadResult = {
@@ -105,7 +107,7 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(input.policy === undefined ? 3 : 4, taskId, 1, null, {
+		const event = createEvent(input.policy === undefined ? 3 : 5, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
@@ -145,7 +147,12 @@ export class TaskJournal {
 	): Promise<TaskEvent> {
 		signal?.throwIfAborted()
 		validateUuid(taskId, 'task ID')
-		const current = await this.readTimeline(artifactRoot, taskId)
+		const current = await this.readTimeline(
+			artifactRoot,
+			taskId,
+			undefined,
+			signal,
+		)
 
 		if (current.timeline.events.length >= maxEventsPerTask) {
 			throw new HarnessError(
@@ -195,7 +202,9 @@ export class TaskJournal {
 	async timeline(
 		artifactRoot: string,
 		taskId: string,
+		signal?: AbortSignal,
 	): Promise<TaskTimeline> {
+		signal?.throwIfAborted()
 		validateUuid(taskId, 'task ID')
 		try {
 			await assertPrivateDirectory(artifactRoot, artifactRoot)
@@ -212,7 +221,12 @@ export class TaskJournal {
 			}
 			throw error
 		}
-		return (await this.readTimeline(artifactRoot, taskId)).timeline
+		return (await this.readTimeline(
+			artifactRoot,
+			taskId,
+			undefined,
+			signal,
+		)).timeline
 	}
 
 	async isRunLinked(input: RunHistoryLink): Promise<boolean> {
@@ -233,6 +247,7 @@ export class TaskJournal {
 				event.data.runId === input.runId,
 		)
 		const completed = timeline.events.find(event => event.type === 'TaskCompleted')
+		const route = timeline.events.find(event => event.type === 'RouteSelected')
 
 		return (
 			created?.type === 'TaskCreated' &&
@@ -241,6 +256,13 @@ export class TaskJournal {
 			(created.schemaVersion >= 4
 				? created.data.policySha256 === (input.policySha256 ?? null)
 				: (input.policySha256 ?? null) === null) &&
+			(created.schemaVersion >= 5
+				? route?.type === 'RouteSelected' &&
+					route.data.evidenceSha256 ===
+						(input.routingEvidenceSha256 ?? null) &&
+					route.data.decisionSha256 ===
+						(input.routeDecisionSha256 ?? null)
+				: (input.routingEvidenceSha256 ?? null) === null) &&
 			started?.type === 'WorkerStarted' &&
 			started.data.workerId === input.workerId &&
 			produced?.type === 'PatchProduced' &&
@@ -266,7 +288,9 @@ export class TaskJournal {
 	async list(
 		artifactRoot: string,
 		query: TaskListQuery,
+		signal?: AbortSignal,
 	): Promise<TaskPage> {
+		signal?.throwIfAborted()
 		const tasksRoot = path.join(artifactRoot, taskDirectoryName)
 
 		try {
@@ -291,15 +315,25 @@ export class TaskJournal {
 		let traversedBytes = 0
 
 		for (const entry of entries) {
+			signal?.throwIfAborted()
 			if (!entry.isDirectory() || !uuidPattern.test(entry.name)) {
 				throw invalidJournal('Task history contains an unexpected entry')
 			}
-			const marker = await this.readTaskReadyMarker(artifactRoot, entry.name)
+			const marker = await this.readTaskReadyMarker(
+				artifactRoot,
+				entry.name,
+				signal,
+			)
 			if (marker === null) {
 				continue
 			}
 
-			const result = await this.readTimeline(artifactRoot, entry.name, marker)
+			const result = await this.readTimeline(
+				artifactRoot,
+				entry.name,
+				marker,
+				signal,
+			)
 			traversedEvents += result.timeline.events.length
 			traversedBytes += result.bytesRead
 			if (
@@ -353,10 +387,12 @@ export class TaskJournal {
 		artifactRoot: string,
 		taskId: string,
 		knownMarker?: TaskReadyMarker,
+		signal?: AbortSignal,
 	): Promise<TimelineReadResult> {
+		signal?.throwIfAborted()
 		validateUuid(taskId, 'task ID')
 		const marker = knownMarker ??
-			await this.readTaskReadyMarker(artifactRoot, taskId)
+			await this.readTaskReadyMarker(artifactRoot, taskId, signal)
 		if (marker === null) {
 			throw new HarnessError(
 				'TASK_NOT_FOUND',
@@ -419,6 +455,7 @@ export class TaskJournal {
 		let bytesRead = 0
 
 		for (const [index, name] of names.entries()) {
+			signal?.throwIfAborted()
 			const expectedSequence = index + 1
 			const match = eventFilePattern.exec(name)
 			if (match === null || Number(match[1]) !== expectedSequence) {
@@ -482,7 +519,9 @@ export class TaskJournal {
 	private async readTaskReadyMarker(
 		artifactRoot: string,
 		taskId: string,
+		signal?: AbortSignal,
 	): Promise<TaskReadyMarker | null> {
+		signal?.throwIfAborted()
 		const taskDirectory = path.join(
 			artifactRoot,
 			taskDirectoryName,
@@ -490,6 +529,7 @@ export class TaskJournal {
 		)
 		try {
 			await assertPrivateDirectory(artifactRoot, taskDirectory)
+			signal?.throwIfAborted()
 			const entries = await readdir(taskDirectory, { withFileTypes: true })
 			if (entries.length > 4) {
 				throw invalidJournal('Task directory contains too many entries')
@@ -613,7 +653,7 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
-	schemaVersion: 1 | 2 | 3 | 4,
+	schemaVersion: 1 | 2 | 3 | 4 | 5,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadConfig } from '../../src/config.js'
-import type { WorkerRoutingPolicy } from '../../src/domain/types.js'
+import type {
+	RoutingEvidenceSnapshot,
+	WorkerRoutingPolicy,
+} from '../../src/domain/types.js'
 import { routeWorkers } from '../../src/provider/router.js'
 
 function createConfig() {
@@ -47,6 +50,52 @@ function policy(overrides: Partial<WorkerRoutingPolicy> = {}): WorkerRoutingPoli
 	}
 }
 
+function evidence(overrides: Partial<RoutingEvidenceSnapshot> = {}): RoutingEvidenceSnapshot {
+	return {
+		schemaVersion: 1,
+		mode: 'implementation',
+		taskLimit: 100,
+		sampledTaskCount: 5,
+		sampledAttemptCount: 40,
+		sources: Array.from({ length: 5 }, (_, index) => ({
+			taskId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+			latestEventSha256: String(index + 1).repeat(64),
+		})),
+		workers: [
+			{
+				workerId: 'qwen-fast',
+				mode: 'implementation',
+				sampleSize: 20,
+				successCount: 0,
+				evaluationCount: 20,
+				evaluationPassCount: 0,
+				patchProducedCount: 0,
+				patchAppliedCount: 0,
+				medianDurationMs: 30_000,
+				averageProviderLatencyMs: 25_000,
+				averageTotalTokens: 10_000,
+				averageEstimatedCostMicroUsd: 900_000,
+			},
+			{
+				workerId: 'claude-quality',
+				mode: 'implementation',
+				sampleSize: 20,
+				successCount: 20,
+				evaluationCount: 20,
+				evaluationPassCount: 20,
+				patchProducedCount: 20,
+				patchAppliedCount: 18,
+				medianDurationMs: 5_000,
+				averageProviderLatencyMs: 4_000,
+				averageTotalTokens: 2_000,
+				averageEstimatedCostMicroUsd: 10_000,
+			},
+		],
+		sha256: 'a'.repeat(64),
+		...overrides,
+	}
+}
+
 test('routes deterministically by declared cost, latency, and quality metadata', function () {
 	const config = createConfig()
 	assert.equal(
@@ -86,12 +135,48 @@ test('enforces capability and tier constraints before scoring', function () {
 	)
 })
 
+test('uses measured outcomes, latency, and cost without model-selected routing', function () {
+	const config = createConfig()
+	for (const strategy of ['balanced', 'cost', 'latency', 'quality'] as const) {
+		const route = routeWorkers(
+			config,
+			'implementation',
+			policy({ strategy }),
+			evidence(),
+		)
+		assert.equal(route.candidates[0]?.worker.id, 'claude-quality')
+		assert.match(route.candidates[0]?.reasons.at(-1) ?? '', /history 20/)
+		assert.equal(route.evidence?.sampledAttemptCount, 40)
+		assert.match(route.decisionSha256, /^[a-f0-9]{64}$/)
+	}
+
+	assert.throws(
+		() => routeWorkers(
+			config,
+			'testing',
+			policy(),
+			evidence(),
+		),
+		(error: unknown) =>
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'ROUTING_EVIDENCE_MODE_MISMATCH',
+	)
+})
+
 test('treats an explicit preferred worker as a strict routing contract', function () {
 	const config = createConfig()
-	const route = routeWorkers(config, 'implementation', policy({
-		preferredWorkerId: 'qwen-fast',
-		maxAttempts: 2,
-	}))
+	const route = routeWorkers(
+		config,
+		'implementation',
+		policy({
+			preferredWorkerId: 'qwen-fast',
+			strategy: 'quality',
+			maxAttempts: 2,
+		}),
+		evidence(),
+	)
 	assert.equal(route.candidates[0]?.worker.id, 'qwen-fast')
 	assert.equal(route.maxAttempts, 2)
 

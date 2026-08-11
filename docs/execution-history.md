@@ -54,7 +54,7 @@ existing private permissions and integrity checks.
 
 `EvaluationCompleted` records evaluator IDs, the aggregate outcome, the profile
 evaluation policy, and failed or unknown dimension IDs. Detailed summaries and
-evidence remain in the run report. Event-schema-version-3 and version-4 attempts require
+evidence remain in the run report. Event-schema-version-3 through version-5 attempts require
 evaluation after validation and before attempt completion, and reject a
 completed strict-profile attempt when evaluation is inconclusive. Version 1 and
 2 timelines remain readable without invented policy evidence.
@@ -62,6 +62,12 @@ completed strict-profile attempt when evaluation is inconclusive. Version 1 and
 Event schema version 4 adds the resolved policy digest and source count to
 `TaskCreated`. Policy details and individual source digests remain in the run
 report.
+
+Event schema version 5 binds the historical routing snapshot and exact routing
+decision in `RouteSelected`, and records bounded duration, provider latency,
+token, and estimated-cost measurements in `AttemptCompleted`. These fields feed
+deterministic routing; older events remain replayable but are not treated as
+measured samples.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass

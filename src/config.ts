@@ -86,6 +86,7 @@ export type HarnessConfig = {
 		defaultWorkerId: string | null
 		defaultStrategy: RoutingStrategy
 		maxAttempts: number
+		evidenceTaskLimit: number
 	}
 	execution: {
 		backend: ExecutionBackend
@@ -153,6 +154,12 @@ export function loadConfig(
 				3,
 				1,
 				8,
+			),
+			evidenceTaskLimit: parseInteger(
+				environment['AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT'],
+				100,
+				0,
+				100,
 			),
 		},
 		execution: {

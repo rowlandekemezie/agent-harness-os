@@ -82,6 +82,19 @@ test('requires an absolute organization policy path', function () {
 	)
 })
 
+test('bounds the historical routing evidence window', function () {
+	assert.equal(loadConfig({}).routing.evidenceTaskLimit, 100)
+	assert.equal(
+		loadConfig({ AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT: '0' })
+			.routing.evidenceTaskLimit,
+		0,
+	)
+	assert.throws(
+		() => loadConfig({ AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT: '101' }),
+		hasHarnessCode('INVALID_CONFIGURATION'),
+	)
+})
+
 test('requires run artifacts to remain outside the target repository', async function () {
 	const repositoryPath = await mkdtemp(
 		path.join(os.tmpdir(), 'artifact-root-repository-'),

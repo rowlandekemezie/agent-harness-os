@@ -47,4 +47,5 @@ test('includes custom worker secret environment names in generated Codex configu
 	assert.match(stdout, /"UNPROFILED_PRIVATE_TOKEN"/)
 	assert.match(stdout, /"AGENT_OS_WORKER_PROFILES_JSON"/)
 	assert.match(stdout, /"AGENT_OS_ORGANIZATION_POLICY_PATH"/)
+	assert.match(stdout, /"AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT"/)
 })

@@ -21,6 +21,7 @@
 - An evaluator returning malformed, contradictory, oversized, or hostile evidence
 - A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
 - Incorrect or malicious worker profile, capability, cost, latency, priority, endpoint, or pricing configuration
+- Corrupt, oversized, or adversarial task history used as routing evidence
 - Malformed, unsafe, mutable-checkout, or authority-expanding policy input
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
@@ -59,6 +60,15 @@
 - Invalid policy fails before provider invocation
 - Policy metadata containing configured credentials fails instead of being persisted or transformed
 - Reports retain effective policy and source digests; event schema version 4 binds the policy digest before patch application
+
+### Historical routing evidence
+
+- Only validated event-schema-version-5 attempts become measured samples
+- Evidence reads are repository-scoped, traversal-bounded, read-only, and cancellation-aware
+- Capability, role, tier, and policy filters run before measured scoring
+- Evidence weights are fixed code with bounded confidence; models cannot rewrite them
+- Reports retain source event hashes, evidence, scores, and reasons; task history binds evidence and decision digests
+- Invalid history fails before provider invocation; a zero task limit disables evidence reads
 
 
 ### Filesystem
