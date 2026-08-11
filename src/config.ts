@@ -78,6 +78,7 @@ export type WorkerSecrets = {
 export type HarnessConfig = {
 	workers: Array<WorkerConfig>
 	redactionSecrets: WorkerSecrets
+	workerSecretEnvironmentNames: Array<string>
 	routing: {
 		defaultWorkerId: string | null
 		defaultStrategy: RoutingStrategy
@@ -132,6 +133,8 @@ export function loadConfig(
 	return {
 		workers,
 		redactionSecrets: collectWorkerSecrets(backingWorkers),
+		workerSecretEnvironmentNames:
+			collectWorkerSecretEnvironmentNames(backingWorkers),
 		routing: {
 			defaultWorkerId: requestedDefaultWorkerId,
 			defaultStrategy: parseRoutingStrategy(
@@ -271,6 +274,12 @@ export function getWorkerSecrets(config: HarnessConfig): WorkerSecrets {
 	}
 }
 
+export function getWorkerSecretEnvironmentNames(
+	config: HarnessConfig,
+): Array<string> {
+	return [...config.workerSecretEnvironmentNames]
+}
+
 function collectWorkerSecrets(workers: Array<WorkerConfig>): WorkerSecrets {
 	const namedSecrets: Record<string, string> = {}
 	const additionalSecrets: Array<string> = []
@@ -284,6 +293,15 @@ function collectWorkerSecrets(workers: Array<WorkerConfig>): WorkerSecrets {
 	}
 
 	return { namedSecrets, additionalSecrets }
+}
+
+function collectWorkerSecretEnvironmentNames(
+	workers: Array<WorkerConfig>,
+): Array<string> {
+	return [...new Set(workers.flatMap(worker => [
+		...(worker.apiKeyEnv === null ? [] : [worker.apiKeyEnv]),
+		...worker.headerEnvNames,
+	]))]
 }
 
 export function resolveArtifactRoot(

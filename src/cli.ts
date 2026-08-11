@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url'
-import { loadConfig } from './config.js'
+import { getWorkerSecretEnvironmentNames, loadConfig } from './config.js'
 import { getErrorMessage } from './lib/errors.js'
 import { McpTools } from './mcp/tools.js'
 import { startMcpServer } from './mcp/server.js'
@@ -100,10 +100,7 @@ function renderCodexConfig(config: ReturnType<typeof loadConfig>): string {
 		'AGENT_HARNESS_MAX_PROVIDER_CONTEXT_BYTES',
 		'AGENT_HARNESS_ARTIFACT_ROOT',
 		'AGENT_HARNESS_LOG_LEVEL',
-		...config.workers.flatMap(worker => [
-			...(worker.apiKeyEnv === null ? [] : [worker.apiKeyEnv]),
-			...worker.headerEnvNames,
-		]),
+		...getWorkerSecretEnvironmentNames(config),
 	])].sort()
 
 	return `[mcp_servers.agent_os]

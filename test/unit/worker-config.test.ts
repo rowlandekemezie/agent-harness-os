@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
 	assertWorkersConfigured,
+	getWorkerSecretEnvironmentNames,
 	getWorkerSecrets,
 	loadConfig,
 } from '../../src/config.js'
@@ -164,6 +165,11 @@ test('retains every backing-worker secret for redaction', function () {
 		},
 		additionalSecrets: ['unprofiled-header-secret'],
 	})
+	assert.deepEqual(getWorkerSecretEnvironmentNames(config), [
+		'PROFILED_API_KEY',
+		'UNPROFILED_API_KEY',
+		'UNPROFILED_HEADER',
+	])
 })
 
 test('rejects worker profiles that reference or authorize unsupported work', function () {
