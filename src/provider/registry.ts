@@ -1,6 +1,7 @@
 import type { HarnessConfig, WorkerConfig } from '../config.js'
 import { getConfiguredWorkers, isWorkerConfigured } from '../config.js'
 import type {
+	RoutingEvidenceSnapshot,
 	WorkerMode,
 	WorkerProvider,
 	WorkerRoutingPolicy,
@@ -36,11 +37,13 @@ export class WorkerRegistry {
 	route(
 		mode: WorkerMode,
 		policy?: WorkerRoutingPolicy,
+		evidence?: RoutingEvidenceSnapshot,
 	): WorkerRoute {
 		const route = routeWorkers(
 			this.config,
 			mode,
 			policy ?? defaultRoutingPolicy(this.config),
+			evidence,
 		)
 		this.logger.debug('Routed worker task', {
 			mode,

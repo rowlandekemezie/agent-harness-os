@@ -55,6 +55,7 @@ function renderCodexConfig(config: ReturnType<typeof loadConfig>): string {
 		'AGENT_OS_DEFAULT_WORKER',
 		'AGENT_OS_ROUTING_STRATEGY',
 		'AGENT_OS_MAX_WORKER_ATTEMPTS',
+		'AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT',
 		'CODEX_HOME',
 		'HOME',
 		'USERPROFILE',

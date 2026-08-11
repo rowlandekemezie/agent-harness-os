@@ -35,6 +35,7 @@ your clean checkout
 - ChatGPT-authenticated Codex CLI, OpenAI-compatible, and native Anthropic adapters
 - Capability-based routing for research, implementation, testing, review, tool calling, long context, and private execution
 - Deterministic `balanced`, `cost`, `latency`, and `quality` strategies
+- Bounded per-repository performance, latency, and cost evidence for eligible-worker scoring
 - Optional worker preference, cost ceiling, latency ceiling, and required capabilities per task
 - Bounded fallback across eligible workers
 - A fresh detached worktree for every fallback attempt
@@ -46,7 +47,9 @@ your clean checkout
 - Legacy `QWEN_*` configuration compatibility
 - The hardened execution kernel from version 0.1: strict path authority, file-only worker tools, immutable patch validation, isolated command execution, artifact integrity, cancellation, bounded resources, and approval-separated application
 
-This release intentionally does not add adaptive learning, durable distributed queues, memory, or a dashboard. Those layers should consume a proven routing and execution contract rather than redefine it.
+Historical evidence adjusts deterministic scores; it does not learn or rewrite
+weights, capabilities, or policy. This release does not add durable distributed
+queues, semantic memory, or a dashboard.
 
 ## Security model
 
@@ -224,6 +227,7 @@ Global defaults:
 export AGENT_OS_DEFAULT_WORKER='gpt-implementation'
 export AGENT_OS_ROUTING_STRATEGY='balanced'
 export AGENT_OS_MAX_WORKER_ATTEMPTS='3'
+export AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT='100'
 ```
 
 A task can override those defaults:
@@ -254,6 +258,12 @@ Use `route_worker` to preview selection without contacting a model:
 }
 ```
 
+The preview is registry-only. During delegation, the router also includes up to
+the configured number of recent same-mode task journals for that repository.
+Set the evidence task limit to `0` to retain declared-metadata-only scoring.
+Reports preserve the exact evidence snapshot, candidate scores, and reasons.
+See [Historical routing evidence](docs/routing-evidence.md).
+
 An explicit `preferredWorkerId` is a strict contract: the call fails if that worker is absent, unconfigured, or lacks the required capabilities.
 
 ## Configure isolated validation
@@ -278,10 +288,10 @@ agent-harness-os codex-config
 ```
 
 The generated server name is `agent_os`. Run the command with
-`AGENT_OS_WORKERS_JSON`, optional `AGENT_OS_WORKER_PROFILES_JSON`, and optional
-`AGENT_OS_ORGANIZATION_POLICY_PATH` loaded; it forwards those configuration
-values, common provider credential names, and every custom `apiKeyEnv` or
-`headerEnv` name used by the effective registry.
+`AGENT_OS_WORKERS_JSON`, optional `AGENT_OS_WORKER_PROFILES_JSON`, policy, and
+routing-evidence settings loaded; it forwards those configuration values,
+common provider credential names, and every custom `apiKeyEnv` or `headerEnv`
+name used by the effective registry.
 Regenerate the block whenever those names change.
 
 The eight MCP tools are:
@@ -301,6 +311,8 @@ See [Evaluation](docs/evaluation.md) for evidence sources, dimensions, outcome
 semantics, compatibility, and extension boundaries.
 See [Policies as code](docs/policies.md) for deterministic composition and
 policy provenance.
+See [Historical routing evidence](docs/routing-evidence.md) for measured inputs,
+weights, cold-start behavior, and audit binding.
 
 ## Operating workflow
 
@@ -329,7 +341,6 @@ Agent Harness OS is a local, durable-artifact coding runtime, not yet a distribu
 
 - persistent task queues across machines
 - dynamic provider discovery
-- automatic benchmark-based capability updates
 - self-modifying routing weights
 - long-term semantic memory
 - a web dashboard

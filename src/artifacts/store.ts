@@ -318,7 +318,11 @@ function validateReport(
 		!isCommandResults(value['commandResults']) ||
 		!isAcceptanceResults(value['acceptanceCriteria']) ||
 		!isProviderMetadata(value['provider'], schemaVersion === 3) ||
-		!isOptionalRoutingMetadata(value['routing']) ||
+		!isOptionalRoutingMetadata(
+			value['routing'],
+			value['mode'],
+			isRecord(value['provider']) ? value['provider']['workerId'] : undefined,
+		) ||
 		!isOptionalNullableString(value['failureCode']) ||
 		(patchPath === null) !== (patchSha256 === null) ||
 		(patchSha256 !== null && !/^[a-f0-9]{64}$/i.test(patchSha256))
@@ -504,13 +508,20 @@ function isOptionalWorkerProfile(value: unknown): boolean {
 	)
 }
 
-function isOptionalRoutingMetadata(value: unknown): boolean {
+function isOptionalRoutingMetadata(
+	value: unknown,
+	reportMode: unknown,
+	providerWorkerId: unknown,
+): boolean {
 	if (value === undefined) {
 		return true
 	}
 	if (!isRecord(value)) {
 		return false
 	}
+	const candidateWorkerIds = value['candidateWorkerIds']
+	const attemptNumber = value['attemptNumber']
+	const previousAttempts = value['previousAttempts']
 
 	return (
 		hasExpectedKeys(value, [
@@ -522,26 +533,209 @@ function isOptionalRoutingMetadata(value: unknown): boolean {
 			'maxAttempts',
 			'fallbackEnabled',
 			'previousAttempts',
-		], []) &&
+		], ['evidence', 'candidates', 'decisionSha256']) &&
 		(value['strategy'] === 'balanced' ||
 			value['strategy'] === 'cost' ||
 			value['strategy'] === 'latency' ||
 			value['strategy'] === 'quality') &&
 		isWorkerCapabilities(value['requiredCapabilities']) &&
-		isStringArray(value['candidateWorkerIds']) &&
-		typeof value['selectedWorkerId'] === 'string' &&
-		isPositiveInteger(value['attemptNumber']) &&
+		Array.isArray(candidateWorkerIds) &&
+		candidateWorkerIds.length > 0 &&
+		candidateWorkerIds.length <= 64 &&
+		candidateWorkerIds.every(isWorkerId) &&
+		new Set(candidateWorkerIds).size === candidateWorkerIds.length &&
+		isWorkerId(value['selectedWorkerId']) &&
+		isPositiveInteger(attemptNumber) &&
 		isPositiveInteger(value['maxAttempts']) &&
+		(value['maxAttempts'] as number) <= 8 &&
+		(value['maxAttempts'] as number) <= candidateWorkerIds.length &&
 		typeof value['fallbackEnabled'] === 'boolean' &&
-		Array.isArray(value['previousAttempts']) &&
-		value['previousAttempts'].every(isWorkerAttempt) &&
-		(value['attemptNumber'] as number) <= (value['maxAttempts'] as number) &&
-		(value['previousAttempts'] as Array<unknown>).length ===
-			(value['attemptNumber'] as number) - 1 &&
-		(value['candidateWorkerIds'] as Array<string>).includes(
-			value['selectedWorkerId'] as string,
-		)
+		Array.isArray(previousAttempts) &&
+		previousAttempts.every(isWorkerAttempt) &&
+		(attemptNumber as number) <= (value['maxAttempts'] as number) &&
+		previousAttempts.length === (attemptNumber as number) - 1 &&
+		candidateWorkerIds[(attemptNumber as number) - 1] ===
+			value['selectedWorkerId'] &&
+		previousAttempts.every((attempt, index) =>
+			(attempt as Record<string, unknown>)['workerId'] ===
+				candidateWorkerIds[index],
+		) &&
+		(typeof providerWorkerId !== 'string' ||
+			value['selectedWorkerId'] === providerWorkerId) &&
+		((value['evidence'] === undefined &&
+			value['candidates'] === undefined &&
+			value['decisionSha256'] === undefined) ||
+			(isRoutingEvidenceSnapshot(value['evidence']) &&
+				(value['evidence'] as Record<string, unknown>)['mode'] === reportMode &&
+				isRouteCandidateMetadata(
+					value['candidates'],
+					value['candidateWorkerIds'] as Array<string>,
+				) &&
+				isRouteDecisionDigest(value)))
 	)
+}
+
+function isRouteDecisionDigest(value: Record<string, unknown>): boolean {
+	if (
+		typeof value['decisionSha256'] !== 'string' ||
+		!/^[a-f0-9]{64}$/i.test(value['decisionSha256'])
+	) {
+		return false
+	}
+	return sha256(JSON.stringify({
+		schemaVersion: 1,
+		strategy: value['strategy'],
+		requiredCapabilities: value['requiredCapabilities'],
+		candidates: value['candidates'],
+		maxAttempts: value['maxAttempts'],
+		fallbackEnabled: value['fallbackEnabled'],
+		evidenceSha256: (value['evidence'] as Record<string, unknown>)['sha256'],
+	})) === value['decisionSha256']
+}
+
+function isRoutingEvidenceSnapshot(value: unknown): boolean {
+	if (
+		!isRecord(value) ||
+		!hasExpectedKeys(value, [
+			'schemaVersion',
+			'mode',
+			'taskLimit',
+			'sampledTaskCount',
+			'sampledAttemptCount',
+			'sources',
+			'workers',
+			'sha256',
+		], []) ||
+		value['schemaVersion'] !== 1 ||
+		!isWorkerMode(value['mode']) ||
+		!isIntegerInRange(value['taskLimit'], 0, 100) ||
+		!isIntegerInRange(
+			value['sampledTaskCount'],
+			0,
+			value['taskLimit'] as number,
+		) ||
+		!isIntegerInRange(
+			value['sampledAttemptCount'],
+			0,
+			(value['sampledTaskCount'] as number) * 8,
+		) ||
+		!Array.isArray(value['sources']) ||
+		value['sources'].length !== value['sampledTaskCount'] ||
+		!value['sources'].every(isRoutingEvidenceTaskSource) ||
+		new Set(value['sources'].map(source =>
+			(source as Record<string, unknown>)['taskId'],
+		)).size !== value['sources'].length ||
+		!Array.isArray(value['workers']) ||
+		value['workers'].length > 64 ||
+		!value['workers'].every(item =>
+			isWorkerRoutingEvidence(item, value['mode'] as WorkerMode),
+		) ||
+		new Set(value['workers'].map(item =>
+			(item as Record<string, unknown>)['workerId'],
+		)).size !== value['workers'].length ||
+		value['workers'].reduce(
+			(total, item) => total +
+				((item as Record<string, unknown>)['sampleSize'] as number),
+			0,
+		) !== value['sampledAttemptCount'] ||
+		typeof value['sha256'] !== 'string' ||
+		!/^[a-f0-9]{64}$/i.test(value['sha256'])
+	) {
+		return false
+	}
+
+	return sha256(JSON.stringify({
+		schemaVersion: value['schemaVersion'],
+		mode: value['mode'],
+		taskLimit: value['taskLimit'],
+		sampledTaskCount: value['sampledTaskCount'],
+		sampledAttemptCount: value['sampledAttemptCount'],
+		sources: value['sources'],
+		workers: value['workers'],
+	})) === value['sha256']
+}
+
+function isRoutingEvidenceTaskSource(value: unknown): boolean {
+	return isRecord(value) &&
+		hasExpectedKeys(value, ['taskId', 'latestEventSha256'], []) &&
+		isUuid(value['taskId']) &&
+		typeof value['latestEventSha256'] === 'string' &&
+		/^[a-f0-9]{64}$/i.test(value['latestEventSha256'])
+}
+
+function isWorkerRoutingEvidence(
+	value: unknown,
+	mode: WorkerMode,
+): boolean {
+	if (!isRecord(value)) {
+		return false
+	}
+	const sampleSize = value['sampleSize']
+	return (
+		hasExpectedKeys(value, [
+			'workerId',
+			'mode',
+			'sampleSize',
+			'successCount',
+			'evaluationCount',
+			'evaluationPassCount',
+			'patchProducedCount',
+			'patchAppliedCount',
+			'medianDurationMs',
+			'averageProviderLatencyMs',
+			'averageTotalTokens',
+			'estimatedCostSampleCount',
+			'averageEstimatedCostMicroUsd',
+		], []) &&
+		isWorkerId(value['workerId']) &&
+		value['mode'] === mode &&
+		isIntegerInRange(sampleSize, 1, 800) &&
+		isIntegerInRange(value['successCount'], 0, sampleSize as number) &&
+		isIntegerInRange(value['evaluationCount'], 0, sampleSize as number) &&
+		isIntegerInRange(
+			value['evaluationPassCount'],
+			0,
+			value['evaluationCount'] as number,
+		) &&
+		isIntegerInRange(value['patchProducedCount'], 0, sampleSize as number) &&
+		isIntegerInRange(
+			value['patchAppliedCount'],
+			0,
+			value['patchProducedCount'] as number,
+		) &&
+		isNonNegativeInteger(value['medianDurationMs']) &&
+		isNonNegativeInteger(value['averageProviderLatencyMs']) &&
+		isNonNegativeInteger(value['averageTotalTokens']) &&
+		isIntegerInRange(
+			value['estimatedCostSampleCount'],
+			0,
+			sampleSize as number,
+		) &&
+		((value['estimatedCostSampleCount'] === 0 &&
+			value['averageEstimatedCostMicroUsd'] === null) ||
+			((value['estimatedCostSampleCount'] as number) > 0 &&
+				isNonNegativeInteger(value['averageEstimatedCostMicroUsd'])))
+	)
+}
+
+function isRouteCandidateMetadata(
+	value: unknown,
+	candidateWorkerIds: Array<string>,
+): boolean {
+	return Array.isArray(value) &&
+		value.length === candidateWorkerIds.length &&
+		value.every((item, index) =>
+			isRecord(item) &&
+			hasExpectedKeys(item, ['workerId', 'score', 'reasons'], []) &&
+			item['workerId'] === candidateWorkerIds[index] &&
+			typeof item['score'] === 'number' &&
+			Number.isSafeInteger(item['score']) &&
+			Array.isArray(item['reasons']) &&
+			item['reasons'].length <= 8 &&
+			item['reasons'].every(reason =>
+				typeof reason === 'string' && reason.length <= 1_000,
+			),
+		)
 }
 
 function isWorkerAttempt(value: unknown): boolean {
@@ -629,7 +823,15 @@ function requireReportString(value: unknown): string {
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
-	return typeof value === 'number' && Number.isInteger(value) && value >= 0
+	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isIntegerInRange(
+	value: unknown,
+	minimum: number,
+	maximum: number,
+): value is number {
+	return isNonNegativeInteger(value) && value >= minimum && value <= maximum
 }
 
 function isIsoDate(value: unknown): value is string {

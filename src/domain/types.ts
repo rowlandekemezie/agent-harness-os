@@ -190,6 +190,44 @@ export type WorkerAttemptSummary = {
 	failureCode: string | null
 }
 
+export type WorkerRoutingEvidence = {
+	workerId: string
+	mode: WorkerMode
+	sampleSize: number
+	successCount: number
+	evaluationCount: number
+	evaluationPassCount: number
+	patchProducedCount: number
+	patchAppliedCount: number
+	medianDurationMs: number
+	averageProviderLatencyMs: number
+	averageTotalTokens: number
+	estimatedCostSampleCount: number
+	averageEstimatedCostMicroUsd: number | null
+}
+
+export type RoutingEvidenceTaskSource = {
+	taskId: string
+	latestEventSha256: string
+}
+
+export type RoutingEvidenceSnapshot = {
+	schemaVersion: 1
+	mode: WorkerMode
+	taskLimit: number
+	sampledTaskCount: number
+	sampledAttemptCount: number
+	sources: Array<RoutingEvidenceTaskSource>
+	workers: Array<WorkerRoutingEvidence>
+	sha256: string
+}
+
+export type WorkerRouteCandidateMetadata = {
+	workerId: string
+	score: number
+	reasons: Array<string>
+}
+
 export type WorkerRoutingMetadata = {
 	strategy: RoutingStrategy
 	requiredCapabilities: Array<WorkerCapability>
@@ -199,6 +237,9 @@ export type WorkerRoutingMetadata = {
 	maxAttempts: number
 	fallbackEnabled: boolean
 	previousAttempts: Array<WorkerAttemptSummary>
+	evidence?: RoutingEvidenceSnapshot
+	candidates?: Array<WorkerRouteCandidateMetadata>
+	decisionSha256?: string
 }
 
 export type WorkerRunReport = {
@@ -266,7 +307,7 @@ export type TaskSummary = {
 }
 
 export type TaskEventBase = {
-	schemaVersion: 1 | 2 | 3 | 4
+	schemaVersion: 1 | 2 | 3 | 4 | 5
 	eventId: string
 	taskId: string
 	sequence: number
@@ -292,6 +333,10 @@ export type RouteSelectedEvent = TaskEventBase & {
 		strategy: RoutingStrategy
 		candidateWorkerIds: Array<string>
 		maxAttempts: number
+		evidenceSha256?: string
+		evidenceTaskCount?: number
+		evidenceAttemptCount?: number
+		decisionSha256?: string
 	}
 }
 
@@ -364,6 +409,10 @@ export type AttemptCompletedEvent = TaskEventBase & {
 		runId: string
 		status: RunStatus
 		failureCode: string | null
+		durationMs?: number
+		providerLatencyMs?: number
+		totalTokens?: number
+		estimatedCostMicroUsd?: number | null
 	}
 }
 

@@ -20,7 +20,7 @@ Maintain a secure, model-agnostic Agent OS for bounded coding workers. Treat fil
 
 - Codex is the orchestrator; workers are bounded execution.
 - Provider adapters must depend on the internal provider contract, never leak provider-specific response shapes into the execution kernel.
-- Routing must remain deterministic, inspectable, and based only on explicit worker metadata and task policy.
+- Routing must remain deterministic and inspectable. Validated historical evidence may reorder policy-eligible workers, but it must never expand capabilities or override task policy.
 - Every fallback attempt must start in a fresh worktree at the same verified base commit.
 - Never fall back after policy, repository-safety, deterministic-validation, or cancellation failures.
 - `delegate_to_worker` must never modify the caller's checkout.

@@ -6,6 +6,7 @@ export class ProviderTelemetry {
 	private inputTokens = 0
 	private outputTokens = 0
 	private totalLatencyMs = 0
+	private completeTokenUsage = true
 	private readonly pricing: WorkerPricing
 
 	constructor(pricing: WorkerPricing) {
@@ -17,15 +18,22 @@ export class ProviderTelemetry {
 		outputTokens?: number
 		durationMs: number
 	}): void {
+		const inputTokens = normalizeTokenCount(input.inputTokens)
+		const outputTokens = normalizeTokenCount(input.outputTokens)
 		this.requestCount += 1
-		this.inputTokens += normalizeTokenCount(input.inputTokens)
-		this.outputTokens += normalizeTokenCount(input.outputTokens)
+		this.inputTokens += inputTokens ?? 0
+		this.outputTokens += outputTokens ?? 0
 		this.totalLatencyMs += Math.max(0, Math.round(input.durationMs))
+		if (inputTokens === null || outputTokens === null) {
+			this.completeTokenUsage = false
+		}
 	}
 
 	getUsage(): ProviderUsage {
 		const totalTokens = this.inputTokens + this.outputTokens
 		const estimatedCostUsd =
+			this.requestCount === 0 ||
+			!this.completeTokenUsage ||
 			this.pricing.inputPerMillion === null ||
 			this.pricing.outputPerMillion === null
 				? null
@@ -45,6 +53,6 @@ export class ProviderTelemetry {
 	}
 }
 
-function normalizeTokenCount(value: number | undefined): number {
-	return Number.isSafeInteger(value) && (value ?? 0) >= 0 ? value ?? 0 : 0
+function normalizeTokenCount(value: number | undefined): number | null {
+	return Number.isSafeInteger(value) && (value ?? -1) >= 0 ? value ?? null : null
 }

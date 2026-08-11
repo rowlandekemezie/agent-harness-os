@@ -352,6 +352,7 @@ export class McpTools {
 			configuredWorkerCount: configuredWorkers.length,
 			defaultWorkerId: this.config.routing.defaultWorkerId,
 			defaultRoutingStrategy: this.config.routing.defaultStrategy,
+			routingEvidenceTaskLimit: this.config.routing.evidenceTaskLimit,
 			organizationPolicyConfigured:
 				this.config.policy.organizationPolicyPath !== null,
 			repositoryPolicyPath: '.agent-os/policy.json',
@@ -730,6 +731,8 @@ function serializeRoute(route: WorkerRoute): Record<string, unknown> {
 		requiredCapabilities: route.requiredCapabilities,
 		maxAttempts: route.maxAttempts,
 		fallbackEnabled: route.fallbackEnabled,
+		decisionSha256: route.decisionSha256,
+		evidence: route.evidence ?? null,
 		candidates: route.candidates.map(candidate => ({
 			workerId: candidate.worker.id,
 			profile: candidate.worker.profile,

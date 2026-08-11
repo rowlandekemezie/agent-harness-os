@@ -165,6 +165,10 @@ The current coding runtime requires `tool-calling`. A task's mode is automatical
 
 Pricing and tiers are configuration, not live market data. Update them when provider terms change.
 
+Delegation supplements these assertions with bounded same-mode task history.
+Measured evidence never makes an ineligible worker eligible. See
+[Historical routing evidence](routing-evidence.md).
+
 ## Strategies
 
 - `balanced`: combines priority, cost tier, and latency tier
@@ -172,7 +176,9 @@ Pricing and tiers are configuration, not live market data. Update them when prov
 - `latency`: strongly prefers faster latency tiers
 - `quality`: strongly prefers higher priority
 
-Sorting is deterministic. Worker ID is the final tie breaker.
+Sorting is deterministic. Historical completion/evaluation performance and,
+when relevant, measured cost or duration adjust the declared score with bounded
+confidence. Worker ID is the final tie breaker.
 
 ## Fallback
 

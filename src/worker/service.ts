@@ -46,6 +46,7 @@ import { acquireRepositoryLease } from '../lib/repository-lock.js'
 import { Semaphore } from '../lib/semaphore.js'
 import { WorkerRegistry } from '../provider/registry.js'
 import type { WorkerRoute } from '../provider/router.js'
+import { RoutingEvidenceStore } from '../provider/routing-evidence.js'
 import { CommandPolicy } from '../security/command-policy.js'
 import { PathPolicy } from '../security/path-policy.js'
 import { runAgentLoop } from './agent-loop.js'
@@ -97,6 +98,7 @@ export class WorkerService {
 	private readonly worktreeManager: WorktreeManager
 	private readonly artifactStore: ArtifactStore
 	private readonly taskJournal: TaskJournal
+	private readonly routingEvidenceStore: RoutingEvidenceStore
 	private readonly redactor: Redactor
 	private readonly evaluators: Array<Evaluator>
 	private readonly workerRegistry: WorkerRegistry
@@ -117,6 +119,7 @@ export class WorkerService {
 		)
 		this.artifactStore = new ArtifactStore(this.redactor)
 		this.taskJournal = new TaskJournal(this.redactor)
+		this.routingEvidenceStore = new RoutingEvidenceStore(this.taskJournal)
 		this.evaluators = [
 			new DeterministicEvaluator(),
 			...(dependencies.evaluators ?? []),
@@ -157,9 +160,18 @@ export class WorkerService {
 				this.assertTaskContract(resolvedTask)
 				this.assertPolicySafeToPersist(resolvedTask)
 				const deadlineMs = Date.now() + resolvedTask.timeoutSeconds * 1_000
+				const routingEvidence = await this.routingEvidenceStore.collect({
+					artifactRoot,
+					repositoryPath,
+					mode: resolvedTask.mode,
+					workerIds: this.config.workers.map(worker => worker.id),
+					taskLimit: this.config.routing.evidenceTaskLimit,
+					signal: createDeadlineSignal(externalSignal, deadlineMs),
+				})
 				const route = this.workerRegistry.route(
 					resolvedTask.mode,
 					resolvedTask.routing,
+					routingEvidence,
 				)
 				const taskSummary = await this.taskJournal.create({
 					artifactRoot,
@@ -177,6 +189,10 @@ export class WorkerService {
 							candidate => candidate.worker.id,
 						),
 						maxAttempts: route.maxAttempts,
+						evidenceSha256: routingEvidence.sha256,
+						evidenceTaskCount: routingEvidence.sampledTaskCount,
+						evidenceAttemptCount: routingEvidence.sampledAttemptCount,
+						decisionSha256: route.decisionSha256,
 					},
 				})
 				let lastReport: WorkerRunReport | null = null
@@ -512,6 +528,10 @@ export class WorkerService {
 				changedFileCount: report.changedFiles.length,
 				workerId,
 				policySha256: report.policy?.digest ?? null,
+				routingEvidenceSha256:
+					report.routing?.evidence?.sha256 ?? null,
+				routeDecisionSha256:
+					report.routing?.decisionSha256 ?? null,
 				evaluation: report.schemaVersion === 3 && report.evaluation !== undefined
 					? {
 						evaluatorIds: report.evaluation.results.map(
@@ -1037,6 +1057,15 @@ export class WorkerService {
 					maxAttempts: context.route.maxAttempts,
 					fallbackEnabled: context.route.fallbackEnabled,
 					previousAttempts: [...context.previousAttempts],
+					...(context.route.evidence === undefined
+						? {}
+						: { evidence: context.route.evidence }),
+					candidates: context.route.candidates.map(candidate => ({
+						workerId: candidate.worker.id,
+						score: candidate.score,
+						reasons: [...candidate.reasons],
+					})),
+					decisionSha256: context.route.decisionSha256,
 				},
 			}
 
@@ -1054,6 +1083,12 @@ export class WorkerService {
 					runId: persistedReport.runId,
 					status: persistedReport.status,
 					failureCode: persistedReport.failureCode ?? null,
+					durationMs: persistedReport.durationMs,
+					providerLatencyMs: usage.totalLatencyMs,
+					totalTokens: usage.totalTokens,
+					estimatedCostMicroUsd: toEstimatedCostMicroUsd(
+						usage.estimatedCostUsd,
+					),
 				},
 			}, publicationSignal)
 			clearTimeout(timeout)
@@ -1599,4 +1634,12 @@ function getProviderUsage(provider: WorkerProvider): ProviderUsage {
 		totalLatencyMs: 0,
 		estimatedCostUsd: null,
 	}
+}
+
+function toEstimatedCostMicroUsd(value: number | null): number | null {
+	if (value === null) {
+		return null
+	}
+	const microUsd = Math.round(value * 1_000_000)
+	return Number.isSafeInteger(microUsd) && microUsd >= 0 ? microUsd : null
 }

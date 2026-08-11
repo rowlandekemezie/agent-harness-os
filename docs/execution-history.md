@@ -54,7 +54,7 @@ existing private permissions and integrity checks.
 
 `EvaluationCompleted` records evaluator IDs, the aggregate outcome, the profile
 evaluation policy, and failed or unknown dimension IDs. Detailed summaries and
-evidence remain in the run report. Event-schema-version-3 and version-4 attempts require
+evidence remain in the run report. Event-schema-version-3 through version-5 attempts require
 evaluation after validation and before attempt completion, and reject a
 completed strict-profile attempt when evaluation is inconclusive. Version 1 and
 2 timelines remain readable without invented policy evidence.
@@ -62,6 +62,12 @@ completed strict-profile attempt when evaluation is inconclusive. Version 1 and
 Event schema version 4 adds the resolved policy digest and source count to
 `TaskCreated`. Policy details and individual source digests remain in the run
 report.
+
+Event schema version 5 binds the historical routing snapshot and exact routing
+decision in `RouteSelected`, and records bounded duration, provider latency,
+token, and estimated-cost measurements in `AttemptCompleted`. These fields feed
+deterministic routing; older events remain replayable but are not treated as
+measured samples.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
@@ -78,6 +84,8 @@ tasks/<taskId>/
   events/
     000000000001-<sha256>.json
     000000000002-<sha256>.json
+routing-index/<mode>/
+  <epoch-ms>-<taskId>-<sha256>.json
 ```
 
 Event files are private, individually bounded, strictly sequenced, named with
@@ -101,6 +109,14 @@ Summaries are projected from the validated event chain. They are not stored as
 a second mutable source of truth. One timeline is bounded to 10,000 events and
 8 MiB. Task listing is bounded to 10,000 directory entries, 25,000 events, and 8 MiB of
 event bytes per request.
+
+Event-schema-version-5 tasks also publish a small immutable routing-index entry
+after `TaskCreated` becomes visible. Evidence reads sort those names newest
+first, validate each entry against the task's ready marker and event chain, and
+read at most the configured sample window. The index avoids reparsing all
+retained timelines before each delegation. Aggregate event/byte bounds may
+shorten a valid sample window; they do not make older unrelated timelines block
+routing.
 
 The digest chain detects accidental or partial mutation. It is not a signed or
 externally anchored audit ledger: a host account able to rewrite the entire

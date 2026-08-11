@@ -62,7 +62,10 @@ backing workers. Model names never drive the execution kernel.
 3. maximum cost tier
 4. maximum latency tier
 
-It then scores the remaining candidates using an explicit strategy and deterministic tie breaking. No LLM participates in routing.
+It then scores the remaining candidates using an explicit strategy, bounded
+same-mode measurements from `src/provider/routing-evidence.ts`, and deterministic
+tie breaking. Historical evidence is a read-only projection of validated task
+events; it cannot change eligibility or policy. No LLM participates in routing.
 
 Before routing, `src/policy/engine.ts` reads the repository policy from the
 verified base commit and combines it with the optional host-managed organization
