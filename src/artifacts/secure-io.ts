@@ -470,7 +470,12 @@ async function runHelper(
 		}
 
 		try {
-			child.send('commit')
+			child.send('commit', error => {
+				if (error !== null) {
+					controlState.error = error
+					child.kill('SIGTERM')
+				}
+			})
 			publicationCommitted = true
 			signal?.removeEventListener('abort', handleAbort)
 		} catch (error) {
