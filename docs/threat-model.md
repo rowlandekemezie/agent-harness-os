@@ -18,6 +18,7 @@
 - Malicious text, source code, tests, package scripts, and generated tool arguments in a repository
 - Accidental over-broad task contracts
 - A provider returning malformed, oversized, repeated, redirected, or hostile tool calls
+- An evaluator returning malformed, contradictory, oversized, or hostile evidence
 - A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
 - Incorrect or malicious worker capability, cost, latency, priority, endpoint, or pricing configuration
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
@@ -106,6 +107,16 @@
 - `git apply --check` before application
 - No automatic commit, push, merge, or deployment
 
+### Evaluation
+
+- The mandatory deterministic evaluator consumes only harness-captured evidence
+- Worker assertions about tests or correctness never become evidence
+- Optional reviewers add results but cannot replace deterministic evaluation
+- Evaluator IDs are unique and execution order is stable
+- Exact schemas, bounded text, dimensions, statuses, and aggregate outcomes are validated
+- Failed evaluation blocks patch application and never enables fallback
+- Evaluation text is redacted before persistence
+
 ### Codex CLI worker
 
 - ChatGPT authentication is the default required auth mode; API-key-backed Codex use requires explicit `authMode: any` opt-in
@@ -144,6 +155,7 @@
 - A user can intentionally supply a broad allowlist, enable plaintext provider transport, enable local execution, permit validation networking, disable image pinning, or configure a dangerous image.
 - Patches may contain proprietary source code or inline secrets from otherwise allowed paths. Secure the host account and artifact volume, and configure retention.
 - Task-event digests detect partial or accidental mutation but are not signed or externally anchored; a compromised host account can rewrite an entire chain.
+- Deterministic evaluation proves only the evidence it was given. Missing criterion-specific checks and warning baselines remain explicitly inconclusive.
 - An external editor or process can still race the final patch application between the last precondition check and the operating-system write. Repeated checks narrow but cannot eliminate that host-level race.
 
 ## Out of scope

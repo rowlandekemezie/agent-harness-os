@@ -10,6 +10,7 @@ import type {
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
+import { isEvaluationSummary } from '../evaluation/schema.js'
 import {
 	createPrivateDirectory,
 	ensurePrivateDirectory,
@@ -18,7 +19,7 @@ import {
 } from './secure-io.js'
 
 const maxReportBytes = 4_194_304
-const maxPatchBytes = 20_000_000
+export const maxArtifactPatchBytes = 20_000_000
 
 export type PersistRunInput = {
 	artifactRoot: string
@@ -53,10 +54,10 @@ export class ArtifactStore {
 		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
 
 		if (input.patch !== '') {
-			if (Buffer.byteLength(input.patch, 'utf8') > maxPatchBytes) {
+			if (Buffer.byteLength(input.patch, 'utf8') > maxArtifactPatchBytes) {
 				throw new HarnessError(
 					'ARTIFACT_FILE_TOO_LARGE',
-					`Worker patch exceeds the ${maxPatchBytes}-byte artifact limit`,
+					`Worker patch exceeds the ${maxArtifactPatchBytes}-byte artifact limit`,
 				)
 			}
 
@@ -163,7 +164,7 @@ export class ArtifactStore {
 		return await readBoundedRegularFile(
 			artifactRoot,
 			expectedPatchPath,
-			maxPatchBytes,
+			maxArtifactPatchBytes,
 		)
 	}
 }
@@ -188,6 +189,19 @@ function redactReport(
 		})),
 		policyViolations: report.policyViolations.map(value => redactor.redact(value)),
 		warnings: report.warnings.map(value => redactor.redact(value)),
+		...(report.evaluation === undefined
+			? {}
+			: { evaluation: {
+				...report.evaluation,
+				results: report.evaluation.results.map(result => ({
+					...result,
+					dimensions: result.dimensions.map(dimension => ({
+						...dimension,
+						summary: redactor.redact(dimension.summary),
+						evidence: dimension.evidence.map(value => redactor.redact(value)),
+					})),
+				})),
+			} }),
 		provider: {
 			...report.provider,
 			baseUrl: redactor.redact(report.provider.baseUrl),
@@ -244,14 +258,22 @@ function validateReport(
 
 	if (
 		runId !== expectedRunId ||
-		(schemaVersion !== 1 && schemaVersion !== 2) ||
+		(schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) ||
 		!hasExpectedKeys(
 			value,
-			schemaVersion === 2 ? [...requiredKeys, 'taskId'] : requiredKeys,
+			schemaVersion === 1
+				? requiredKeys
+				: schemaVersion === 2
+					? [...requiredKeys, 'taskId']
+					: [...requiredKeys, 'taskId', 'evaluation'],
 			['failureCode', 'routing'],
 		) ||
-		(schemaVersion === 1 && value['taskId'] !== undefined) ||
-		(schemaVersion === 2 && !isUuid(value['taskId'])) ||
+		(schemaVersion === 1 &&
+			(value['taskId'] !== undefined || value['evaluation'] !== undefined)) ||
+		(schemaVersion === 2 &&
+			(!isUuid(value['taskId']) || value['evaluation'] !== undefined)) ||
+		(schemaVersion === 3 &&
+			(!isUuid(value['taskId']) || !isEvaluationSummary(value['evaluation']))) ||
 		!isRunStatus(value['status']) ||
 		!isWorkerMode(value['mode']) ||
 		requireReportString(value['reportPath']) !== expectedPath ||

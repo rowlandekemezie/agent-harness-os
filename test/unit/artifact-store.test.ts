@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { ArtifactStore } from '../../src/artifacts/store.js'
 import { Redactor } from '../../src/lib/redaction.js'
-import type { WorkerRunReport } from '../../src/domain/types.js'
+import type { EvaluationSummary, WorkerRunReport } from '../../src/domain/types.js'
 
 
 function createReport(runId: string): WorkerRunReport {
@@ -31,6 +31,35 @@ function createReport(runId: string): WorkerRunReport {
 		warnings: [],
 		provider: { baseUrl: 'http://provider', model: 'qwen', requestCount: 1 },
 	}
+}
+
+function createEvaluationSummary(secret = 'deterministic evidence'): EvaluationSummary {
+	const evaluatedAt = new Date(2).toISOString()
+	return {
+		schemaVersion: 1,
+		evaluatedAt,
+		outcome: 'passed',
+		results: [{
+			schemaVersion: 1,
+			evaluatorId: 'deterministic-v1',
+			evaluatorKind: 'deterministic',
+			evaluatedAt,
+			outcome: 'passed',
+			dimensions: [{
+				id: 'worker_execution',
+				status: 'passed',
+				summary: secret,
+				evidence: [secret],
+			}],
+		}],
+	}
+}
+
+function hasHarnessCode(code: string): (error: unknown) => boolean {
+	return error => typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		error.code === code
 }
 
 test('persists an exact patch while redacting the transcript', async function () {
@@ -271,6 +300,58 @@ test('requires a task ID on version 2 run reports', async function () {
 			'code' in error &&
 			error.code === 'INVALID_RUN_REPORT',
 	)
+})
+
+test('requires a valid evaluation summary on version 3 run reports', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-'))
+	const report: WorkerRunReport = {
+		...createReport('12121212-1212-4121-8121-121212121212'),
+		schemaVersion: 3,
+		taskId: '34343434-3434-4343-8343-343434343434',
+		evaluation: createEvaluationSummary(),
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		evaluation?: { unexpected?: boolean }
+	}
+	if (value.evaluation === undefined) {
+		throw new Error('Persisted report did not include evaluation evidence')
+	}
+	value.evaluation.unexpected = true
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+})
+
+test('redacts evaluator summaries and evidence before persistence', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-redact-'))
+	const secret = 'private-evaluator-secret'
+	const report: WorkerRunReport = {
+		...createReport('56565656-5656-4565-8565-565656565656'),
+		schemaVersion: 3,
+		taskId: '78787878-7878-4787-8787-787878787878',
+		evaluation: createEvaluationSummary(secret),
+	}
+	const store = new ArtifactStore(new Redactor({}, [secret]))
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const contents = await readFile(persisted.reportPath, 'utf8')
+
+	assert.equal(contents.includes(secret), false)
+	assert.equal(contents.includes('[REDACTED]'), true)
 })
 
 test('rejects a report whose run ID does not match its artifact directory', async function () {

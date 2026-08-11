@@ -96,7 +96,7 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(taskId, 1, null, {
+		const event = createEvent(2, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
@@ -139,6 +139,7 @@ export class TaskJournal {
 
 		const redactedInput = redactEventInput(input, this.redactor)
 		const event = createEvent(
+			current.projection.eventSchemaVersion,
 			taskId,
 			current.timeline.events.length + 1,
 			current.timeline.task.latestEventSha256,
@@ -575,13 +576,14 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
+	schemaVersion: 1 | 2,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,
 	input: TaskEventInput,
 ): TaskEvent {
 	const event = {
-		schemaVersion: 1 as const,
+		schemaVersion,
 		eventId: randomUUID(),
 		taskId,
 		sequence,

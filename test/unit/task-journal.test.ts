@@ -90,6 +90,16 @@ test('persists and projects an append-only task timeline', async function () {
 		data: { runId, outcome: 'skipped', commandCount: 0 },
 	})
 	await journal.append(artifactRoot, task.taskId, {
+		type: 'EvaluationCompleted',
+		data: {
+			runId,
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
 		type: 'AttemptCompleted',
 		data: { runId, status: 'completed', failureCode: null },
 	})
@@ -111,13 +121,14 @@ test('persists and projects an append-only task timeline', async function () {
 			'WorkerStarted',
 			'WorkerCompleted',
 			'ValidationCompleted',
+			'EvaluationCompleted',
 			'AttemptCompleted',
 			'TaskCompleted',
 		],
 	)
 	assert.deepEqual(
 		timeline.events.map(event => event.sequence),
-		[1, 2, 3, 4, 5, 6, 7],
+		[1, 2, 3, 4, 5, 6, 7, 8],
 	)
 })
 
@@ -184,6 +195,92 @@ test('rejects a re-digested event that skips the attempt lifecycle', async funct
 
 	await assert.rejects(
 		journal.timeline(artifactRoot, task.taskId),
+		hasHarnessCode('INVALID_TASK_JOURNAL'),
+	)
+})
+
+test('requires evaluation evidence before completing a version 2 attempt', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-evaluation-order-'))
+	const journal = new TaskJournal()
+	const task = await createTask(journal, artifactRoot, 'Require evaluation evidence')
+	const runId = randomUUID()
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerStarted',
+		data: { runId, workerId: 'worker-one', attemptNumber: 1 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerCompleted',
+		data: {
+			runId,
+			outcome: 'succeeded',
+			failureCode: null,
+			requestCount: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'ValidationCompleted',
+		data: { runId, outcome: 'skipped', commandCount: 0 },
+	})
+
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'AttemptCompleted',
+			data: { runId, status: 'completed', failureCode: null },
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+})
+
+test('rejects contradictory evaluation dimension evidence', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-evaluation-data-'))
+	const journal = new TaskJournal()
+	const task = await createTask(journal, artifactRoot, 'Reject contradictory evidence')
+	const runId = randomUUID()
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerStarted',
+		data: { runId, workerId: 'worker-one', attemptNumber: 1 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerCompleted',
+		data: {
+			runId,
+			outcome: 'failed',
+			failureCode: 'PROVIDER_ERROR',
+			requestCount: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'ValidationCompleted',
+		data: { runId, outcome: 'skipped', commandCount: 0 },
+	})
+
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'EvaluationCompleted',
+			data: {
+				runId,
+				evaluatorIds: ['deterministic-v1'],
+				outcome: 'failed',
+				failedDimensions: ['worker_execution'],
+				unknownDimensions: ['worker_execution'],
+			},
+		}),
 		hasHarnessCode('INVALID_TASK_JOURNAL'),
 	)
 })
@@ -711,6 +808,16 @@ test('rejects fallback history after a policy failure', async function () {
 	await journal.append(artifactRoot, task.taskId, {
 		type: 'ValidationCompleted',
 		data: { runId: firstRunId, outcome: 'skipped', commandCount: 0 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'EvaluationCompleted',
+		data: {
+			runId: firstRunId,
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'failed',
+			failedDimensions: ['security_policy_compliance'],
+			unknownDimensions: [],
+		},
 	})
 	await journal.append(artifactRoot, task.taskId, {
 		type: 'AttemptCompleted',

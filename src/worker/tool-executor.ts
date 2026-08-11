@@ -445,6 +445,7 @@ function isPolicyError(code: string): boolean {
 	return (
 		code.includes('DENIED') ||
 		code.includes('NOT_ALLOWED') ||
+		code.endsWith('_LIMIT') ||
 		code === 'READ_ONLY_TASK'
 	)
 }

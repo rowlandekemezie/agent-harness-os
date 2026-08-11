@@ -6,6 +6,11 @@ import path from 'node:path'
 import test from 'node:test'
 import { loadConfig } from '../../src/config.js'
 import { WorkerService } from '../../src/worker/service.js'
+import type {
+	EvaluationInput,
+	EvaluationResult,
+} from '../../src/domain/types.js'
+import type { Evaluator } from '../../src/evaluation/evaluator.js'
 import { createTestRepository } from '../helpers/git.js'
 
 type ProviderFixture = {
@@ -282,6 +287,94 @@ test('does not fallback after a worker policy violation', async function () {
 		assert.equal(report.patchPath, null)
 	} finally {
 		await violating.close()
+		await fallback.close()
+	}
+})
+
+test('does not fallback after an independent evaluation failure', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-os-evaluation-'))
+	const selected = await startSuccessfulProvider()
+	const fallback = await startSuccessfulProvider()
+	const reviewer: Evaluator = {
+		id: 'failing-reviewer',
+		async evaluate(input: EvaluationInput): Promise<EvaluationResult> {
+			return {
+				schemaVersion: 1,
+				evaluatorId: this.id,
+				evaluatorKind: 'model',
+				evaluatedAt: new Date().toISOString(),
+				outcome: 'failed',
+				dimensions: [{
+					id: 'correctness',
+					status: 'failed',
+					summary: 'Independent review rejected the patch',
+					evidence: [`Run ${input.runId} requires repair`],
+				}],
+			}
+		},
+	}
+
+	try {
+		const config = loadConfig({
+			FIRST_API_KEY: 'first-secret',
+			SECOND_API_KEY: 'second-secret',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_OS_WORKERS_JSON: JSON.stringify([
+				{
+					id: 'first',
+					adapter: 'openai-compatible',
+					model: 'first-model',
+					baseUrl: selected.baseUrl,
+					apiKeyEnv: 'FIRST_API_KEY',
+					capabilities: ['implementation', 'tool-calling'],
+					priority: 100,
+					maxRetries: 0,
+				},
+				{
+					id: 'second',
+					adapter: 'openai-compatible',
+					model: 'second-model',
+					baseUrl: fallback.baseUrl,
+					apiKeyEnv: 'SECOND_API_KEY',
+					capabilities: ['implementation', 'tool-calling'],
+					priority: 50,
+					maxRetries: 0,
+				},
+			]),
+		})
+		const report = await new WorkerService(config, {
+			evaluators: [reviewer],
+		}).delegate({
+			objective: 'Create the routed implementation.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+			routing: {
+				preferredWorkerId: 'first',
+				requiredCapabilities: [],
+				strategy: 'quality',
+				maxCostTier: null,
+				maxLatencyTier: null,
+				allowFallback: true,
+				maxAttempts: 2,
+			},
+		})
+
+		assert.equal(report.status, 'failed')
+		assert.equal(report.failureCode, 'EVALUATION_FAILED')
+		assert.equal(report.routing?.attemptNumber, 1)
+		assert.equal(selected.requestCount(), 2)
+		assert.equal(fallback.requestCount(), 0)
+	} finally {
+		await selected.close()
 		await fallback.close()
 	}
 })

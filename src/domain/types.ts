@@ -55,6 +55,68 @@ export type AcceptanceCriterionResult = {
 	evidence: Array<string>
 }
 
+export type EvaluationDimensionId =
+	| 'worker_execution'
+	| 'tests'
+	| 'lint'
+	| 'typecheck'
+	| 'changed_files_scope'
+	| 'acceptance_criteria'
+	| 'patch_size'
+	| 'new_warnings'
+	| 'security_policy_compliance'
+	| 'correctness'
+	| 'maintainability'
+	| 'architecture_fit'
+	| 'test_quality'
+
+export type EvaluationDimensionStatus =
+	| 'passed'
+	| 'failed'
+	| 'unknown'
+	| 'not_applicable'
+
+export type EvaluationDimensionResult = {
+	id: EvaluationDimensionId
+	status: EvaluationDimensionStatus
+	summary: string
+	evidence: Array<string>
+}
+
+export type EvaluationOutcome = 'passed' | 'failed' | 'inconclusive'
+
+export type EvaluationResult = {
+	schemaVersion: 1
+	evaluatorId: string
+	evaluatorKind: 'deterministic' | 'model'
+	evaluatedAt: string
+	outcome: EvaluationOutcome
+	dimensions: Array<EvaluationDimensionResult>
+}
+
+export type EvaluationSummary = {
+	schemaVersion: 1
+	evaluatedAt: string
+	outcome: EvaluationOutcome
+	results: Array<EvaluationResult>
+}
+
+export type EvaluationInput = {
+	runId: string
+	mode: WorkerMode
+	runStatus: RunStatus
+	failureCode: string | null
+	requiredCommands: Array<CommandSpec>
+	commandResults: Array<CommandResult>
+	changedFiles: Array<string>
+	patchBytes: number
+	acceptanceCriteria: Array<AcceptanceCriterionResult>
+	policyViolations: Array<string>
+	warnings: Array<string>
+	maxChangedFiles: number
+	maxPatchBytes: number
+}
+
 export type CommandResult = {
 	command: string
 	args: Array<string>
@@ -110,7 +172,7 @@ export type WorkerRoutingMetadata = {
 }
 
 export type WorkerRunReport = {
-	schemaVersion: 1 | 2
+	schemaVersion: 1 | 2 | 3
 	taskId?: string
 	runId: string
 	status: RunStatus
@@ -131,6 +193,7 @@ export type WorkerRunReport = {
 	acceptanceCriteria: Array<AcceptanceCriterionResult>
 	policyViolations: Array<string>
 	warnings: Array<string>
+	evaluation?: EvaluationSummary
 	provider: {
 		workerId?: string
 		adapter?: WorkerAdapter
@@ -165,7 +228,7 @@ export type TaskSummary = {
 }
 
 export type TaskEventBase = {
-	schemaVersion: 1
+	schemaVersion: 1 | 2
 	eventId: string
 	taskId: string
 	sequence: number
@@ -243,6 +306,17 @@ export type ValidationCompletedEvent = TaskEventBase & {
 	}
 }
 
+export type EvaluationCompletedEvent = TaskEventBase & {
+	type: 'EvaluationCompleted'
+	data: {
+		runId: string
+		evaluatorIds: Array<string>
+		outcome: EvaluationOutcome
+		failedDimensions: Array<EvaluationDimensionId>
+		unknownDimensions: Array<EvaluationDimensionId>
+	}
+}
+
 export type AttemptCompletedEvent = TaskEventBase & {
 	type: 'AttemptCompleted'
 	data: {
@@ -297,6 +371,7 @@ export type TaskEvent =
 	| WorkerCompletedEvent
 	| PatchProducedEvent
 	| ValidationCompletedEvent
+	| EvaluationCompletedEvent
 	| AttemptCompletedEvent
 	| TaskCompletedEvent
 	| PatchApplicationRequestedEvent

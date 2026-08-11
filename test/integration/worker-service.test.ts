@@ -7,9 +7,16 @@ import test from 'node:test'
 import { loadConfig } from '../../src/config.js'
 import { TaskJournal } from '../../src/artifacts/task-journal.js'
 import { WorkerService } from '../../src/worker/service.js'
+import type {
+	EvaluationInput,
+	EvaluationResult,
+} from '../../src/domain/types.js'
+import type { Evaluator } from '../../src/evaluation/evaluator.js'
 import { createTestRepository, runGit } from '../helpers/git.js'
 
-async function startFakeProvider(): Promise<{
+async function startFakeProvider(
+	paths: Array<string> = ['src/generated.ts'],
+): Promise<{
 	baseUrl: string
 	close(): Promise<void>
 }> {
@@ -26,17 +33,17 @@ async function startFakeProvider(): Promise<{
 						message: {
 							role: 'assistant',
 							content: null,
-							tool_calls: [{
-								id: 'call-write',
+							tool_calls: paths.map((filePath, index) => ({
+								id: `call-write-${index}`,
 								type: 'function',
 								function: {
 									name: 'write_file',
 									arguments: JSON.stringify({
-										path: 'src/generated.ts',
+										path: filePath,
 										content: "export function generated(): string {\n\treturn 'ready'\n}\n",
 									}),
 								},
-							}],
+							})),
 						},
 					}],
 				}))
@@ -103,7 +110,8 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		})
 
 		assert.equal(report.status, 'completed')
-		assert.equal(report.schemaVersion, 2)
+		assert.equal(report.schemaVersion, 3)
+		assert.equal(report.evaluation?.outcome, 'inconclusive')
 		assert.ok(report.taskId)
 		assert.deepEqual(report.changedFiles, ['src/generated.ts'])
 		assert.ok(report.patchPath)
@@ -148,6 +156,7 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 				'WorkerCompleted',
 				'PatchProduced',
 				'ValidationCompleted',
+				'EvaluationCompleted',
 				'AttemptCompleted',
 				'TaskCompleted',
 				'PatchApplicationRequested',
@@ -158,6 +167,137 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 				'PatchApproved',
 				'PatchApplied',
 			],
+		)
+	} finally {
+		await provider.close()
+	}
+})
+
+test('combines mandatory deterministic evidence with an independent reviewer', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-reviewer-'))
+	const provider = await startFakeProvider()
+	const reviewer: Evaluator = {
+		id: 'independent-reviewer',
+		async evaluate(input: EvaluationInput): Promise<EvaluationResult> {
+			return {
+				schemaVersion: 1,
+				evaluatorId: this.id,
+				evaluatorKind: 'model',
+				evaluatedAt: new Date().toISOString(),
+				outcome: 'failed',
+				dimensions: [{
+					id: 'correctness',
+					status: 'failed',
+					summary: 'Independent review found a defect',
+					evidence: [`Reviewed harness run ${input.runId}`],
+				}],
+			}
+		},
+	}
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_HARNESS_EXECUTION_BACKEND: 'local',
+			AGENT_HARNESS_ALLOW_UNSANDBOXED_LOCAL: 'false',
+		})
+		const service = new WorkerService(config, { evaluators: [reviewer] })
+		const report = await service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(report.status, 'failed')
+		assert.equal(report.failureCode, 'EVALUATION_FAILED')
+		assert.equal(report.evaluation?.outcome, 'failed')
+		assert.deepEqual(
+			report.evaluation?.results.map(result => result.evaluatorId),
+			['deterministic-v1', 'independent-reviewer'],
+		)
+		assert.ok(report.patchPath)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('RUN_NOT_APPLICABLE'),
+		)
+		assert.ok(report.taskId)
+		const timeline = await service.getTaskTimeline(repositoryPath, report.taskId)
+		const event = timeline.events.find(candidate =>
+			candidate.type === 'EvaluationCompleted'
+		)
+		assert.deepEqual(
+			event?.type === 'EvaluationCompleted' ? event.data.evaluatorIds : [],
+			['deterministic-v1', 'independent-reviewer'],
+		)
+	} finally {
+		await provider.close()
+	}
+})
+
+test('records changed-file limits as evaluation evidence and prevents patch persistence', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-scope-limit-'))
+	const provider = await startFakeProvider([
+		'src/generated.ts',
+		'src/extra.ts',
+	])
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+			AGENT_HARNESS_EXECUTION_BACKEND: 'local',
+			AGENT_HARNESS_ALLOW_UNSANDBOXED_LOCAL: 'false',
+			AGENT_HARNESS_MAX_CHANGED_FILES: '1',
+		})
+		const service = new WorkerService(config)
+		const report = await service.delegate({
+			objective: 'Create two generated TypeScript files.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		})
+
+		assert.equal(report.status, 'policy_violation')
+		assert.equal(report.failureCode, 'WORKER_POLICY_VIOLATION')
+		assert.deepEqual(report.changedFiles, ['src/extra.ts', 'src/generated.ts'])
+		assert.equal(report.patchPath, null)
+		assert.ok(report.policyViolations.some(violation =>
+			violation.startsWith('CHANGED_FILE_LIMIT:'),
+		))
+		const deterministic = report.evaluation?.results.find(result =>
+			result.evaluatorId === 'deterministic-v1'
+		)
+		assert.equal(
+			deterministic?.dimensions.find(dimension =>
+				dimension.id === 'changed_files_scope'
+			)?.status,
+			'failed',
+		)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('RUN_NOT_APPLICABLE'),
 		)
 	} finally {
 		await provider.close()

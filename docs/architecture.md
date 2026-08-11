@@ -23,6 +23,10 @@ Secure execution kernel
   detached worktree, bounded file tools, path policy, validation, artifacts
         |
         v
+Evaluation
+  mandatory deterministic evidence, optional independent reviewers
+        |
+        v
 Approval-separated patch application
 ```
 
@@ -72,7 +76,16 @@ Each attempt receives:
 - shared resource and context limits
 - an attempt-specific provider instance
 
-The kernel captures the candidate patch before deterministic validation. It persists the patch, transcript, selected worker, route, prior attempts, provider usage, and validation evidence.
+The kernel captures the candidate patch before deterministic validation. It persists the patch, transcript, selected worker, route, prior attempts, provider usage, validation evidence, and evaluation results.
+
+### Evaluation
+
+`src/evaluation/evaluator.ts` defines the provider-neutral evaluator contract.
+`src/evaluation/deterministic.ts` converts only harness-captured status, command,
+patch, changed-file, criterion, warning, and policy evidence into explicit
+dimensions. `WorkerService` always runs it before optional injected reviewers,
+validates every result, and aggregates outcomes without consulting the router.
+See [Evaluation](evaluation.md).
 
 ### Task journal
 

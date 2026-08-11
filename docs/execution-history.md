@@ -34,6 +34,7 @@ The harness records these versioned events:
 - `WorkerCompleted`
 - `PatchProduced`
 - `ValidationCompleted`
+- `EvaluationCompleted`
 - `AttemptCompleted`
 - `TaskCompleted`
 - `PatchApplicationRequested`
@@ -46,6 +47,12 @@ iteration, outcome, duration, and input/output byte counts. It never records too
 arguments or results. `PatchProduced` records the patch digest, byte count, and
 changed-file count. Exact patch bytes remain only in `changes.patch` with the
 existing private permissions and integrity checks.
+
+`EvaluationCompleted` records evaluator IDs, the aggregate outcome, and failed
+or unknown dimension IDs. Detailed summaries and evidence remain in the run
+report. New event-schema-version-2 attempts require evaluation after validation
+and before attempt completion. Version 1 timelines remain readable without
+invented evaluation events.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
@@ -100,9 +107,10 @@ artifact root remains outside the threat model.
 incomplete timeline may represent an active operation or a process that stopped
 before writing its terminal event; the journal does not guess between them.
 
-Historical schema-version-1 run reports remain readable through
-`get_worker_run` and applicable through `apply_worker_patch`. They do not have a
-task ID, so the harness cannot synthesize a task timeline for them.
+Historical schema-version-1 and version-2 run reports remain readable through
+`get_worker_run` and applicable through `apply_worker_patch`. They do not have
+mandatory evaluation evidence. Version 1 reports do not have a task ID, so the
+harness cannot synthesize a task timeline for them.
 
 ## Replay semantics
 
