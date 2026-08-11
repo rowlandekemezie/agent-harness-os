@@ -275,6 +275,11 @@ function validateReport(
 		(schemaVersion === 3 &&
 			(!isUuid(value['taskId']) || !isEvaluationSummary(value['evaluation']))) ||
 		!isRunStatus(value['status']) ||
+		!isReportEvaluationConsistent(
+			schemaVersion,
+			value['status'],
+			value['evaluation'],
+		) ||
 		!isWorkerMode(value['mode']) ||
 		requireReportString(value['reportPath']) !== expectedPath ||
 		!isIsoDate(value['startedAt']) ||
@@ -304,6 +309,20 @@ function validateReport(
 	}
 
 	return value as WorkerRunReport
+}
+
+function isReportEvaluationConsistent(
+	schemaVersion: unknown,
+	status: unknown,
+	evaluation: unknown,
+): boolean {
+	if (schemaVersion !== 3) {
+		return true
+	}
+	if (!isRunStatus(status) || !isEvaluationSummary(evaluation)) {
+		return false
+	}
+	return (status === 'completed') === (evaluation.outcome !== 'failed')
 }
 
 function isUuid(value: unknown): value is string {

@@ -285,6 +285,56 @@ test('rejects contradictory evaluation dimension evidence', async function () {
 	)
 })
 
+test('rejects a failed attempt paired with a non-failed evaluation', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-evaluation-status-'))
+	const journal = new TaskJournal()
+	const task = await createTask(journal, artifactRoot, 'Match evaluation to status')
+	const runId = randomUUID()
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerStarted',
+		data: { runId, workerId: 'worker-one', attemptNumber: 1 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerCompleted',
+		data: {
+			runId,
+			outcome: 'failed',
+			failureCode: 'PROVIDER_ERROR',
+			requestCount: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'ValidationCompleted',
+		data: { runId, outcome: 'skipped', commandCount: 0 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'EvaluationCompleted',
+		data: {
+			runId,
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	})
+
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'AttemptCompleted',
+			data: { runId, status: 'failed', failureCode: 'PROVIDER_ERROR' },
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+})
+
 test('ignores unpublished staging entries during active reads', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-pending-'))
 	const journal = new TaskJournal()

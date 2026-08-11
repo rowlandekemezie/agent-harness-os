@@ -332,6 +332,35 @@ test('requires a valid evaluation summary on version 3 run reports', async funct
 	)
 })
 
+test('rejects a completed version 3 report with a failed evaluation', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-status-'))
+	const report: WorkerRunReport = {
+		...createReport('90909090-9090-4909-8909-909090909090'),
+		schemaVersion: 3,
+		taskId: 'abababab-abab-4bab-8bab-abababababab',
+		evaluation: createEvaluationSummary(),
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		evaluation: EvaluationSummary
+	}
+	value.evaluation.outcome = 'failed'
+	value.evaluation.results[0]!.outcome = 'failed'
+	value.evaluation.results[0]!.dimensions[0]!.status = 'failed'
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+})
+
 test('redacts evaluator summaries and evidence before persistence', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-redact-'))
 	const secret = 'private-evaluator-secret'

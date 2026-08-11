@@ -449,6 +449,9 @@ export function projectTaskEvent(
 						activeAttempt.validationOutcome === 'failed' ||
 						activeAttempt.evaluationOutcome === 'failed' ||
 						event.data.failureCode !== null)) ||
+				(next.eventSchemaVersion === 2 &&
+					event.data.status !== 'completed' &&
+					activeAttempt.evaluationOutcome !== 'failed') ||
 				(event.data.status !== 'completed' && event.data.failureCode === null)
 			) {
 				throw transitionError('AttemptCompleted outcome evidence is inconsistent', appendOperation)

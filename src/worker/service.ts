@@ -704,6 +704,9 @@ export class WorkerService {
 						context.externalSignal,
 						timeoutController.signal,
 					)
+					if (status === 'policy_violation') {
+						policyViolations.push(formatPolicyViolation(error))
+					}
 					if (
 						error instanceof HarnessError &&
 						error.code === 'DOCKER_CONTAINER_CLEANUP_FAILED'

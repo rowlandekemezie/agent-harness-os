@@ -130,6 +130,19 @@ test('fails commands, scope, patch size, and security policy deterministically',
 	)
 })
 
+test('records an oversized patch even when bounded capture cannot retain its bytes', async function () {
+	const evaluation = await new DeterministicEvaluator().evaluate(evaluationInput({
+		runStatus: 'failed',
+		failureCode: 'PATCH_TOO_LARGE',
+		patchBytes: 0,
+	}))
+
+	assert.equal(
+		evaluation.dimensions.find(dimension => dimension.id === 'patch_size')?.status,
+		'failed',
+	)
+})
+
 test('keeps warnings and unverified criteria explicitly inconclusive', async function () {
 	const evaluation = await new DeterministicEvaluator().evaluate(evaluationInput({
 		acceptanceCriteria: [{

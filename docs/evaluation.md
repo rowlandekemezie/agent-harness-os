@@ -36,7 +36,7 @@ policy as other report evidence.
 | `typecheck` | Explicitly classified harness-run type-check commands |
 | `changed_files_scope` | Validated changed files, limits, and path-policy results |
 | `acceptance_criteria` | Criteria plus harness validation results |
-| `patch_size` | Captured patch bytes and artifact limit |
+| `patch_size` | Captured patch bytes, artifact limit, or bounded-capture failure |
 | `new_warnings` | Harness warnings and validation output |
 | `security_policy_compliance` | Harness-captured policy violations |
 

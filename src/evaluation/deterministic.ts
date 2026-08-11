@@ -220,6 +220,15 @@ function evaluateAcceptanceCriteria(
 }
 
 function evaluatePatchSize(input: EvaluationInput): EvaluationDimensionResult {
+	if (
+		input.failureCode === 'PATCH_TOO_LARGE' ||
+		input.failureCode === 'ARTIFACT_FILE_TOO_LARGE'
+	) {
+		return result('patch_size', 'failed', 'Patch exceeded a bounded capture limit', [
+			`Harness failure: ${input.failureCode}`,
+			'Exact patch bytes were not retained after the bounded capture failed.',
+		])
+	}
 	if (input.patchBytes === 0) {
 		return result('patch_size', 'not_applicable', 'No patch was captured', [
 			'Patch bytes: 0',
