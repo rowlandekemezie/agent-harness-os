@@ -192,6 +192,9 @@ export class WorkerService {
 					lastReport = report
 
 					if (!shouldFallback(report, route, index)) {
+						const completionSignal = report.status === 'completed'
+							? createDeadlineSignal(externalSignal, deadlineMs)
+							: undefined
 						await this.taskJournal.append(
 							artifactRoot,
 							taskSummary.taskId,
@@ -199,6 +202,7 @@ export class WorkerService {
 								type: 'TaskCompleted',
 								data: { runId: report.runId, status: report.status },
 							},
+							completionSignal,
 						)
 						return report
 					}
@@ -295,6 +299,12 @@ export class WorkerService {
 	): Promise<ApplyPatchResult> {
 		const artifactRoot = await this.getArtifactRoot(repositoryRoot)
 		const report = await this.artifactStore.loadReport(artifactRoot, runId)
+		if (report.schemaVersion !== 3) {
+			throw new HarnessError(
+				'LEGACY_RUN_NOT_APPLICABLE',
+				'Legacy run reports are readable for audit but cannot pass the evaluation-bound patch gate. Re-run the task.',
+			)
+		}
 		const history = await this.preparePatchHistory(artifactRoot, report)
 
 		try {
@@ -876,8 +886,6 @@ export class WorkerService {
 				evaluation = await evaluateInterrupted(evaluationInput)
 			}
 
-			clearTimeout(timeout)
-			timeout = null
 			validateEvaluationSummary(evaluation)
 
 			if (evaluation.outcome === 'failed' && status === 'completed') {
@@ -890,6 +898,7 @@ export class WorkerService {
 					'Patch exceeded the artifact size limit and was not persisted.',
 				)
 			}
+			const publicationSignal = status === 'completed' ? signal : undefined
 			await this.taskJournal.append(context.artifactRoot, context.taskId, {
 				type: 'EvaluationCompleted',
 				data: {
@@ -899,7 +908,8 @@ export class WorkerService {
 					failedDimensions: collectDimensionIds(evaluation, 'failed'),
 					unknownDimensions: collectDimensionIds(evaluation, 'unknown'),
 				},
-			})
+			}, publicationSignal)
+			publicationSignal?.throwIfAborted()
 
 			const completedAtMs = Date.now()
 			const usage = getProviderUsage(provider)
@@ -955,7 +965,9 @@ export class WorkerService {
 				report: initialReport,
 				patch,
 				workerTranscript: transcript,
+				...(publicationSignal === undefined ? {} : { signal: publicationSignal }),
 			})
+			publicationSignal?.throwIfAborted()
 			await this.taskJournal.append(context.artifactRoot, context.taskId, {
 				type: 'AttemptCompleted',
 				data: {
@@ -963,7 +975,9 @@ export class WorkerService {
 					status: persistedReport.status,
 					failureCode: persistedReport.failureCode ?? null,
 				},
-			})
+			}, publicationSignal)
+			clearTimeout(timeout)
+			timeout = null
 			return persistedReport
 		} finally {
 			if (timeout !== null) {
@@ -1385,6 +1399,19 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted === true) {
 		throw new DOMException('Worker delegation aborted', 'AbortError')
 	}
+}
+
+function createDeadlineSignal(
+	externalSignal: AbortSignal | undefined,
+	deadlineMs: number,
+): AbortSignal {
+	const remainingMs = deadlineMs - Date.now()
+	const timeoutSignal = remainingMs <= 0
+		? AbortSignal.abort(new DOMException('Worker deadline expired', 'TimeoutError'))
+		: AbortSignal.timeout(remainingMs)
+	return externalSignal === undefined
+		? timeoutSignal
+		: AbortSignal.any([externalSignal, timeoutSignal])
 }
 
 function shouldFallback(

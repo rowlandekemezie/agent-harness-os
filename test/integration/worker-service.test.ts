@@ -122,6 +122,52 @@ function createBlockingEvaluator(): {
 	}
 }
 
+function blockTaskEventPublication(
+	service: WorkerService,
+	eventType: Parameters<TaskJournal['append']>[2]['type'],
+): {
+	started: Promise<void>
+	aborted: Promise<void>
+	release(): void
+} {
+	const journal = (service as unknown as { taskJournal: TaskJournal }).taskJournal
+	const originalAppend = journal.append.bind(journal)
+	let markStarted: (() => void) | undefined
+	let markAborted: (() => void) | undefined
+	let release: (() => void) | undefined
+	const started = new Promise<void>(resolve => {
+		markStarted = resolve
+	})
+	const aborted = new Promise<void>(resolve => {
+		markAborted = resolve
+	})
+	const blocked = new Promise<void>(resolve => {
+		release = resolve
+	})
+	journal.append = async function (
+		artifactRoot: string,
+		taskId: string,
+		input: Parameters<TaskJournal['append']>[2],
+		signal?: AbortSignal,
+	) {
+		if (input.type === eventType) {
+			markStarted?.()
+			if (signal?.aborted === true) {
+				markAborted?.()
+			} else {
+				signal?.addEventListener('abort', () => markAborted?.(), { once: true })
+			}
+			await blocked
+		}
+		return await originalAppend(artifactRoot, taskId, input, signal)
+	}
+	return {
+		started,
+		aborted,
+		release: () => release?.(),
+	}
+}
+
 function hasHarnessCode(code: string): (error: unknown) => boolean {
 	return error => typeof error === 'object' && error !== null && 'code' in error && error.code === code
 }
@@ -219,7 +265,7 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 	}
 })
 
-test('combines mandatory deterministic evidence with an independent reviewer', async function () {
+test('binds independent-review evidence and rejects report schema downgrades', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-reviewer-'))
 	const provider = await startFakeProvider()
@@ -304,6 +350,21 @@ test('combines mandatory deterministic evidence with an independent reviewer', a
 		await assert.rejects(
 			service.applyRun(repositoryPath, report.runId),
 			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
+		)
+		const downgraded = tampered as unknown as Record<string, unknown>
+		downgraded['schemaVersion'] = 2
+		delete downgraded['evaluation']
+		await writeFile(report.reportPath, `${JSON.stringify(downgraded)}\n`)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('LEGACY_RUN_NOT_APPLICABLE'),
+		)
+		downgraded['schemaVersion'] = 1
+		delete downgraded['taskId']
+		await writeFile(report.reportPath, `${JSON.stringify(downgraded)}\n`)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('LEGACY_RUN_NOT_APPLICABLE'),
 		)
 		assert.ok(report.taskId)
 		const timeline = await service.getTaskTimeline(repositoryPath, report.taskId)
@@ -465,6 +526,170 @@ test('times out a blocked evaluator and releases the attempt', async function ()
 		assert.equal(report.evaluation?.results.length, 1)
 	} finally {
 		blocking.release()
+		await provider.close()
+	}
+})
+
+test('cancels while evaluation history publication is pending', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-publication-cancel-'))
+	const provider = await startFakeProvider()
+	let publication: ReturnType<typeof blockTaskEventPublication> | null = null
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+		})
+		const service = new WorkerService(config)
+		publication = blockTaskEventPublication(service, 'EvaluationCompleted')
+		const controller = new AbortController()
+		const operation = service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		}, controller.signal)
+
+		await publication.started
+		controller.abort()
+		await publication.aborted
+		publication.release()
+		await assert.rejects(
+			operation,
+			(error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+		)
+		const [repositoryDirectory] = await readdir(artifactRoot)
+		assert.ok(repositoryDirectory)
+		const effectiveRoot = path.join(artifactRoot, repositoryDirectory)
+		const taskIds = await readdir(path.join(effectiveRoot, 'tasks'))
+		assert.equal(taskIds.length, 1)
+		const timeline = await new TaskJournal().timeline(effectiveRoot, taskIds[0]!)
+		assert.equal(
+			timeline.events.some(event => event.type === 'EvaluationCompleted'),
+			false,
+		)
+		assert.equal(
+			(await readdir(effectiveRoot)).some(entry => /^[0-9a-f-]{36}$/i.test(entry)),
+			false,
+		)
+	} finally {
+		publication?.release()
+		await provider.close()
+	}
+})
+
+test('keeps the deadline active through evaluation history publication', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-publication-timeout-'))
+	const provider = await startFakeProvider()
+	let publication: ReturnType<typeof blockTaskEventPublication> | null = null
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+		})
+		const service = new WorkerService(config)
+		publication = blockTaskEventPublication(service, 'EvaluationCompleted')
+		const operation = service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 1,
+			allowNetwork: false,
+		})
+
+		await publication.started
+		await publication.aborted
+		publication.release()
+		await assert.rejects(
+			operation,
+			(error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+		)
+		const [repositoryDirectory] = await readdir(artifactRoot)
+		assert.ok(repositoryDirectory)
+		const rootEntries = await readdir(path.join(artifactRoot, repositoryDirectory))
+		assert.equal(rootEntries.some(entry => /^[0-9a-f-]{36}$/i.test(entry)), false)
+	} finally {
+		publication?.release()
+		await provider.close()
+	}
+})
+
+test('cancellation wins before the task completion commit', async function () {
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-harness-completion-cancel-'))
+	const provider = await startFakeProvider()
+	let publication: ReturnType<typeof blockTaskEventPublication> | null = null
+
+	try {
+		const config = loadConfig({
+			QWEN_BASE_URL: provider.baseUrl,
+			QWEN_API_KEY: 'test-api-key-123456',
+			QWEN_MODEL: 'fake-qwen',
+			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+		})
+		const service = new WorkerService(config)
+		publication = blockTaskEventPublication(service, 'TaskCompleted')
+		const controller = new AbortController()
+		const operation = service.delegate({
+			objective: 'Create a generated TypeScript function.',
+			repositoryPath,
+			mode: 'implementation',
+			allowedPaths: ['src/**'],
+			prohibitedPaths: [],
+			acceptanceCriteria: [],
+			requiredCommands: [],
+			baseRef: 'HEAD',
+			maxIterations: 4,
+			timeoutSeconds: 60,
+			allowNetwork: false,
+		}, controller.signal)
+
+		await publication.started
+		controller.abort()
+		await publication.aborted
+		publication.release()
+		await assert.rejects(
+			operation,
+			(error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+		)
+		const [repositoryDirectory] = await readdir(artifactRoot)
+		assert.ok(repositoryDirectory)
+		const effectiveRoot = path.join(artifactRoot, repositoryDirectory)
+		const [taskId] = await readdir(path.join(effectiveRoot, 'tasks'))
+		assert.ok(taskId)
+		const timeline = await new TaskJournal().timeline(effectiveRoot, taskId)
+		assert.equal(timeline.events.some(event => event.type === 'TaskCompleted'), false)
+		const started = timeline.events.find(event => event.type === 'WorkerStarted')
+		assert.equal(started?.type, 'WorkerStarted')
+		if (started?.type !== 'WorkerStarted') {
+			throw new Error('Worker run was not recorded')
+		}
+		await assert.rejects(
+			service.applyRun(repositoryPath, started.data.runId),
+			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
+		)
+	} finally {
+		publication?.release()
 		await provider.close()
 	}
 })

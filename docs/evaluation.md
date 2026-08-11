@@ -27,6 +27,8 @@ deadline. This is sufficient for an independent diff review without giving the
 reviewer repository or command authority. Evaluators must honor the supplied
 abort signal. The harness also races them against task cancellation and timeout,
 so an evaluator that ignores the signal cannot retain the worktree or lease.
+That deadline remains active through evaluation-event and report publication;
+cancellation before the final attempt commit cannot return an applicable run.
 
 Evaluator output is hostile input. Exact schemas, IDs, timestamps, dimensions,
 statuses, evidence bounds, uniqueness, and outcome consistency are validated
@@ -77,9 +79,9 @@ require `EvaluationCompleted` between validation and attempt completion.
 Version 1 journals remain replayable without synthesizing evaluation evidence.
 Patch application for a version 3 report additionally requires its evaluator
 IDs, aggregate outcome, and completed status to match the validated task event
-chain. A version 3 run also publishes `run-manifest.json`; the report cannot be
-relabeled as version 1 or 2 to bypass that binding. Legacy version 1 and 2
-reports without a manifest retain their prior degraded-history behavior.
+chain. Version 1 and 2 reports remain readable for audit, but cannot pass the
+patch-application gate. Relabeling a version 3 report as legacy therefore
+cannot bypass evaluation.
 
 Model-based dimensions such as correctness, maintainability, architecture fit,
 and test quality are reserved by the schema, but no built-in model evaluator is

@@ -131,7 +131,9 @@ export class TaskJournal {
 		artifactRoot: string,
 		taskId: string,
 		input: TaskEventInput,
+		signal?: AbortSignal,
 	): Promise<TaskEvent> {
+		signal?.throwIfAborted()
 		validateUuid(taskId, 'task ID')
 		const current = await this.readTimeline(artifactRoot, taskId)
 
@@ -166,6 +168,7 @@ export class TaskJournal {
 			taskId,
 			'events',
 		)
+		signal?.throwIfAborted()
 		await writeExclusiveRegularFile(
 			artifactRoot,
 			path.join(

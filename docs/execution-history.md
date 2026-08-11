@@ -22,8 +22,9 @@ Before adding application events, the harness proves that the report's run,
 worker, repository, base commit, patch digest, changed-file count, and terminal
 status match the journal. For version 3 reports it also proves evaluator IDs and
 outcome; missing, corrupt, or mismatched evaluation history blocks application.
-Version 1 and 2 reports retain warning-only degraded history. Failure to append
-new patch-lifecycle events after a successful link check remains a warning.
+Version 1 and 2 reports remain readable for audit but cannot pass the
+evaluation-bound patch gate. Failure to append new patch-lifecycle events after
+a successful link check remains a warning.
 
 ## Event model
 
