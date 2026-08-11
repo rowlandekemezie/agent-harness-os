@@ -102,6 +102,54 @@ test('never overwrites a destination created during publication', async function
 	)
 })
 
+test('does not publish a prepared file without the parent commit grant', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-commit-'))
+	const destination = await mkdtemp(path.join(root, 'destination-'))
+	const identity = await stat(destination, { bigint: true })
+	const temporaryName = '.publish-33333333-3333-4333-8333-333333333333-event.json'
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'publish-file',
+			identity.dev.toString(),
+			identity.ino.toString(),
+			root,
+			destination,
+			'event.json',
+			temporaryName,
+			'600',
+			'6',
+		],
+		{ cwd: destination, env: {}, stdio: ['pipe', 'pipe', 'ignore', 'ipc'] },
+	)
+	const childStdin = child.stdin
+	const childStdout = child.stdout
+	assert.ok(childStdin)
+	assert.ok(childStdout)
+	const prepared = new Promise<void>((resolve, reject) => {
+		let output = ''
+		child.once('error', reject)
+		childStdout.on('data', (chunk: Buffer) => {
+			output += chunk.toString('utf8')
+			if (output.split('\n').includes('prepared')) {
+				resolve()
+			}
+		})
+	})
+	childStdin.end('secret')
+	await prepared
+	child.disconnect()
+	const exitCode = await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('exit', resolve)
+	})
+
+	assert.notEqual(exitCode, 0)
+	await assert.rejects(readFile(path.join(destination, 'event.json')))
+	await assert.rejects(readFile(path.join(destination, temporaryName)))
+})
+
 test('handles large exclusive-write collisions without crashing', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-epipe-'))
 	const filePath = path.join(root, 'report.json')

@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import type {
+	EvaluationOutcome,
 	TaskEvent,
 	TaskEventInput,
 	TaskListQuery,
@@ -58,6 +59,10 @@ export type RunHistoryLink = {
 	patchSha256: string
 	changedFileCount: number
 	workerId: string
+	evaluation: {
+		evaluatorIds: Array<string>
+		outcome: EvaluationOutcome
+	} | null
 }
 
 type TimelineReadResult = {
@@ -96,7 +101,7 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(taskId, 1, null, {
+		const event = createEvent(2, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
@@ -126,7 +131,9 @@ export class TaskJournal {
 		artifactRoot: string,
 		taskId: string,
 		input: TaskEventInput,
+		signal?: AbortSignal,
 	): Promise<TaskEvent> {
+		signal?.throwIfAborted()
 		validateUuid(taskId, 'task ID')
 		const current = await this.readTimeline(artifactRoot, taskId)
 
@@ -139,6 +146,7 @@ export class TaskJournal {
 
 		const redactedInput = redactEventInput(input, this.redactor)
 		const event = createEvent(
+			current.projection.eventSchemaVersion,
 			taskId,
 			current.timeline.events.length + 1,
 			current.timeline.task.latestEventSha256,
@@ -160,6 +168,7 @@ export class TaskJournal {
 			taskId,
 			'events',
 		)
+		signal?.throwIfAborted()
 		await writeExclusiveRegularFile(
 			artifactRoot,
 			path.join(
@@ -167,6 +176,8 @@ export class TaskJournal {
 				eventFileName(event.sequence, digest(serializedEvent)),
 			),
 			serializedEvent,
+			0o600,
+			signal,
 		)
 		return event
 	}
@@ -206,6 +217,11 @@ export class TaskJournal {
 		const attempt = timeline.events.find(
 			event => event.type === 'AttemptCompleted' && event.data.runId === input.runId,
 		)
+		const evaluation = timeline.events.find(
+			event =>
+				event.type === 'EvaluationCompleted' &&
+				event.data.runId === input.runId,
+		)
 		const completed = timeline.events.find(event => event.type === 'TaskCompleted')
 
 		return (
@@ -219,6 +235,13 @@ export class TaskJournal {
 			produced.data.changedFileCount === input.changedFileCount &&
 			attempt?.type === 'AttemptCompleted' &&
 			attempt.data.status === input.status &&
+			(input.evaluation === null ||
+				(evaluation?.type === 'EvaluationCompleted' &&
+					evaluation.data.outcome === input.evaluation.outcome &&
+					arraysEqual(
+						evaluation.data.evaluatorIds,
+						input.evaluation.evaluatorIds,
+					))) &&
 			completed?.type === 'TaskCompleted' &&
 			completed.data.runId === input.runId &&
 			completed.data.status === input.status
@@ -575,13 +598,14 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
+	schemaVersion: 1 | 2,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,
 	input: TaskEventInput,
 ): TaskEvent {
 	const event = {
-		schemaVersion: 1 as const,
+		schemaVersion,
 		eventId: randomUUID(),
 		taskId,
 		sequence,
@@ -686,6 +710,11 @@ function validateUuid(value: string, description: string): void {
 
 function invalidJournal(message: string): HarnessError {
 	return new HarnessError('INVALID_TASK_JOURNAL', message)
+}
+
+function arraysEqual(left: Array<string>, right: Array<string>): boolean {
+	return left.length === right.length &&
+		left.every((value, index) => value === right[index])
 }
 
 function traversalLimit(message: string): HarnessError {

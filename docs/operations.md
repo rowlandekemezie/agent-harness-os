@@ -73,7 +73,19 @@ Run artifacts are stored outside repositories under the user-private state direc
 - `changes.patch`
 - `worker-transcript.txt`
 
-Reports include selected-worker metadata, route candidates, prior attempts, usage, validation results, and warnings. Protect and expire artifacts according to source-code sensitivity. Patches are intentionally byte-faithful and may contain secrets that already existed in delegated source paths.
+Reports include selected-worker metadata, route candidates, prior attempts,
+usage, validation results, evaluation dimensions, and warnings. `failed`
+evaluation dimensions block application. `unknown` dimensions make evaluation
+inconclusive and require operator review; they are not claims of success. Protect
+and expire artifacts according to source-code sensitivity. Patches are
+intentionally byte-faithful and may contain secrets that already existed in
+delegated source paths.
+
+Version 3 application requires report evaluation metadata to match the
+validated task timeline. Treat `EVALUATION_HISTORY_INVALID` and
+`EVALUATION_HISTORY_MISMATCH` as fail-closed integrity incidents; do not repair
+one artifact in isolation. Version 1 and 2 reports remain readable for audit
+but cannot be applied; rerun the task to produce evaluation-bound evidence.
 
 Task journals live under `tasks/<taskId>/events/`. Use `list_tasks` for bounded
 discovery and `get_task_timeline` for the validated event chain. An

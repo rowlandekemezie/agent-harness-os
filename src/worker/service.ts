@@ -2,6 +2,9 @@ import path from 'node:path'
 import type {
 	AcceptanceCriterionResult,
 	CommandResult,
+	EvaluationInput,
+	EvaluationResult,
+	EvaluationSummary,
 	ProviderUsage,
 	RunStatus,
 	TaskListQuery,
@@ -19,7 +22,11 @@ import {
 	getWorkerSecrets,
 	resolveArtifactRoot,
 } from '../config.js'
-import { ArtifactStore, sha256 } from '../artifacts/store.js'
+import {
+	ArtifactStore,
+	maxArtifactPatchBytes,
+	sha256,
+} from '../artifacts/store.js'
 import { TaskJournal } from '../artifacts/task-journal.js'
 import {
 	applyPatch,
@@ -44,6 +51,12 @@ import { PathPolicy } from '../security/path-policy.js'
 import { runAgentLoop } from './agent-loop.js'
 import { createCommandRunner } from './command-runner.js'
 import { WorkerToolExecutor } from './tool-executor.js'
+import { DeterministicEvaluator } from '../evaluation/deterministic.js'
+import type { Evaluator } from '../evaluation/evaluator.js'
+import {
+	validateEvaluationResult,
+	validateEvaluationSummary,
+} from '../evaluation/schema.js'
 
 export type ApplyPatchResult = {
 	runId: string
@@ -70,17 +83,25 @@ type AttemptContext = {
 	externalSignal: AbortSignal | undefined
 }
 
+export type WorkerServiceDependencies = {
+	evaluators?: Array<Evaluator>
+}
+
 export class WorkerService {
 	private readonly config: HarnessConfig
 	private readonly logger: Logger
 	private readonly worktreeManager: WorktreeManager
 	private readonly artifactStore: ArtifactStore
 	private readonly taskJournal: TaskJournal
+	private readonly evaluators: Array<Evaluator>
 	private readonly workerRegistry: WorkerRegistry
 	private readonly semaphore: Semaphore
 	private readonly activeRepositories = new Set<string>()
 
-	constructor(config: HarnessConfig) {
+	constructor(
+		config: HarnessConfig,
+		dependencies: WorkerServiceDependencies = {},
+	) {
 		this.config = config
 		this.logger = new Logger('worker-service', config.logLevel)
 		this.worktreeManager = new WorktreeManager(this.logger)
@@ -91,6 +112,11 @@ export class WorkerService {
 		)
 		this.artifactStore = new ArtifactStore(redactor)
 		this.taskJournal = new TaskJournal(redactor)
+		this.evaluators = [
+			new DeterministicEvaluator(),
+			...(dependencies.evaluators ?? []),
+		]
+		assertEvaluatorSet(this.evaluators)
 		this.workerRegistry = new WorkerRegistry(config, this.logger)
 		this.semaphore = new Semaphore(config.limits.maxConcurrency)
 	}
@@ -166,6 +192,9 @@ export class WorkerService {
 					lastReport = report
 
 					if (!shouldFallback(report, route, index)) {
+						const completionSignal = report.status === 'completed'
+							? createDeadlineSignal(externalSignal, deadlineMs)
+							: undefined
 						await this.taskJournal.append(
 							artifactRoot,
 							taskSummary.taskId,
@@ -173,6 +202,7 @@ export class WorkerService {
 								type: 'TaskCompleted',
 								data: { runId: report.runId, status: report.status },
 							},
+							completionSignal,
 						)
 						return report
 					}
@@ -269,6 +299,12 @@ export class WorkerService {
 	): Promise<ApplyPatchResult> {
 		const artifactRoot = await this.getArtifactRoot(repositoryRoot)
 		const report = await this.artifactStore.loadReport(artifactRoot, runId)
+		if (report.schemaVersion !== 3) {
+			throw new HarnessError(
+				'LEGACY_RUN_NOT_APPLICABLE',
+				'Legacy run reports are readable for audit but cannot pass the evaluation-bound patch gate. Re-run the task.',
+			)
+		}
 		const history = await this.preparePatchHistory(artifactRoot, report)
 
 		try {
@@ -420,7 +456,7 @@ export class WorkerService {
 		artifactRoot: string,
 		report: WorkerRunReport,
 	): Promise<PatchHistoryContext> {
-		const taskId = report.schemaVersion === 2 ? report.taskId ?? null : null
+		const taskId = report.schemaVersion >= 2 ? report.taskId ?? null : null
 		const context: PatchHistoryContext = {
 			taskId,
 			recording: false,
@@ -436,8 +472,9 @@ export class WorkerService {
 			return context
 		}
 
+		let linked: boolean
 		try {
-			const linked = await this.taskJournal.isRunLinked({
+			linked = await this.taskJournal.isRunLinked({
 				artifactRoot,
 				taskId,
 				runId: report.runId,
@@ -447,14 +484,42 @@ export class WorkerService {
 				patchSha256: report.patchSha256,
 				changedFileCount: report.changedFiles.length,
 				workerId,
+				evaluation: report.schemaVersion === 3 && report.evaluation !== undefined
+					? {
+						evaluatorIds: report.evaluation.results.map(
+							result => result.evaluatorId,
+						),
+						outcome: report.evaluation.outcome,
+					}
+					: null,
 			})
-			if (!linked) {
-				context.warnings.push(
-					'Task history does not match the authoritative run report; patch lifecycle events were not recorded.',
+		} catch (error) {
+			if (report.schemaVersion === 3) {
+				throw new HarnessError(
+					'EVALUATION_HISTORY_INVALID',
+					'Version 3 run evaluation could not be verified against task history',
+					{ cause: getErrorMessage(error) },
 				)
-				return context
 			}
+			context.warnings.push(
+				historyWarning('PatchApplicationRequested', error),
+			)
+			return context
+		}
+		if (!linked) {
+			if (report.schemaVersion === 3) {
+				throw new HarnessError(
+					'EVALUATION_HISTORY_MISMATCH',
+					'Version 3 run evaluation does not match task history',
+				)
+			}
+			context.warnings.push(
+				'Task history does not match the authoritative run report; patch lifecycle events were not recorded.',
+			)
+			return context
+		}
 
+		try {
 			await this.taskJournal.append(artifactRoot, taskId, {
 				type: 'PatchApplicationRequested',
 				data: { runId: report.runId },
@@ -679,6 +744,9 @@ export class WorkerService {
 						context.externalSignal,
 						timeoutController.signal,
 					)
+					if (status === 'policy_violation') {
+						policyViolations.push(formatPolicyViolation(error))
+					}
 					if (
 						error instanceof HarnessError &&
 						error.code === 'DOCKER_CONTAINER_CLEANUP_FAILED'
@@ -711,9 +779,6 @@ export class WorkerService {
 				}
 			}
 
-			clearTimeout(timeout)
-			timeout = null
-
 			if (
 				status === 'completed' &&
 				commandResults.some(result => result.exitCode !== 0 || result.timedOut)
@@ -745,10 +810,111 @@ export class WorkerService {
 				warnings.push('Implementation task completed without producing file changes.')
 			}
 
+			let acceptanceCriteria = buildAcceptanceResults(
+				task.acceptanceCriteria,
+				commandResults,
+				status,
+			)
+			let evaluationInput: EvaluationInput = {
+				runId: worktree.runId,
+				objective: task.objective,
+				mode: task.mode,
+				baseCommit: worktree.baseCommit,
+				allowedPaths: [...task.allowedPaths],
+				prohibitedPaths: [...task.prohibitedPaths],
+				candidatePatch: patch,
+				runStatus: status,
+				failureCode,
+				requiredCommands: task.requiredCommands,
+				commandResults,
+				changedFiles,
+				patchBytes: Buffer.byteLength(patch, 'utf8'),
+				acceptanceCriteria,
+				policyViolations,
+				warnings,
+				maxChangedFiles: this.config.limits.maxChangedFiles,
+				maxPatchBytes: maxArtifactPatchBytes,
+				deadlineMs: context.deadlineMs,
+			}
+			let evaluation: EvaluationSummary
+			try {
+				evaluation = await evaluateAll(
+					this.evaluators,
+					evaluationInput,
+					signal,
+				)
+			} catch (error) {
+				if (!signal.aborted) {
+					throw error
+				}
+				status = classifyRunError(
+					error,
+					context.externalSignal,
+					timeoutController.signal,
+				)
+				failureCode = 'WORKER_ABORTED'
+				acceptanceCriteria = buildAcceptanceResults(
+					task.acceptanceCriteria,
+					commandResults,
+					status,
+				)
+				evaluationInput = {
+					...evaluationInput,
+					runStatus: status,
+					failureCode,
+					acceptanceCriteria,
+				}
+				evaluation = await evaluateInterrupted(evaluationInput)
+			}
+
+			if (signal.aborted && status === 'completed') {
+				status = context.externalSignal?.aborted === true
+					? 'cancelled'
+					: 'timed_out'
+				failureCode = 'WORKER_ABORTED'
+				acceptanceCriteria = buildAcceptanceResults(
+					task.acceptanceCriteria,
+					commandResults,
+					status,
+				)
+				evaluationInput = {
+					...evaluationInput,
+					runStatus: status,
+					failureCode,
+					acceptanceCriteria,
+				}
+				evaluation = await evaluateInterrupted(evaluationInput)
+			}
+
+			validateEvaluationSummary(evaluation)
+
+			if (evaluation.outcome === 'failed' && status === 'completed') {
+				status = 'failed'
+				failureCode = 'EVALUATION_FAILED'
+			}
+			if (hasDeterministicFailedDimension(evaluation, 'patch_size')) {
+				patch = ''
+				warnings.push(
+					'Patch exceeded the artifact size limit and was not persisted.',
+				)
+			}
+			const publicationSignal = status === 'completed' ? signal : undefined
+			await this.taskJournal.append(context.artifactRoot, context.taskId, {
+				type: 'EvaluationCompleted',
+				data: {
+					runId: worktree.runId,
+					evaluatorIds: evaluation.results.map(result => result.evaluatorId),
+					outcome: evaluation.outcome,
+					failedDimensions: collectDimensionIds(evaluation, 'failed'),
+					unknownDimensions: collectDimensionIds(evaluation, 'unknown'),
+				},
+			}, publicationSignal)
+			publicationSignal?.throwIfAborted()
+
 			const completedAtMs = Date.now()
 			const usage = getProviderUsage(provider)
 			const initialReport: WorkerRunReport = {
-				schemaVersion: 2,
+				schemaVersion: 3,
 				taskId: context.taskId,
 				runId: worktree.runId,
 				status,
@@ -766,13 +932,10 @@ export class WorkerService {
 				patchSha256: null,
 				reportPath: '',
 				commandResults,
-				acceptanceCriteria: buildAcceptanceResults(
-					task.acceptanceCriteria,
-					commandResults,
-					status,
-				),
+				acceptanceCriteria,
 				policyViolations,
 				warnings,
+				evaluation,
 				provider: {
 					workerId: worker.id,
 					adapter: worker.adapter,
@@ -802,7 +965,9 @@ export class WorkerService {
 				report: initialReport,
 				patch,
 				workerTranscript: transcript,
+				...(publicationSignal === undefined ? {} : { signal: publicationSignal }),
 			})
+			publicationSignal?.throwIfAborted()
 			await this.taskJournal.append(context.artifactRoot, context.taskId, {
 				type: 'AttemptCompleted',
 				data: {
@@ -810,7 +975,9 @@ export class WorkerService {
 					status: persistedReport.status,
 					failureCode: persistedReport.failureCode ?? null,
 				},
-			})
+			}, publicationSignal)
+			clearTimeout(timeout)
+			timeout = null
 			return persistedReport
 		} finally {
 			if (timeout !== null) {
@@ -862,18 +1029,11 @@ export class WorkerService {
 	}> {
 		const changedFiles = await getChangedFiles(worktreePath, baseCommit)
 
-		if (changedFiles.length > this.config.limits.maxChangedFiles) {
-			throw new HarnessError(
-				'CHANGED_FILE_LIMIT',
-				`Worker changed ${changedFiles.length} files, exceeding the limit of ${this.config.limits.maxChangedFiles}`,
-			)
-		}
-
-		const policyViolations = await this.validateChangedPaths(
-			task,
-			worktreePath,
-			changedFiles,
-		)
+		const policyViolations = changedFiles.length > this.config.limits.maxChangedFiles
+			? [
+				`CHANGED_FILE_LIMIT: Worker changed ${changedFiles.length} files, exceeding the limit of ${this.config.limits.maxChangedFiles}`,
+			]
+			: await this.validateChangedPaths(task, worktreePath, changedFiles)
 		const patch = policyViolations.length === 0
 			? await getBinaryPatch(worktreePath, baseCommit)
 			: ''
@@ -944,7 +1104,7 @@ export class WorkerService {
 			try {
 				await policy.assertSafeChangedPath(changedFile)
 			} catch (error) {
-				policyViolations.push(getErrorMessage(error))
+				policyViolations.push(formatPolicyViolation(error))
 			}
 		}
 
@@ -1072,8 +1232,135 @@ function isPolicyCode(code: string): boolean {
 	return (
 		code.includes('DENIED') ||
 		code.includes('NOT_ALLOWED') ||
+		code.endsWith('_LIMIT') ||
 		code === 'READ_ONLY_TASK'
 	)
+}
+
+function hasDeterministicFailedDimension(
+	evaluation: EvaluationSummary,
+	dimensionId: EvaluationResult['dimensions'][number]['id'],
+): boolean {
+	const deterministic = evaluation.results.find(result =>
+		result.evaluatorId === 'deterministic-v1' &&
+		result.evaluatorKind === 'deterministic'
+	)
+	return deterministic?.dimensions.some(dimension =>
+		dimension.id === dimensionId && dimension.status === 'failed',
+	) ?? false
+}
+
+async function evaluateAll(
+	evaluators: Array<Evaluator>,
+	input: EvaluationInput,
+	signal: AbortSignal,
+): Promise<EvaluationSummary> {
+	const results: Array<EvaluationResult> = []
+	for (const evaluator of evaluators) {
+		const result = await evaluateWithCancellation(evaluator, input, signal)
+		validateEvaluationResult(result, evaluator.id)
+		results.push(result)
+	}
+	const evaluation = aggregateEvaluationResults(results)
+	validateEvaluationSummary(evaluation)
+	return evaluation
+}
+
+async function evaluateInterrupted(
+	input: EvaluationInput,
+): Promise<EvaluationSummary> {
+	const evaluator = new DeterministicEvaluator()
+	const result = await evaluator.evaluate(input)
+	validateEvaluationResult(result, evaluator.id)
+	const evaluation = aggregateEvaluationResults([result])
+	validateEvaluationSummary(evaluation)
+	return evaluation
+}
+
+async function evaluateWithCancellation(
+	evaluator: Evaluator,
+	input: EvaluationInput,
+	signal: AbortSignal,
+): Promise<EvaluationResult> {
+	signal.throwIfAborted()
+	return await new Promise<EvaluationResult>((resolve, reject) => {
+		function handleAbort(): void {
+			reject(signal.reason ?? new DOMException('Evaluation aborted', 'AbortError'))
+		}
+
+		signal.addEventListener('abort', handleAbort, { once: true })
+		void evaluator.evaluate(input, signal).then(
+			result => {
+				signal.removeEventListener('abort', handleAbort)
+				resolve(result)
+			},
+			error => {
+				signal.removeEventListener('abort', handleAbort)
+				reject(error)
+			},
+		)
+		if (signal.aborted) {
+			handleAbort()
+		}
+	})
+}
+
+function assertEvaluatorSet(evaluators: Array<Evaluator>): void {
+	if (evaluators.length > 8) {
+		throw new HarnessError(
+			'EVALUATOR_LIMIT',
+			'Evaluation is limited to eight evaluators per run',
+		)
+	}
+	const evaluatorIds = new Set<string>()
+	for (const evaluator of evaluators) {
+		if (evaluator.id.length === 0 || evaluator.id.length > 100) {
+			throw new HarnessError(
+				'EVALUATOR_ID_INVALID',
+				'Evaluator IDs must contain between 1 and 100 characters',
+			)
+		}
+		if (evaluatorIds.has(evaluator.id)) {
+			throw new HarnessError(
+				'EVALUATOR_ID_DUPLICATE',
+				`Evaluator ID must be unique: ${evaluator.id}`,
+			)
+		}
+		evaluatorIds.add(evaluator.id)
+	}
+}
+
+function aggregateEvaluationResults(
+	results: Array<EvaluationResult>,
+): EvaluationSummary {
+	const outcomes = results.map(result => result.outcome)
+	return {
+		schemaVersion: 1,
+		evaluatedAt: new Date().toISOString(),
+		outcome: outcomes.includes('failed')
+			? 'failed'
+			: outcomes.includes('inconclusive')
+				? 'inconclusive'
+				: 'passed',
+		results,
+	}
+}
+
+function collectDimensionIds(
+	evaluation: EvaluationSummary,
+	status: 'failed' | 'unknown',
+): Array<EvaluationResult['dimensions'][number]['id']> {
+	return [...new Set(evaluation.results.flatMap(result =>
+		result.dimensions.flatMap(dimension =>
+			dimension.status === status ? [dimension.id] : [],
+		),
+	))]
+}
+
+function formatPolicyViolation(error: unknown): string {
+	return error instanceof HarnessError
+		? `${error.code}: ${error.message}`
+		: `PATH_VALIDATION_FAILED: ${getErrorMessage(error)}`
 }
 
 function isTaskHistoryError(error: unknown): boolean {
@@ -1112,6 +1399,19 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted === true) {
 		throw new DOMException('Worker delegation aborted', 'AbortError')
 	}
+}
+
+function createDeadlineSignal(
+	externalSignal: AbortSignal | undefined,
+	deadlineMs: number,
+): AbortSignal {
+	const remainingMs = deadlineMs - Date.now()
+	const timeoutSignal = remainingMs <= 0
+		? AbortSignal.abort(new DOMException('Worker deadline expired', 'TimeoutError'))
+		: AbortSignal.timeout(remainingMs)
+	return externalSignal === undefined
+		? timeoutSignal
+		: AbortSignal.any([externalSignal, timeoutSignal])
 }
 
 function shouldFallback(

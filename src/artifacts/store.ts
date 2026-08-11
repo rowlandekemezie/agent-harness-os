@@ -10,6 +10,8 @@ import type {
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
+import { truncateUtf8 } from '../lib/text.js'
+import { isEvaluationSummary } from '../evaluation/schema.js'
 import {
 	createPrivateDirectory,
 	ensurePrivateDirectory,
@@ -18,13 +20,14 @@ import {
 } from './secure-io.js'
 
 const maxReportBytes = 4_194_304
-const maxPatchBytes = 20_000_000
+export const maxArtifactPatchBytes = 20_000_000
 
 export type PersistRunInput = {
 	artifactRoot: string
 	report: WorkerRunReport
 	patch: string
 	workerTranscript: string
+	signal?: AbortSignal
 }
 
 export class ArtifactStore {
@@ -35,7 +38,35 @@ export class ArtifactStore {
 	}
 
 	async persist(input: PersistRunInput): Promise<WorkerRunReport> {
+		input.signal?.throwIfAborted()
 		const runDirectory = path.join(input.artifactRoot, input.report.runId)
+		const patchPath = path.join(runDirectory, 'changes.patch')
+		const reportPath = path.join(runDirectory, 'report.json')
+		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
+
+		if (input.patch !== '') {
+			if (Buffer.byteLength(input.patch, 'utf8') > maxArtifactPatchBytes) {
+				throw new HarnessError(
+					'ARTIFACT_FILE_TOO_LARGE',
+					`Worker patch exceeds the ${maxArtifactPatchBytes}-byte artifact limit`,
+				)
+			}
+		}
+
+		const persistedReport: WorkerRunReport = {
+			...redactReport(input.report, this.redactor),
+			patchPath: input.patch === '' ? null : patchPath,
+			patchSha256: input.patch === '' ? null : sha256(input.patch),
+			reportPath,
+		}
+		validateReport(persistedReport, reportPath, input.report.runId)
+		const reportContents = `${JSON.stringify(persistedReport, null, 2)}\n`
+		if (Buffer.byteLength(reportContents, 'utf8') > maxReportBytes) {
+			throw new HarnessError(
+				'ARTIFACT_FILE_TOO_LARGE',
+				`Run report exceeds the ${maxReportBytes}-byte artifact limit`,
+			)
+		}
 		await ensurePrivateDirectory(input.artifactRoot, input.artifactRoot, {
 			recursive: true,
 		})
@@ -48,18 +79,8 @@ export class ArtifactStore {
 				{ cause: error instanceof Error ? error.message : String(error) },
 			)
 		}
-		const patchPath = path.join(runDirectory, 'changes.patch')
-		const reportPath = path.join(runDirectory, 'report.json')
-		const transcriptPath = path.join(runDirectory, 'worker-transcript.txt')
 
 		if (input.patch !== '') {
-			if (Buffer.byteLength(input.patch, 'utf8') > maxPatchBytes) {
-				throw new HarnessError(
-					'ARTIFACT_FILE_TOO_LARGE',
-					`Worker patch exceeds the ${maxPatchBytes}-byte artifact limit`,
-				)
-			}
-
 			// Patches must remain byte-faithful. Access is restricted by file mode.
 			await writeExclusiveRegularFile(
 				input.artifactRoot,
@@ -74,17 +95,13 @@ export class ArtifactStore {
 			this.redactor.redact(input.workerTranscript),
 		)
 
-		const persistedReport: WorkerRunReport = {
-			...redactReport(input.report, this.redactor),
-			patchPath: input.patch === '' ? null : patchPath,
-			patchSha256: input.patch === '' ? null : sha256(input.patch),
-			reportPath,
-		}
-
+		input.signal?.throwIfAborted()
 		await writeExclusiveRegularFile(
 			input.artifactRoot,
 			reportPath,
-			`${JSON.stringify(persistedReport, null, 2)}\n`,
+			reportContents,
+			0o600,
+			input.signal,
 		)
 
 		return persistedReport
@@ -163,7 +180,7 @@ export class ArtifactStore {
 		return await readBoundedRegularFile(
 			artifactRoot,
 			expectedPatchPath,
-			maxPatchBytes,
+			maxArtifactPatchBytes,
 		)
 	}
 }
@@ -188,6 +205,24 @@ function redactReport(
 		})),
 		policyViolations: report.policyViolations.map(value => redactor.redact(value)),
 		warnings: report.warnings.map(value => redactor.redact(value)),
+		...(report.evaluation === undefined
+			? {}
+			: { evaluation: {
+				...report.evaluation,
+				results: report.evaluation.results.map(result => ({
+					...result,
+					dimensions: result.dimensions.map(dimension => ({
+						...dimension,
+						summary: truncateUtf8(
+							redactor.redact(dimension.summary),
+							500,
+						),
+						evidence: dimension.evidence.map(value =>
+							truncateUtf8(redactor.redact(value), 1_000),
+						),
+					})),
+				})),
+			} }),
 		provider: {
 			...report.provider,
 			baseUrl: redactor.redact(report.provider.baseUrl),
@@ -244,15 +279,28 @@ function validateReport(
 
 	if (
 		runId !== expectedRunId ||
-		(schemaVersion !== 1 && schemaVersion !== 2) ||
+		(schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) ||
 		!hasExpectedKeys(
 			value,
-			schemaVersion === 2 ? [...requiredKeys, 'taskId'] : requiredKeys,
+			schemaVersion === 1
+				? requiredKeys
+				: schemaVersion === 2
+					? [...requiredKeys, 'taskId']
+					: [...requiredKeys, 'taskId', 'evaluation'],
 			['failureCode', 'routing'],
 		) ||
-		(schemaVersion === 1 && value['taskId'] !== undefined) ||
-		(schemaVersion === 2 && !isUuid(value['taskId'])) ||
+		(schemaVersion === 1 &&
+			(value['taskId'] !== undefined || value['evaluation'] !== undefined)) ||
+		(schemaVersion === 2 &&
+			(!isUuid(value['taskId']) || value['evaluation'] !== undefined)) ||
+		(schemaVersion === 3 &&
+			(!isUuid(value['taskId']) || !isEvaluationSummary(value['evaluation']))) ||
 		!isRunStatus(value['status']) ||
+		!isReportEvaluationConsistent(
+			schemaVersion,
+			value['status'],
+			value['evaluation'],
+		) ||
 		!isWorkerMode(value['mode']) ||
 		requireReportString(value['reportPath']) !== expectedPath ||
 		!isIsoDate(value['startedAt']) ||
@@ -282,6 +330,20 @@ function validateReport(
 	}
 
 	return value as WorkerRunReport
+}
+
+function isReportEvaluationConsistent(
+	schemaVersion: unknown,
+	status: unknown,
+	evaluation: unknown,
+): boolean {
+	if (schemaVersion !== 3) {
+		return true
+	}
+	if (!isRunStatus(status) || !isEvaluationSummary(evaluation)) {
+		return false
+	}
+	return (status === 'completed') === (evaluation.outcome !== 'failed')
 }
 
 function isUuid(value: unknown): value is string {

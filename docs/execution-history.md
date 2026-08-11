@@ -20,8 +20,11 @@ not reconstruct patch bytes or application authority from events.
 
 Before adding application events, the harness proves that the report's run,
 worker, repository, base commit, patch digest, changed-file count, and terminal
-status match the journal. Missing, corrupt, mismatched, or unwritable history is
-reported as a warning but does not override a valid report or patch gate.
+status match the journal. For version 3 reports it also proves evaluator IDs and
+outcome; missing, corrupt, or mismatched evaluation history blocks application.
+Version 1 and 2 reports remain readable for audit but cannot pass the
+evaluation-bound patch gate. Failure to append new patch-lifecycle events after
+a successful link check remains a warning.
 
 ## Event model
 
@@ -34,6 +37,7 @@ The harness records these versioned events:
 - `WorkerCompleted`
 - `PatchProduced`
 - `ValidationCompleted`
+- `EvaluationCompleted`
 - `AttemptCompleted`
 - `TaskCompleted`
 - `PatchApplicationRequested`
@@ -46,6 +50,12 @@ iteration, outcome, duration, and input/output byte counts. It never records too
 arguments or results. `PatchProduced` records the patch digest, byte count, and
 changed-file count. Exact patch bytes remain only in `changes.patch` with the
 existing private permissions and integrity checks.
+
+`EvaluationCompleted` records evaluator IDs, the aggregate outcome, and failed
+or unknown dimension IDs. Detailed summaries and evidence remain in the run
+report. New event-schema-version-2 attempts require evaluation after validation
+and before attempt completion. Version 1 timelines remain readable without
+invented evaluation events.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
@@ -100,9 +110,11 @@ artifact root remains outside the threat model.
 incomplete timeline may represent an active operation or a process that stopped
 before writing its terminal event; the journal does not guess between them.
 
-Historical schema-version-1 run reports remain readable through
-`get_worker_run` and applicable through `apply_worker_patch`. They do not have a
-task ID, so the harness cannot synthesize a task timeline for them.
+Historical schema-version-1 and version-2 run reports remain readable through
+`get_worker_run`, but cannot pass `apply_worker_patch` because they lack
+mandatory evaluation evidence. Rerun the task to produce an applicable report.
+Version 1 reports do not have a task ID, so the harness cannot synthesize a task
+timeline for them.
 
 ## Replay semantics
 

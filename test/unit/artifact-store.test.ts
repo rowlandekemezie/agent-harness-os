@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { link, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, link, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { ArtifactStore } from '../../src/artifacts/store.js'
 import { Redactor } from '../../src/lib/redaction.js'
-import type { WorkerRunReport } from '../../src/domain/types.js'
+import type { EvaluationSummary, WorkerRunReport } from '../../src/domain/types.js'
+import { deterministicEvaluationDimensionIds } from '../../src/evaluation/dimensions.js'
 
 
 function createReport(runId: string): WorkerRunReport {
@@ -31,6 +32,35 @@ function createReport(runId: string): WorkerRunReport {
 		warnings: [],
 		provider: { baseUrl: 'http://provider', model: 'qwen', requestCount: 1 },
 	}
+}
+
+function createEvaluationSummary(secret = 'deterministic evidence'): EvaluationSummary {
+	const evaluatedAt = new Date(2).toISOString()
+	return {
+		schemaVersion: 1,
+		evaluatedAt,
+		outcome: 'passed',
+		results: [{
+			schemaVersion: 1,
+			evaluatorId: 'deterministic-v1',
+			evaluatorKind: 'deterministic',
+			evaluatedAt,
+			outcome: 'passed',
+			dimensions: deterministicEvaluationDimensionIds.map(id => ({
+				id,
+				status: 'passed',
+				summary: secret,
+				evidence: [secret],
+			})),
+		}],
+	}
+}
+
+function hasHarnessCode(code: string): (error: unknown) => boolean {
+	return error => typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		error.code === code
 }
 
 test('persists an exact patch while redacting the transcript', async function () {
@@ -271,6 +301,134 @@ test('requires a task ID on version 2 run reports', async function () {
 			'code' in error &&
 			error.code === 'INVALID_RUN_REPORT',
 	)
+})
+
+test('requires a valid evaluation summary on version 3 run reports', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-'))
+	const report: WorkerRunReport = {
+		...createReport('12121212-1212-4121-8121-121212121212'),
+		schemaVersion: 3,
+		taskId: '34343434-3434-4343-8343-343434343434',
+		evaluation: createEvaluationSummary(),
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		evaluation?: { unexpected?: boolean }
+	}
+	if (value.evaluation === undefined) {
+		throw new Error('Persisted report did not include evaluation evidence')
+	}
+	value.evaluation.unexpected = true
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+})
+
+test('rejects a completed version 3 report with a failed evaluation', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-status-'))
+	const report: WorkerRunReport = {
+		...createReport('90909090-9090-4909-8909-909090909090'),
+		schemaVersion: 3,
+		taskId: 'abababab-abab-4bab-8bab-abababababab',
+		evaluation: createEvaluationSummary(),
+	}
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		evaluation: EvaluationSummary
+	}
+	value.evaluation.outcome = 'failed'
+	value.evaluation.results[0]!.outcome = 'failed'
+	value.evaluation.results[0]!.dimensions[0]!.status = 'failed'
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
+	)
+})
+
+test('redacts evaluator summaries and evidence before persistence', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-redact-'))
+	const secret = 'private-evaluator-secret'
+	const report: WorkerRunReport = {
+		...createReport('56565656-5656-4565-8565-565656565656'),
+		schemaVersion: 3,
+		taskId: '78787878-7878-4787-8787-787878787878',
+		evaluation: createEvaluationSummary(secret),
+	}
+	const store = new ArtifactStore(new Redactor({}, [secret]))
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const contents = await readFile(persisted.reportPath, 'utf8')
+
+	assert.equal(contents.includes(secret), false)
+	assert.equal(contents.includes('[REDACTED]'), true)
+})
+
+test('rebounds evaluation evidence after redaction expansion', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-redaction-bound-'))
+	const secret = 'secret'
+	const expandedEvidence = secret.repeat(166)
+	const report: WorkerRunReport = {
+		...createReport('cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd'),
+		schemaVersion: 3,
+		taskId: 'efefefef-efef-4fef-8fef-efefefefefef',
+		evaluation: createEvaluationSummary(expandedEvidence),
+	}
+	const store = new ArtifactStore(new Redactor({}, [secret]))
+
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const loaded = await store.loadReport(root, report.runId)
+	const evidence = loaded.evaluation?.results[0]?.dimensions[0]?.evidence[0]
+
+	assert.ok(evidence)
+	assert.equal(evidence.includes(secret), false)
+	assert.equal(Buffer.byteLength(evidence, 'utf8') <= 1_000, true)
+	assert.equal(persisted.reportPath, loaded.reportPath)
+})
+
+test('rejects an oversized final report before publication', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-report-bound-'))
+	const report: WorkerRunReport = {
+		...createReport('10101010-1010-4101-8101-101010101010'),
+		workerSummary: 'x'.repeat(4_194_304),
+	}
+	const store = new ArtifactStore()
+
+	await assert.rejects(
+		store.persist({
+			artifactRoot: root,
+			report,
+			patch: '',
+			workerTranscript: '',
+		}),
+		hasHarnessCode('ARTIFACT_FILE_TOO_LARGE'),
+	)
+	await assert.rejects(access(path.join(root, report.runId)))
 })
 
 test('rejects a report whose run ID does not match its artifact directory', async function () {

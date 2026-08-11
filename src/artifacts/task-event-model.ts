@@ -1,4 +1,6 @@
 import type {
+	EvaluationDimensionId,
+	EvaluationOutcome,
 	RoutingStrategy,
 	RunStatus,
 	TaskEvent,
@@ -21,6 +23,8 @@ type AttemptProjection = {
 	patchChangedFileCount: number | null
 	validationCompleted: boolean
 	validationOutcome: 'passed' | 'failed' | 'skipped' | null
+	evaluationCompleted: boolean
+	evaluationOutcome: EvaluationOutcome | null
 	status: RunStatus | null
 	failureCode: string | null
 }
@@ -34,6 +38,7 @@ export type TaskEventProjection = {
 	lastAttempt: AttemptProjection | null
 	knownRunIds: Set<string>
 	applicationRunId: string | null
+	eventSchemaVersion: 1 | 2
 }
 
 export function validateTaskEvent(
@@ -53,7 +58,7 @@ export function validateTaskEvent(
 			'type',
 			'data',
 		]) ||
-		value['schemaVersion'] !== 1 ||
+		(value['schemaVersion'] !== 1 && value['schemaVersion'] !== 2) ||
 		!isUuid(value['eventId']) ||
 		value['taskId'] !== expectedTaskId ||
 		value['sequence'] !== expectedSequence ||
@@ -184,6 +189,37 @@ export function validateTaskEvent(
 				throw invalidJournal('ValidationCompleted event has invalid data')
 			}
 			return
+		case 'EvaluationCompleted':
+			if (
+				value['schemaVersion'] !== 2 ||
+				!hasExactKeys(data, [
+					'runId',
+					'evaluatorIds',
+					'outcome',
+					'failedDimensions',
+					'unknownDimensions',
+				]) ||
+				!isUuid(data['runId']) ||
+				!isUniqueBoundedStringArray(data['evaluatorIds'], 8, 100) ||
+				data['evaluatorIds'][0] !== 'deterministic-v1' ||
+				!isEvaluationOutcome(data['outcome']) ||
+				!isEvaluationDimensionIds(data['failedDimensions']) ||
+				!isEvaluationDimensionIds(data['unknownDimensions']) ||
+				!areEvaluationDimensionSetsDisjoint(
+					data['failedDimensions'],
+					data['unknownDimensions'],
+				) ||
+				(data['outcome'] === 'passed' &&
+					(data['failedDimensions'].length > 0 ||
+						data['unknownDimensions'].length > 0)) ||
+				(data['outcome'] === 'failed' && data['failedDimensions'].length === 0) ||
+				(data['outcome'] === 'inconclusive' &&
+					(data['failedDimensions'].length > 0 ||
+						data['unknownDimensions'].length === 0))
+			) {
+				throw invalidJournal('EvaluationCompleted event has invalid data')
+			}
+			return
 		case 'AttemptCompleted':
 			if (
 				!hasExactKeys(data, ['runId', 'status', 'failureCode']) ||
@@ -275,11 +311,15 @@ export function projectTaskEvent(
 			lastAttempt: null,
 			knownRunIds: new Set(),
 			applicationRunId: null,
+			eventSchemaVersion: event.schemaVersion,
 		}
 	}
 
 	if (current === null) {
 		throw transitionError('Task journal must begin with TaskCreated', appendOperation)
+	}
+	if (event.schemaVersion !== current.eventSchemaVersion) {
+		throw transitionError('Task event schema version changed', appendOperation)
 	}
 
 	const next = cloneProjection(current, event, eventSha256)
@@ -327,6 +367,8 @@ export function projectTaskEvent(
 				patchChangedFileCount: null,
 				validationCompleted: false,
 				validationOutcome: null,
+				evaluationCompleted: false,
+				evaluationOutcome: null,
 				status: null,
 				failureCode: null,
 			}
@@ -379,16 +421,38 @@ export function projectTaskEvent(
 			activeAttempt.validationOutcome = event.data.outcome
 			break
 		}
+		case 'EvaluationCompleted': {
+			const activeAttempt = getActiveRun(next, event.data.runId, appendOperation)
+			if (
+				!activeAttempt.validationCompleted ||
+				activeAttempt.evaluationCompleted
+			) {
+				throw transitionError('EvaluationCompleted is out of order', appendOperation)
+			}
+			activeAttempt.evaluationCompleted = true
+			activeAttempt.evaluationOutcome = event.data.outcome
+			break
+		}
 		case 'AttemptCompleted': {
 			const activeAttempt = getActiveRun(next, event.data.runId, appendOperation)
-			if (!activeAttempt.validationCompleted) {
-				throw transitionError('AttemptCompleted requires completed validation', appendOperation)
+			if (
+				!activeAttempt.validationCompleted ||
+				(next.eventSchemaVersion === 2 && !activeAttempt.evaluationCompleted)
+			) {
+				throw transitionError(
+					'AttemptCompleted requires validation and evaluation evidence',
+					appendOperation,
+				)
 			}
 			if (
 				(event.data.status === 'completed' &&
 					(activeAttempt.workerOutcome !== 'succeeded' ||
 						activeAttempt.validationOutcome === 'failed' ||
+						activeAttempt.evaluationOutcome === 'failed' ||
 						event.data.failureCode !== null)) ||
+				(next.eventSchemaVersion === 2 &&
+					event.data.status !== 'completed' &&
+					activeAttempt.evaluationOutcome !== 'failed') ||
 				(event.data.status !== 'completed' && event.data.failureCode === null)
 			) {
 				throw transitionError('AttemptCompleted outcome evidence is inconsistent', appendOperation)
@@ -609,6 +673,16 @@ function isBoundedStringArray(
 	)
 }
 
+function isUniqueBoundedStringArray(
+	value: unknown,
+	maxItems: number,
+	maxItemLength: number,
+): value is Array<string> {
+	return isBoundedStringArray(value, maxItems, maxItemLength) &&
+		value.length > 0 &&
+		new Set(value).size === value.length
+}
+
 function isNonNegativeInteger(value: unknown): value is number {
 	return typeof value === 'number' && Number.isInteger(value) && value >= 0
 }
@@ -632,6 +706,42 @@ function isIntegerInRange(
 
 function isIsoDate(value: unknown): value is string {
 	return typeof value === 'string' && !Number.isNaN(Date.parse(value))
+}
+
+function isEvaluationOutcome(value: unknown): value is EvaluationOutcome {
+	return value === 'passed' || value === 'failed' || value === 'inconclusive'
+}
+
+function isEvaluationDimensionIds(
+	value: unknown,
+): value is Array<EvaluationDimensionId> {
+	return Array.isArray(value) &&
+		value.length <= 16 &&
+		new Set(value).size === value.length &&
+		value.every(item =>
+			item === 'worker_execution' ||
+			item === 'tests' ||
+			item === 'lint' ||
+			item === 'typecheck' ||
+			item === 'changed_files_scope' ||
+			item === 'acceptance_criteria' ||
+			item === 'patch_size' ||
+			item === 'new_warnings' ||
+			item === 'security_policy_compliance' ||
+			item === 'correctness' ||
+			item === 'maintainability' ||
+			item === 'architecture_fit' ||
+			item === 'test_quality',
+		)
+}
+
+function areEvaluationDimensionSetsDisjoint(
+	first: unknown,
+	second: unknown,
+): boolean {
+	return isEvaluationDimensionIds(first) &&
+		isEvaluationDimensionIds(second) &&
+		first.every(dimension => !second.includes(dimension))
 }
 
 function invalidJournal(message: string): HarnessError {

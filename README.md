@@ -38,6 +38,7 @@ your clean checkout
 - A fresh detached worktree for every fallback attempt
 - Request, token, latency, and operator-supplied cost telemetry in run reports
 - Durable task IDs and validated append-only timelines across fallback attempts
+- Mandatory deterministic evaluation with optional independent reviewer results
 - Bounded task-history listing and timeline inspection
 - `list_workers` and `route_worker` MCP inspection tools
 - Legacy `QWEN_*` configuration compatibility
@@ -55,7 +56,7 @@ The system keeps authority in deterministic code:
 4. The model receives bounded file tools, never a command-execution tool.
 5. The harness captures the candidate patch before running Codex-declared validation commands.
 6. Validation invalidates the run if it changes patch bytes, changed files, `HEAD`, or executable Git configuration.
-7. Failed attempts and policy-violating patches cannot be applied.
+7. The mandatory evaluator scores harness evidence; reviewers are deadline-bound, and failed evaluations and policy-violating patches cannot be applied.
 8. Applying a completed patch is a separate destructive MCP call with repeated clean-tree, base-commit, artifact-integrity, and `git apply --check` gates.
 
 Automatic fallback is limited to provider failures and bounded model-loop failures. It does not route around path-policy violations, failed deterministic validation, unsafe Git configuration, or an operator cancellation.
@@ -233,6 +234,8 @@ The eight MCP tools are:
 
 See [Execution history](docs/execution-history.md) for identity, integrity,
 query bounds, incomplete tasks, and replay semantics.
+See [Evaluation](docs/evaluation.md) for evidence sources, dimensions, outcome
+semantics, compatibility, and extension boundaries.
 
 ## Operating workflow
 
@@ -241,7 +244,7 @@ query bounds, incomplete tasks, and replay semantics.
 3. Codex delegates one bounded task.
 4. Agent Harness OS selects a worker and executes it in an isolated worktree.
 5. Eligible provider/model failures may fall back to another worker in a new worktree.
-6. Codex reviews the task timeline, final report, validation evidence, changed files, and patch.
+6. Codex reviews the task timeline, evaluation results, validation evidence, changed files, and patch.
 7. Codex invokes `apply_worker_patch` only for an acceptable completed run.
 8. Codex reruns validation in the real checkout and reviews the final diff.
 
