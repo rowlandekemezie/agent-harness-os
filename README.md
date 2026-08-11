@@ -60,7 +60,9 @@ The system keeps authority in deterministic code:
 7. The mandatory evaluator scores harness evidence; reviewers are deadline-bound, and failed evaluations and policy-violating patches cannot be applied.
 8. Applying a completed patch is a separate destructive MCP call with repeated clean-tree, base-commit, artifact-integrity, and `git apply --check` gates.
 
-Automatic fallback is limited to provider failures and bounded model-loop failures. It does not route around path-policy violations, failed deterministic validation, unsafe Git configuration, or an operator cancellation.
+Automatic fallback is limited to provider transport/response failures and empty
+model responses. It does not route around iteration or other policy limits,
+failed deterministic validation, unsafe Git configuration, or cancellation.
 
 See [Architecture](docs/architecture.md) and [Threat model](docs/threat-model.md).
 

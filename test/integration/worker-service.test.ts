@@ -347,7 +347,7 @@ test('enforces profile iteration and strict-evaluation bounds', async function (
 		})
 
 		assert.equal(loopingProvider.requestCount(), 1)
-		assert.equal(iterationReport.status, 'failed')
+		assert.equal(iterationReport.status, 'policy_violation')
 		assert.equal(iterationReport.failureCode, 'WORKER_ITERATION_LIMIT')
 		assert.deepEqual(iterationReport.provider.profile, {
 			backingWorkerId: 'qwen',
@@ -445,6 +445,14 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 			AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
 			AGENT_HARNESS_EXECUTION_BACKEND: 'local',
 			AGENT_HARNESS_ALLOW_UNSANDBOXED_LOCAL: 'false',
+			AGENT_OS_WORKER_PROFILES_JSON: JSON.stringify([{
+				id: 'strict-implementation',
+				worker: 'qwen',
+				role: 'implementation',
+				maxIterations: 4,
+				allowedCapabilities: ['implementation', 'tool-calling'],
+				evaluationPolicy: 'strict',
+			}]),
 		})
 		const service = new WorkerService(config, { evaluators: [reviewer] })
 		const report = await service.delegate({
@@ -480,7 +488,12 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 				outcome: string
 				results: Array<{ evaluatorId: string }>
 			}
+			provider: {
+				workerId?: string
+				profile?: { evaluationPolicy?: string }
+			}
 		}
+		assert.equal(tampered.provider.profile?.evaluationPolicy, 'strict')
 		tampered.status = 'completed'
 		tampered.failureCode = null
 		tampered.evaluation.outcome = 'passed'
@@ -492,6 +505,13 @@ test('binds independent-review evidence and rejects report schema downgrades', a
 			service.applyRun(repositoryPath, report.runId),
 			hasHarnessCode('EVALUATION_HISTORY_MISMATCH'),
 		)
+		delete tampered.provider.workerId
+		await writeFile(report.reportPath, `${JSON.stringify(tampered)}\n`)
+		await assert.rejects(
+			service.applyRun(repositoryPath, report.runId),
+			hasHarnessCode('INVALID_RUN_REPORT'),
+		)
+		tampered.provider.workerId = 'strict-implementation'
 		const downgraded = tampered as unknown as Record<string, unknown>
 		downgraded['schemaVersion'] = 2
 		delete downgraded['evaluation']

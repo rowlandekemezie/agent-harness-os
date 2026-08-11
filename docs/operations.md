@@ -70,12 +70,14 @@ Each fallback attempt creates a separate run report and worktree. The final repo
 Investigate repeated fallback by checking:
 
 - provider HTTP status and timeout evidence
-- model empty responses or iteration exhaustion
+- model empty responses
 - adapter compatibility with tool calls
 - provider context and response limits
 - model availability and exact model ID
 
-Do not broaden fallback to include policy or validation failures. Those failures indicate unsafe or incorrect work, not an unhealthy provider.
+Do not broaden fallback to include iteration caps, other policy failures, or
+validation failures. Those outcomes indicate an exhausted authority boundary or
+unsafe/incorrect work, not an unhealthy provider.
 
 ## Artifact retention
 

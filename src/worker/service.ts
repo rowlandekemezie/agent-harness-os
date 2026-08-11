@@ -464,6 +464,17 @@ export class WorkerService {
 		}
 		const workerId = report.provider.workerId
 		if (
+			report.schemaVersion === 3 &&
+			(taskId === null ||
+				workerId === undefined ||
+				report.evaluation === undefined)
+		) {
+			throw new HarnessError(
+				'EVALUATION_HISTORY_INVALID',
+				'Version 3 run is missing mandatory evaluation-history identity',
+			)
+		}
+		if (
 			taskId === null ||
 			report.status !== 'completed' ||
 			report.patchSha256 === null ||
@@ -1255,13 +1266,10 @@ function buildAcceptanceResults(
 
 function isPolicyCode(code: string): boolean {
 	return (
-		code !== 'WORKER_ITERATION_LIMIT' &&
-		(
-			code.includes('DENIED') ||
-			code.includes('NOT_ALLOWED') ||
-			code.endsWith('_LIMIT') ||
-			code === 'READ_ONLY_TASK'
-		)
+		code.includes('DENIED') ||
+		code.includes('NOT_ALLOWED') ||
+		code.endsWith('_LIMIT') ||
+		code === 'READ_ONLY_TASK'
 	)
 }
 
@@ -1459,8 +1467,7 @@ function isFallbackEligibleCode(code: string | null): boolean {
 	return (
 		code !== null &&
 		(code.startsWith('PROVIDER_') ||
-			code === 'WORKER_EMPTY_RESPONSE' ||
-			code === 'WORKER_ITERATION_LIMIT')
+			code === 'WORKER_EMPTY_RESPONSE')
 	)
 }
 

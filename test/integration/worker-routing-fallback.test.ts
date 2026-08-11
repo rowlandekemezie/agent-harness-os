@@ -213,7 +213,7 @@ test('falls back across workers using a fresh worktree and applies only the succ
 	}
 })
 
-test('falls back after a profile iteration cap using logical profile identities', async function () {
+test('does not fall back after a profile iteration cap', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'agent-os-profile-fallback-'))
 	const looping = await startLoopingProvider()
@@ -276,20 +276,13 @@ test('falls back after a profile iteration cap using logical profile identities'
 		})
 
 		assert.equal(looping.requestCount(), 1)
-		assert.equal(report.status, 'completed')
-		assert.equal(report.provider.workerId, 'fallback-implementation')
-		assert.equal(report.provider.profile?.backingWorkerId, 'successful-provider')
+		assert.equal(successful.requestCount(), 0)
+		assert.equal(report.status, 'policy_violation')
+		assert.equal(report.failureCode, 'WORKER_ITERATION_LIMIT')
+		assert.equal(report.provider.workerId, 'bounded-implementation')
+		assert.equal(report.provider.profile?.backingWorkerId, 'looping-provider')
 		assert.ok(report.routing)
-		assert.equal(report.routing.previousAttempts.length, 1)
-		assert.equal(
-			report.routing.previousAttempts[0]?.workerId,
-			'bounded-implementation',
-		)
-		assert.equal(report.routing.previousAttempts[0]?.status, 'failed')
-		assert.equal(
-			report.routing.previousAttempts[0]?.failureCode,
-			'WORKER_ITERATION_LIMIT',
-		)
+		assert.deepEqual(report.routing.previousAttempts, [])
 	} finally {
 		await looping.close()
 		await successful.close()

@@ -30,7 +30,13 @@ function createReport(runId: string): WorkerRunReport {
 		acceptanceCriteria: [],
 		policyViolations: [],
 		warnings: [],
-		provider: { baseUrl: 'http://provider', model: 'qwen', requestCount: 1 },
+		provider: {
+			workerId: 'qwen',
+			adapter: 'openai-compatible',
+			baseUrl: 'http://provider',
+			model: 'qwen',
+			requestCount: 1,
+		},
 	}
 }
 
@@ -333,6 +339,40 @@ test('requires a valid evaluation summary on version 3 run reports', async funct
 	)
 })
 
+test('requires worker identity on version 3 run reports', async function () {
+	const cases = [
+		{
+			runId: '23232323-2323-4232-8232-232323232323',
+			field: 'workerId',
+		},
+		{
+			runId: '45454545-4545-4454-8454-454545454545',
+			field: 'adapter',
+		},
+	] as const
+
+	for (const testCase of cases) {
+		const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-identity-'))
+		const report: WorkerRunReport = {
+			...createReport(testCase.runId),
+			schemaVersion: 3,
+			taskId: '67676767-6767-4676-8676-676767676767',
+			evaluation: createEvaluationSummary(),
+		}
+		delete report.provider[testCase.field]
+
+		await assert.rejects(
+			new ArtifactStore().persist({
+				artifactRoot: root,
+				report,
+				patch: '',
+				workerTranscript: '',
+			}),
+			hasHarnessCode('INVALID_RUN_REPORT'),
+		)
+	}
+})
+
 test('rejects a completed version 3 report with a failed evaluation', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-evaluation-status-'))
 	const report: WorkerRunReport = {
@@ -376,6 +416,8 @@ test('binds strict-profile rejection to an inconclusive evaluation', async funct
 		failureCode: 'EVALUATION_INCONCLUSIVE',
 		evaluation,
 		provider: {
+			workerId: 'strict-implementation',
+			adapter: 'openai-compatible',
 			baseUrl: 'http://provider',
 			model: 'qwen',
 			requestCount: 1,

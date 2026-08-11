@@ -624,8 +624,7 @@ function isFallbackEligible(attempt: AttemptProjection): boolean {
 	return attempt.status === 'failed' &&
 		code !== null &&
 		(code.startsWith('PROVIDER_') ||
-			code === 'WORKER_EMPTY_RESPONSE' ||
-			code === 'WORKER_ITERATION_LIMIT')
+			code === 'WORKER_EMPTY_RESPONSE')
 }
 
 function transitionError(message: string, appendOperation: boolean): HarnessError {

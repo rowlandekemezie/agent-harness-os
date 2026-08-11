@@ -44,7 +44,7 @@
 - Required capabilities and cost/latency ceilings are enforced before scoring
 - Explicit worker preference fails closed when the worker cannot satisfy the contract
 - Strict profiles fail closed on inconclusive evaluation without making fallback eligible
-- Fallback is limited to eligible provider/model-loop failures and bounded attempts
+- Fallback is limited to eligible provider/empty-response failures and bounded attempts
 - Every fallback attempt starts from the original base in a fresh worktree
 - Failed attempts are persisted for audit but cannot be applied
 

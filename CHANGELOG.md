@@ -34,7 +34,7 @@ All notable changes are documented here.
 - Keep cancellation and deadlines authoritative through final run publication
 - Order cancellation against atomic event publication with an explicit commit grant
 - Reject profile authority expansion, unknown backing workers, role mismatches, and malformed profile fields
-- Classify worker iteration exhaustion as a fallback-eligible model-loop failure instead of a policy violation
+- Keep worker iteration exhaustion as a non-fallback policy failure
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers
@@ -57,7 +57,7 @@ All notable changes are documented here.
 
 - Rejected credentials embedded in endpoint query parameters and static authorization headers
 - Redacted query values from worker-registry inspection
-- Restricted fallback to provider and bounded model-loop failures
+- Restricted fallback to provider and empty-model-response failures
 - Preserved the original base commit and clean worktree boundary across attempts
 - Removed unsupported capability claims from the routable capability vocabulary
 

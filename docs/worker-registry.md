@@ -181,10 +181,9 @@ Fallback requires:
 - `allowFallback: true`
 - more than one eligible worker
 - a `maxAttempts` greater than one
-- a failure classified as provider transport/response failure, empty model response, or model iteration exhaustion
+- a failure classified as provider transport/response failure or empty model response
 
 Every attempt starts in a new detached worktree at the same base commit. Failed attempts are persisted for audit but cannot be applied. Policy violations, validation failures, unsafe repository state, and cancellation never trigger automatic fallback.
 
-An inconclusive result rejected by a strict profile is an evaluation-policy
-failure, so it does not trigger fallback. Worker iteration exhaustion remains a
-bounded model-loop failure and may use the next eligible profile.
+An inconclusive result rejected by a strict profile and exhaustion of a profile
+or task iteration cap are policy failures, so neither triggers fallback.
