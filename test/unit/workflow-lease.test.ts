@@ -128,6 +128,64 @@ test('reclaims a crash-left staging-only lease claim', async function () {
 	assert.deepEqual(await readdir(lockDirectory), [])
 })
 
+test('does not reconcile event staging before rejecting a live owner', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-live-fence-'))
+	const journal = new WorkflowJournal()
+	const created = await journal.create(artifactRoot, workflowDefinition())
+	const workflowId = created.summary.workflowId
+	const live = await acquireWorkflowLease(artifactRoot, workflowId)
+	const lockDirectory = path.join(artifactRoot, 'workflow-locks', workflowId)
+	const staleToken = randomUUID()
+	const staleFinalName = `${staleToken}.lock`
+	await writeFile(
+		path.join(
+			lockDirectory,
+			`.publish-${randomUUID()}-${staleFinalName}`,
+		),
+		staleLockContents(staleToken),
+		{ mode: 0o600 },
+	)
+	const event = createWorkflowEvent(
+		workflowId,
+		2,
+		created.summary.latestEventSha256,
+		{
+			type: 'WorkflowStageStarted',
+			data: {
+				stage: 'implement',
+				executionId: randomUUID(),
+				attemptNumber: 1,
+				sourceRunId: null,
+			},
+		},
+	)
+	const serializedEvent = serializeWorkflowEvent(event)
+	const finalName = `000000000002-${workflowEventSha256(serializedEvent)}.json`
+	const eventsDirectory = path.join(
+		artifactRoot,
+		'workflows',
+		workflowId,
+		'events',
+	)
+	const pendingName = `.publish-${randomUUID()}-${finalName}`
+	await writeFile(
+		path.join(eventsDirectory, pendingName),
+		serializedEvent,
+		{ mode: 0o600 },
+	)
+
+	await assert.rejects(
+		acquireWorkflowLease(artifactRoot, workflowId),
+		hasCode('WORKFLOW_BUSY'),
+	)
+	assert.equal((await readdir(eventsDirectory)).includes(pendingName), true)
+	await live.release()
+	const reclaimed = await acquireWorkflowLease(artifactRoot, workflowId)
+	await reclaimed.release()
+	assert.equal((await readdir(eventsDirectory)).includes(pendingName), false)
+	assert.equal((await journal.timeline(artifactRoot, workflowId)).events.length, 1)
+})
+
 test('fences a paused event helper before reclaiming its stale lease', {
 	skip: process.platform === 'win32',
 }, async function () {

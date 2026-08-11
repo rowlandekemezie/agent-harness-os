@@ -65,6 +65,10 @@ export async function acquireWorkflowLease(
 			throw invalidLease('Workflow lease claim disappeared during acquisition')
 		}
 		const pendingByFinalName = collectPendingClaims(names)
+		const stalePendingClaims: Array<{
+			path: string
+			contents: Buffer
+		}> = []
 		const staleClaims: Array<{
 			path: string
 			temporaryPath: string | null
@@ -91,8 +95,10 @@ export async function acquireWorkflowLease(
 					'Another process is publishing a workflow lease claim',
 				)
 			}
-			await reconcileWorkflowEventPublications(artifactRoot, workflowId)
-			await removeMatchingLock(artifactRoot, pendingPath, pending.contents)
+			stalePendingClaims.push({
+				path: pendingPath,
+				contents: pending.contents,
+			})
 		}
 		for (const name of names) {
 			if (pendingFilePattern.test(name)) {
@@ -139,8 +145,11 @@ export async function acquireWorkflowLease(
 				contents: existing.contents,
 			})
 		}
-		if (staleClaims.length > 0) {
+		if (stalePendingClaims.length > 0 || staleClaims.length > 0) {
 			await reconcileWorkflowEventPublications(artifactRoot, workflowId)
+		}
+		for (const stale of stalePendingClaims) {
+			await removeMatchingLock(artifactRoot, stale.path, stale.contents)
 		}
 		for (const stale of staleClaims) {
 			if (stale.temporaryPath !== null) {
