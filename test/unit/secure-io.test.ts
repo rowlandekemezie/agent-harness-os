@@ -15,7 +15,6 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
 	createPrivateDirectory,
-	readBoundedRegularFile,
 	readBoundedPublishedFile,
 	removePublishedFileIfContentsMatch,
 	removeRegularFileIfContentsMatch,
@@ -349,19 +348,31 @@ test('rejects hostile FIFO artifacts without blocking', {
 	const mkfifo = spawn('mkfifo', [fifoPath], { stdio: 'ignore' })
 	assert.equal(await waitForChild(mkfifo, 1_000), 0)
 
-	await assert.rejects(
-		readBoundedRegularFile(root, fifoPath, 1_024),
-		hasCode('ARTIFACT_FILE_INVALID'),
-	)
-	await assert.rejects(
-		removeRegularFileIfContentsMatch(
+	const secureIoUrl = new URL('../../src/artifacts/secure-io.js', import.meta.url).href
+	const parentProbe = spawn(
+		process.execPath,
+		[
+			'--input-type=module',
+			'-e',
+			`import { readBoundedRegularFile, removeRegularFileIfContentsMatch } from ${JSON.stringify(secureIoUrl)}
+const [root, fifoPath] = process.argv.slice(1)
+for (const operation of [
+	() => readBoundedRegularFile(root, fifoPath, 1024),
+	() => removeRegularFileIfContentsMatch(root, fifoPath, Buffer.from('lease\\n'), 1024),
+]) {
+	try {
+		await operation()
+		process.exit(2)
+	} catch (error) {
+		if (error?.code !== 'ARTIFACT_FILE_INVALID') process.exit(3)
+	}
+}`,
 			root,
 			fifoPath,
-			Buffer.from('lease\n'),
-			1_024,
-		),
-		hasCode('ARTIFACT_FILE_INVALID'),
+		],
+		{ env: {}, stdio: 'ignore' },
 	)
+	assert.equal(await waitForChild(parentProbe, 1_000), 0)
 	const [directoryIdentity, fifoIdentity] = await Promise.all([
 		stat(root, { bigint: true }),
 		stat(fifoPath, { bigint: true }),
