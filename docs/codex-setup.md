@@ -63,6 +63,8 @@ Recommended approvals:
 - `get_worker_run`: approve
 - `list_tasks`: approve
 - `get_task_timeline`: approve
+- `get_observability_trace`: approve
+- `get_observability_metrics`: approve
 - `get_workflow`: approve
 - `list_workflows`: approve
 - `delegate_to_worker`: prompt

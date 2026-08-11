@@ -38,6 +38,7 @@ The harness records these versioned events:
 - `TaskCreated`
 - `RouteSelected`
 - `WorkerStarted`
+- `ModelTurnCompleted` (version 7 and later)
 - `ToolCalled`
 - `WorkerCompleted`
 - `PatchProduced`
@@ -58,7 +59,7 @@ existing private permissions and integrity checks.
 
 `EvaluationCompleted` records evaluator IDs, the aggregate outcome, the profile
 evaluation policy, and failed or unknown dimension IDs. Detailed summaries and
-evidence remain in the run report. Event-schema-version-3 through version-5 attempts require
+evidence remain in the run report. Event-schema-version-3 and later attempts require
 evaluation after validation and before attempt completion, and reject a
 completed strict-profile attempt when evaluation is inconclusive. Version 1 and
 2 timelines remain readable without invented policy evidence.
@@ -76,6 +77,12 @@ measured samples.
 Workflow-created tasks use event schema version 6. `TaskCreated` then binds the
 workflow ID, stage, execution ID, stage-contract digest, and source candidate to
 the run report and task history. Approval fails closed if any binding differs.
+
+Event schema version 7 records bounded wall timestamps and monotonic durations
+for task, routing, attempt, model-turn, tool, validation, and evaluation phases.
+`ModelTurnCompleted` binds each provider turn to the exact number of following
+tool events. These fields support read-only observability and do not alter
+routing or patch authority.
 
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
@@ -119,7 +126,7 @@ a second mutable source of truth. One timeline is bounded to 10,000 events and
 8 MiB. Task listing is bounded to 10,000 directory entries, 25,000 events, and 8 MiB of
 event bytes per request.
 
-Event-schema-version-5 and version-6 tasks also publish a small immutable routing-index entry
+Event-schema-version-5 through version-7 tasks also publish a small immutable routing-index entry
 after `TaskCreated` becomes visible. Evidence reads sort those names newest
 first, validate each entry against the task's ready marker and event chain, and
 read at most the configured sample window. The index avoids reparsing all
@@ -140,6 +147,10 @@ artifact root remains outside the threat model.
 `incomplete` field is true when no terminal `TaskCompleted` event exists. An
 incomplete timeline may represent an active operation or a process that stopped
 before writing its terminal event; the journal does not guess between them.
+
+Task event reads use fatal UTF-8 decoding and screen decoded fields for configured
+credential material. Observability queries reuse this validated reader. See
+[Observability](observability.md) for trace and metric query semantics.
 
 Historical schema-version-1 and version-2 run reports remain readable through
 `get_worker_run`, but cannot pass `apply_worker_patch` because they lack

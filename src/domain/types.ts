@@ -494,7 +494,7 @@ export type TaskSummary = {
 }
 
 export type TaskEventBase = {
-	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6
+	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7
 	eventId: string
 	taskId: string
 	sequence: number
@@ -509,6 +509,7 @@ export type TaskCreatedEvent = TaskEventBase & {
 		mode: WorkerMode
 		repositoryPath: string
 		baseCommit: string
+		executionStartedAt?: string
 		policySha256?: string
 		policySourceCount?: number
 		workflowProvenance?: WorkflowTaskProvenance | null
@@ -521,6 +522,9 @@ export type RouteSelectedEvent = TaskEventBase & {
 		strategy: RoutingStrategy
 		candidateWorkerIds: Array<string>
 		maxAttempts: number
+		startedAt?: string
+		completedAt?: string
+		durationMs?: number
 		evidenceSha256?: string
 		evidenceTaskCount?: number
 		evidenceAttemptCount?: number
@@ -546,6 +550,21 @@ export type ToolCalledEvent = TaskEventBase & {
 		outcome: 'succeeded' | 'failed'
 		inputBytes: number
 		outputBytes: number
+		durationMs: number
+		startedAt?: string
+		completedAt?: string
+	}
+}
+
+export type ModelTurnCompletedEvent = TaskEventBase & {
+	type: 'ModelTurnCompleted'
+	data: {
+		runId: string
+		iteration: number
+		outcome: 'succeeded' | 'failed'
+		toolCallCount: number
+		startedAt: string
+		completedAt: string
 		durationMs: number
 	}
 }
@@ -576,6 +595,9 @@ export type ValidationCompletedEvent = TaskEventBase & {
 		runId: string
 		outcome: 'passed' | 'failed' | 'skipped'
 		commandCount: number
+		startedAt?: string
+		completedAt?: string
+		durationMs?: number
 	}
 }
 
@@ -588,6 +610,9 @@ export type EvaluationCompletedEvent = TaskEventBase & {
 		evaluationPolicy?: 'default' | 'strict'
 		failedDimensions: Array<EvaluationDimensionId>
 		unknownDimensions: Array<EvaluationDimensionId>
+		startedAt?: string
+		completedAt?: string
+		durationMs?: number
 	}
 }
 
@@ -597,6 +622,8 @@ export type AttemptCompletedEvent = TaskEventBase & {
 		runId: string
 		status: RunStatus
 		failureCode: string | null
+		startedAt?: string
+		completedAt?: string
 		durationMs?: number
 		providerLatencyMs?: number
 		totalTokens?: number
@@ -609,6 +636,8 @@ export type TaskCompletedEvent = TaskEventBase & {
 	data: {
 		runId: string | null
 		status: RunStatus
+		completedAt?: string
+		durationMs?: number
 	}
 }
 
@@ -645,6 +674,7 @@ export type TaskEvent =
 	| TaskCreatedEvent
 	| RouteSelectedEvent
 	| WorkerStartedEvent
+	| ModelTurnCompletedEvent
 	| ToolCalledEvent
 	| WorkerCompletedEvent
 	| PatchProducedEvent

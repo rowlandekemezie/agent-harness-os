@@ -22,6 +22,9 @@ All notable changes are documented here.
 - Durable local workflows with bounded plan, implement, test, review, repair, dependency, approval, resume, deadline, and cancellation semantics
 - Digest-chained workflow history plus bounded `create_coding_workflow`, `run_workflow`, `approve_workflow`, `cancel_workflow`, `get_workflow`, and `list_workflows` tools
 - Validated cumulative candidate handoff between fresh detached worktrees
+- Task event schema version 7 with bounded phase timings and model/tool ordering
+- Read-only `get_observability_trace` and `get_observability_metrics` MCP tools
+- Deterministic task/workflow spans, recent task metrics, coverage, and source digests
 
 - ChatGPT-authenticated `codex` worker adapter using ephemeral non-interactive `codex exec`
 - ChatGPT plan-backed Codex workers require no `OPENAI_API_KEY`; external provider workers retain their own credentials and billing
@@ -47,6 +50,8 @@ All notable changes are documented here.
 - Bind routing evidence to event-schema-version-5 history and fail closed on corrupt evidence inputs
 - Bind workflow candidates to current run reports and task history before seeding later stages
 - Serialize workflow runners with private leases and reject credential-bearing workflow definitions or events
+- Reject malformed UTF-8 or credential-bearing task events before observability
+- Bind workflow trace links to repository, stage, execution, run, and candidate provenance
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

@@ -54,6 +54,7 @@ export type CreateTaskInput = {
 	mode: WorkerMode
 	repositoryPath: string
 	baseCommit: string
+	executionStartedAt?: string
 	policy?: ResolvedPolicy
 	workflowProvenance?: WorkflowTaskProvenance
 }
@@ -97,6 +98,12 @@ export class TaskJournal {
 	}
 
 	async create(input: CreateTaskInput): Promise<TaskSummary> {
+		if (input.executionStartedAt !== undefined && input.policy === undefined) {
+			throw new HarnessError(
+				'INVALID_TASK_EVENT',
+				'Schema-version-7 task history requires resolved policy evidence',
+			)
+		}
 		const taskId = randomUUID()
 		const tasksRoot = path.join(input.artifactRoot, taskDirectoryName)
 		const taskDirectory = path.join(tasksRoot, taskId)
@@ -119,9 +126,11 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const schemaVersion = input.workflowProvenance === undefined
-			? input.policy === undefined ? 3 : 5
-			: 6
+		const schemaVersion = input.executionStartedAt === undefined
+			? input.workflowProvenance === undefined
+				? input.policy === undefined ? 3 : 5
+				: 6
+			: 7
 		const event = createEvent(schemaVersion, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
@@ -129,6 +138,9 @@ export class TaskJournal {
 				mode: input.mode,
 				repositoryPath: input.repositoryPath,
 				baseCommit: input.baseCommit,
+				...(schemaVersion < 7
+					? {}
+					: { executionStartedAt: input.executionStartedAt }),
 				...(input.workflowProvenance === undefined
 					? {}
 					: { workflowProvenance: { ...input.workflowProvenance } }),
@@ -140,6 +152,7 @@ export class TaskJournal {
 					}),
 			},
 		})
+		this.assertSafeToPersist(event)
 		const serializedEvent = serializeEvent(event)
 		const eventSha256 = digest(serializedEvent)
 		await writeExclusiveRegularFile(
@@ -194,6 +207,7 @@ export class TaskJournal {
 			current.timeline.task.latestEventSha256,
 			redactedInput,
 		)
+		this.assertSafeToPersist(event)
 		const serializedEvent = serializeEvent(event)
 		projectTaskEvent(current.projection, event, digest(serializedEvent), true)
 
@@ -353,6 +367,7 @@ export class TaskJournal {
 		}
 
 		const entries = await readdir(tasksRoot, { withFileTypes: true })
+		signal?.throwIfAborted()
 		if (entries.length > maxTaskDirectories) {
 			throw traversalLimit(
 				`Task history exceeds the ${maxTaskDirectories}-directory traversal limit`,
@@ -432,6 +447,15 @@ export class TaskJournal {
 		}
 	}
 
+	private assertSafeToPersist(event: TaskEvent): void {
+		if (this.redactor.containsCredentialMaterial(event)) {
+			throw new HarnessError(
+				'TASK_CONTAINS_SECRET',
+				'Task history contains credential material and cannot be persisted or returned',
+			)
+		}
+	}
+
 	async recentTimelines(
 		artifactRoot: string,
 		mode: WorkerMode,
@@ -464,6 +488,7 @@ export class TaskJournal {
 		}
 
 		const entries = await readdir(modeDirectory, { withFileTypes: true })
+		signal?.throwIfAborted()
 		if (entries.length > maxTaskDirectories * 2) {
 			throw traversalLimit(
 				`Routing index exceeds the ${maxTaskDirectories}-task traversal limit`,
@@ -510,6 +535,7 @@ export class TaskJournal {
 					path.join(modeDirectory, pendingName),
 					maxEventBytes,
 				)
+			signal?.throwIfAborted()
 			if (digest(contents) !== match[3]?.toLowerCase()) {
 				throw invalidJournal('Routing index entry digest does not match its name')
 			}
@@ -587,6 +613,7 @@ export class TaskJournal {
 		}
 
 		const entries = await readdir(eventsDirectory, { withFileTypes: true })
+		signal?.throwIfAborted()
 		if (entries.length > maxEventsPerTask * 2) {
 			throw new HarnessError(
 				'TASK_EVENT_LIMIT',
@@ -647,6 +674,7 @@ export class TaskJournal {
 					path.join(eventsDirectory, pendingName),
 					maxEventBytes,
 				)
+			signal?.throwIfAborted()
 			bytesRead += contents.length
 			if (bytesRead > maxTimelineBytes) {
 				throw new HarnessError(
@@ -656,6 +684,7 @@ export class TaskJournal {
 			}
 
 			const event = parseEvent(contents, taskId, expectedSequence)
+			this.assertSafeToPersist(event)
 			const eventSha256 = digest(contents)
 			if (eventSha256 !== match[2]?.toLowerCase()) {
 				throw invalidJournal('Task journal event digest does not match its name')
@@ -676,6 +705,7 @@ export class TaskJournal {
 			throw invalidJournal('Task journal could not be projected')
 		}
 
+		signal?.throwIfAborted()
 		return {
 			timeline: {
 				task: projection.summary,
@@ -702,6 +732,7 @@ export class TaskJournal {
 			await assertPrivateDirectory(artifactRoot, taskDirectory)
 			signal?.throwIfAborted()
 			const entries = await readdir(taskDirectory, { withFileTypes: true })
+			signal?.throwIfAborted()
 			if (entries.length > 4) {
 				throw invalidJournal('Task directory contains too many entries')
 			}
@@ -742,6 +773,7 @@ export class TaskJournal {
 					path.join(taskDirectory, pendingName),
 					256,
 				)
+			signal?.throwIfAborted()
 			return parseTaskReadyMarker(contents, taskId)
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -906,7 +938,7 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
-	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6,
+	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,
@@ -942,14 +974,16 @@ function parseEvent(
 	sequence: number,
 ): TaskEvent {
 	try {
-		const value: unknown = JSON.parse(contents.toString('utf8'))
+		const value: unknown = JSON.parse(
+			new TextDecoder('utf-8', { fatal: true }).decode(contents),
+		)
 		validateTaskEvent(value, taskId, sequence)
 		return value
 	} catch (error) {
 		if (error instanceof HarnessError) {
 			throw error
 		}
-		throw invalidJournal('Task event does not contain valid JSON')
+		throw invalidJournal('Task event is not valid UTF-8 JSON')
 	}
 }
 

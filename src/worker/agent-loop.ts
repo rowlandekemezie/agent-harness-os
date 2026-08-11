@@ -1,9 +1,14 @@
 import type {
+	ProviderCompletion,
 	ProviderMessage,
 	WorkerProvider,
 	WorkerTask,
 } from '../domain/types.js'
 import { HarnessError } from '../lib/errors.js'
+import {
+	finishOperationTimer,
+	startOperationTimer,
+} from '../lib/timing.js'
 import type { WorkerToolExecutor } from './tool-executor.js'
 import { buildInitialUserPrompt, buildSystemPrompt } from './prompts.js'
 
@@ -20,16 +25,33 @@ export type AgentLoopLimits = {
 }
 
 export type ToolCallObservation = {
+	type: 'tool_call'
 	toolName: string
 	iteration: number
 	outcome: 'succeeded' | 'failed'
 	inputBytes: number
 	outputBytes: number
 	durationMs: number
+	startedAt: string
+	completedAt: string
 }
 
-export type ObserveToolCall = (
-	observation: ToolCallObservation,
+export type ModelTurnObservation = {
+	type: 'model_turn'
+	iteration: number
+	outcome: 'succeeded' | 'failed'
+	toolCallCount: number
+	startedAt: string
+	completedAt: string
+	durationMs: number
+}
+
+export type AgentLoopObservation =
+	| ToolCallObservation
+	| ModelTurnObservation
+
+export type ObserveAgentLoop = (
+	observation: AgentLoopObservation,
 ) => Promise<void>
 
 export async function runAgentLoop(
@@ -38,7 +60,7 @@ export async function runAgentLoop(
 	toolExecutor: WorkerToolExecutor,
 	limits: AgentLoopLimits,
 	signal: AbortSignal,
-	observeToolCall?: ObserveToolCall,
+	observeAgentLoop?: ObserveAgentLoop,
 ): Promise<AgentLoopResult> {
 	const messages: Array<ProviderMessage> = [
 		{ role: 'system', content: buildSystemPrompt(task) },
@@ -61,27 +83,72 @@ export async function runAgentLoop(
 			)
 		}
 
-		const completion = await provider.complete({ messages, tools, signal })
-
-		if (
-			completion.content !== null &&
-			Buffer.byteLength(completion.content, 'utf8') >
-				limits.maxAssistantContentBytes
-		) {
-			throw new HarnessError(
-				'WORKER_ASSISTANT_CONTENT_LIMIT',
-				`Worker assistant content exceeded the ${limits.maxAssistantContentBytes}-byte limit`,
-			)
+		const modelTimer = startOperationTimer()
+		let completion: ProviderCompletion
+		try {
+			completion = await provider.complete({ messages, tools, signal })
+		} catch (error) {
+			if (observeAgentLoop !== undefined) {
+				await observeAgentLoop({
+					type: 'model_turn',
+					iteration,
+					outcome: 'failed',
+					toolCallCount: 0,
+					...finishOperationTimer(modelTimer),
+				})
+			}
+			throw error
+		}
+		const modelTiming = finishOperationTimer(modelTimer)
+		try {
+			if (
+				completion.content !== null &&
+				Buffer.byteLength(completion.content, 'utf8') >
+					limits.maxAssistantContentBytes
+			) {
+				throw new HarnessError(
+					'WORKER_ASSISTANT_CONTENT_LIMIT',
+					`Worker assistant content exceeded the ${limits.maxAssistantContentBytes}-byte limit`,
+				)
+			}
+			if (totalToolCalls + completion.toolCalls.length > limits.maxTotalToolCalls) {
+				throw new HarnessError(
+					'WORKER_TOOL_CALL_LIMIT',
+					`Worker exceeded the ${limits.maxTotalToolCalls}-tool-call run limit`,
+				)
+			}
+			if (
+				completion.toolCalls.length === 0 &&
+				(completion.content === null || completion.content.trim() === '')
+			) {
+				throw new HarnessError(
+					'WORKER_EMPTY_RESPONSE',
+					'Worker returned neither tool calls nor a final response',
+				)
+			}
+		} catch (error) {
+			if (observeAgentLoop !== undefined) {
+				await observeAgentLoop({
+					type: 'model_turn',
+					iteration,
+					outcome: 'failed',
+					toolCallCount: 0,
+					...modelTiming,
+				})
+			}
+			throw error
+		}
+		if (observeAgentLoop !== undefined) {
+			await observeAgentLoop({
+				type: 'model_turn',
+				iteration,
+				outcome: 'succeeded',
+				toolCallCount: completion.toolCalls.length,
+				...modelTiming,
+			})
 		}
 
 		totalToolCalls += completion.toolCalls.length
-
-		if (totalToolCalls > limits.maxTotalToolCalls) {
-			throw new HarnessError(
-				'WORKER_TOOL_CALL_LIMIT',
-				`Worker exceeded the ${limits.maxTotalToolCalls}-tool-call run limit`,
-			)
-		}
 
 		messages.push({
 			role: 'assistant',
@@ -96,13 +163,12 @@ export async function runAgentLoop(
 		}
 
 		if (completion.toolCalls.length === 0) {
-			if (completion.content === null || completion.content.trim() === '') {
+			if (completion.content === null) {
 				throw new HarnessError(
 					'WORKER_EMPTY_RESPONSE',
 					'Worker returned neither tool calls nor a final response',
 				)
 			}
-
 			return {
 				finalResponse: completion.content,
 				transcript: transcript.join('\n\n'),
@@ -112,7 +178,7 @@ export async function runAgentLoop(
 
 		for (const toolCall of completion.toolCalls) {
 			let parsedArguments: unknown = {}
-			const toolStartedAt = Date.now()
+			const toolTimer = startOperationTimer()
 
 			try {
 				parsedArguments = JSON.parse(toolCall.function.arguments)
@@ -130,8 +196,9 @@ export async function runAgentLoop(
 				parsedArguments,
 			)
 
-			if (observeToolCall !== undefined) {
-				await observeToolCall({
+			if (observeAgentLoop !== undefined) {
+				await observeAgentLoop({
+					type: 'tool_call',
 					toolName: toolCall.function.name,
 					iteration,
 					outcome: result.isError ? 'failed' : 'succeeded',
@@ -140,7 +207,7 @@ export async function runAgentLoop(
 						'utf8',
 					),
 					outputBytes: Buffer.byteLength(result.content, 'utf8'),
-					durationMs: Date.now() - toolStartedAt,
+					...finishOperationTimer(toolTimer),
 				})
 			}
 			const resultForTranscript = limitTranscriptValue(result.content, 8_000)

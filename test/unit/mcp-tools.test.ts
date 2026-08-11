@@ -101,6 +101,8 @@ test('exposes the worker registry and deterministic route preview without invoki
 			'list_workflows',
 			'list_tasks',
 			'get_task_timeline',
+			'get_observability_trace',
+			'get_observability_metrics',
 			'apply_worker_patch',
 		],
 	)
@@ -119,6 +121,38 @@ test('exposes the worker registry and deterministic route preview without invoki
 		workerId: string
 	}>
 	assert.equal(candidates[0]?.workerId, 'cheap-worker')
+})
+
+test('marks observability tools read-only and requires an explicit metric mode', async function () {
+	const tools = new McpTools(loadConfig({}))
+	for (const name of [
+		'get_observability_trace',
+		'get_observability_metrics',
+	]) {
+		const definition = tools.list().find(candidate => candidate.name === name)
+		assert.ok(definition)
+		assert.equal(definition.annotations.readOnlyHint, true)
+		assert.equal(definition.annotations.destructiveHint, false)
+		assert.equal(definition.annotations.idempotentHint, true)
+	}
+	const result = await tools.call('get_observability_metrics', {
+		repositoryPath: process.cwd(),
+	})
+	assert.equal(result.isError, true)
+	assert.equal(result.structuredContent?.['error'], 'INVALID_ARGUMENT')
+
+	const repositoryPath = await createTestRepository()
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'mcp-observability-'))
+	const configuredTools = new McpTools(loadConfig({
+		AGENT_HARNESS_ARTIFACT_ROOT: artifactRoot,
+	}))
+	const metrics = await configuredTools.call('get_observability_metrics', {
+		repositoryPath,
+		mode: 'implementation',
+		taskLimit: 10,
+	})
+	assert.equal(metrics.isError, undefined)
+	assert.equal(metrics.structuredContent?.['sampledTaskCount'], 0)
 })
 
 test('requires an implementation stage for durable workflows', async function () {

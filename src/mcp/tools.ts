@@ -29,6 +29,7 @@ import { createSanitizedEnvironment, runProcess } from '../lib/process.js'
 import { WorkerRegistry } from '../provider/registry.js'
 import type { WorkerRoute } from '../provider/router.js'
 import { Logger } from '../lib/logger.js'
+import { ObservabilityService } from '../observability/service.js'
 import { WorkerService } from '../worker/service.js'
 import {
 	WorkflowService,
@@ -281,6 +282,38 @@ const toolDefinitions: Array<McpToolDefinition> = [
 		annotations: annotation('Read task timeline', true, false, true),
 	},
 	{
+		name: 'get_observability_trace',
+		description: 'Project a bounded task or workflow trace from validated append-only history without exporting or changing it.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				kind: { enum: ['task', 'workflow'] },
+				targetId: { type: 'string', minLength: 36, maxLength: 36 },
+				limit: { type: 'integer', minimum: 1, maximum: 200 },
+				cursor: { type: 'string', minLength: 16, maxLength: 16 },
+			},
+			required: ['repositoryPath', 'kind', 'targetId'],
+			additionalProperties: false,
+		},
+		annotations: annotation('Read observability trace', true, false, true),
+	},
+	{
+		name: 'get_observability_metrics',
+		description: 'Aggregate deterministic task, worker, evaluation, patch, timing, token, and cost metrics from recent validated history.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				mode: { enum: ['research', 'implementation', 'testing', 'review'] },
+				taskLimit: { type: 'integer', minimum: 1, maximum: 100 },
+			},
+			required: ['repositoryPath', 'mode'],
+			additionalProperties: false,
+		},
+		annotations: annotation('Read observability metrics', true, false, true),
+	},
+	{
 		name: 'apply_worker_patch',
 		description: 'Apply a completed worker patch to a clean checkout after integrity, base-commit, and git-apply checks.',
 		inputSchema: {
@@ -301,6 +334,7 @@ export class McpTools {
 	private readonly workerRegistry: WorkerRegistry
 	private readonly workerService: WorkerService
 	private readonly workflowService: WorkflowService
+	private readonly observabilityService: ObservabilityService
 
 	constructor(config: HarnessConfig) {
 		this.config = config
@@ -312,6 +346,7 @@ export class McpTools {
 		this.workflowService = new WorkflowService(config, {
 			workerService: this.workerService,
 		})
+		this.observabilityService = new ObservabilityService(config)
 	}
 
 	list(): Array<McpToolDefinition> {
@@ -436,6 +471,7 @@ export class McpTools {
 									? null
 									: requireString(argumentsRecord['workerId'], 'workerId', { minLength: 1, maxLength: 64 }),
 							},
+							signal,
 						),
 					)
 				}
@@ -445,8 +481,65 @@ export class McpTools {
 						await this.workerService.getTaskTimeline(
 							requireString(argumentsRecord['repositoryPath'], 'repositoryPath', { minLength: 1, maxLength: 4_096 }),
 							requireString(argumentsRecord['taskId'], 'taskId', { minLength: 36, maxLength: 36 }),
+							signal,
 						),
 					)
+				}
+				case 'get_observability_trace': {
+					const argumentsRecord = requireRecord(rawArguments, 'arguments')
+					const kind = argumentsRecord['kind']
+					if (kind !== 'task' && kind !== 'workflow') {
+						throw new HarnessError(
+							'INVALID_ARGUMENT',
+							'kind must be task or workflow',
+						)
+					}
+					const targetId = requireString(
+						argumentsRecord['targetId'],
+						'targetId',
+						{ minLength: 36, maxLength: 36 },
+					)
+					return result(await this.observabilityService.trace(
+						parseRepositoryPath(argumentsRecord['repositoryPath']),
+						kind === 'task'
+							? { kind, taskId: targetId }
+							: { kind, workflowId: targetId },
+						{
+							limit: optionalInteger(
+								argumentsRecord['limit'],
+								'limit',
+								100,
+								{ min: 1, max: 200 },
+							),
+							cursor: argumentsRecord['cursor'] === undefined
+								? null
+								: requireString(
+									argumentsRecord['cursor'],
+									'cursor',
+									{ minLength: 16, maxLength: 16 },
+								),
+						},
+						signal,
+					))
+				}
+				case 'get_observability_metrics': {
+					const argumentsRecord = requireRecord(rawArguments, 'arguments')
+					if (argumentsRecord['mode'] === undefined) {
+						throw new HarnessError('INVALID_ARGUMENT', 'mode is required')
+					}
+					return result(await this.observabilityService.metrics(
+						parseRepositoryPath(argumentsRecord['repositoryPath']),
+						{
+							mode: parseMode(argumentsRecord['mode']),
+							taskLimit: optionalInteger(
+								argumentsRecord['taskLimit'],
+								'taskLimit',
+								50,
+								{ min: 1, max: 100 },
+							),
+						},
+						signal,
+					))
 				}
 				case 'apply_worker_patch': {
 					const argumentsRecord = requireRecord(rawArguments, 'arguments')

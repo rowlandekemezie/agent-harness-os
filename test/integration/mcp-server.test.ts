@@ -44,6 +44,8 @@ test('speaks newline-delimited MCP JSON-RPC over stdio', async function () {
 			'list_workflows',
 			'list_tasks',
 			'get_task_timeline',
+			'get_observability_trace',
+			'get_observability_metrics',
 			'apply_worker_patch',
 		],
 	)
@@ -112,9 +114,11 @@ test('supports stateless MCP 2026-07-28 discovery and tool calls', async functio
 				'get_workflow',
 				'list_workflows',
 				'list_tasks',
-			'get_task_timeline',
-			'apply_worker_patch',
-		],
+				'get_task_timeline',
+				'get_observability_trace',
+				'get_observability_metrics',
+				'apply_worker_patch',
+			],
 		)
 
 		child.stdin.write(`${JSON.stringify({
