@@ -277,6 +277,7 @@ async function confirmRemoval(
 	await syncWorkingDirectory()
 	await assertWorkingDirectory(destination)
 	await assertEntryMissing(name)
+	await assertWorkingDirectory(destination)
 }
 
 async function assertEntryMissing(name: string): Promise<void> {
