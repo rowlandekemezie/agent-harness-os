@@ -204,6 +204,46 @@ test('acknowledges publication only after the exact final link is durable', asyn
 	assert.equal(await readFile(path.join(destination, 'event.json'), 'utf8'), 'secret')
 })
 
+test('acknowledges removal only after its directory sync completes', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-remove-ack-'))
+	const filePath = path.join(root, 'workflow.lock')
+	await writeFile(filePath, 'lease\n', { mode: 0o600 })
+	const [directoryIdentity, fileIdentity] = await Promise.all([
+		stat(root, { bigint: true }),
+		stat(filePath, { bigint: true }),
+	])
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'unlink-file',
+			directoryIdentity.dev.toString(),
+			directoryIdentity.ino.toString(),
+			root,
+			root,
+			'workflow.lock',
+			fileIdentity.dev.toString(),
+			fileIdentity.ino.toString(),
+		],
+		{ cwd: root, env: {}, stdio: ['ignore', 'pipe', 'ignore'] },
+	)
+	const childStdout = child.stdout
+	assert.ok(childStdout)
+	let output = ''
+	childStdout.on('data', (chunk: Buffer) => {
+		output += chunk.toString('utf8')
+	})
+	const exitCode = await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('close', resolve)
+	})
+	const lines = output.trim().split('\n')
+
+	assert.equal(exitCode, 0)
+	assert.equal(lines.indexOf('removal-started') < lines.indexOf('removal-committed'), true)
+	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+})
+
 test('handles large exclusive-write collisions without crashing', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-epipe-'))
 	const filePath = path.join(root, 'report.json')

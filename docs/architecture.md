@@ -167,7 +167,9 @@ Authoritative event publication uses a two-phase helper protocol. The helper
 stages and fsyncs bytes, then waits. The parent keeps cancellation armed after
 granting commit until the helper acknowledges a directory-synced final link. If
 abort races that acknowledgment, the parent syncs the verified directory and
-accepts only the exact final or final/staging inode and bytes.
+accepts only the exact final or final/staging inode and bytes. Removal helpers
+likewise acknowledge only after directory sync; an unacknowledged mutation is
+resynced or fails closed.
 
 ## Why this remains one package
 

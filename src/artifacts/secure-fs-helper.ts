@@ -100,9 +100,11 @@ async function removeFile(
 		await handle.close()
 	}
 	await assertWorkingDirectory(destination)
+	await writeControlLine('removal-started')
 	await unlink(name)
 	await assertWorkingDirectory(destination)
 	await syncWorkingDirectory()
+	await writeControlLine('removal-committed')
 }
 
 function parseLinkCount(value: string): bigint {
@@ -235,7 +237,7 @@ async function publishFile(
 			await publishedHandle.close()
 		}
 		await syncWorkingDirectory()
-		process.stdout.write('committed\n')
+		await writeControlLine('committed')
 		try {
 			await assertWorkingDirectory(destination)
 			await unlink(temporaryName)
@@ -260,6 +262,18 @@ async function syncDirectory(destination: DestinationIdentity): Promise<void> {
 	await assertWorkingDirectory(destination)
 	await syncWorkingDirectory()
 	await assertWorkingDirectory(destination)
+}
+
+async function writeControlLine(value: string): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		process.stdout.write(`${value}\n`, error => {
+			if (error === null) {
+				resolve()
+				return
+			}
+			reject(error)
+		})
+	})
 }
 
 async function waitForPublicationCommit(): Promise<void> {

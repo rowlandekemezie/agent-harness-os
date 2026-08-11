@@ -667,6 +667,8 @@ async function runHelper(
 	let helperOutput = ''
 	let publicationCommitGranted = false
 	let publicationAcknowledged = false
+	let removalStarted = false
+	let removalAcknowledged = false
 
 	function handleAbort(): void {
 		if (!publicationAcknowledged) {
@@ -720,6 +722,24 @@ async function runHelper(
 				}
 				publicationAcknowledged = true
 				signal?.removeEventListener('abort', handleAbort)
+			} else if (line === 'removal-started') {
+				if (operation !== 'unlink-file' || removalStarted) {
+					controlState.error = new Error(
+						'Secure artifact helper sent an invalid removal signal',
+					)
+					child.kill('SIGTERM')
+					continue
+				}
+				removalStarted = true
+			} else if (line === 'removal-committed') {
+				if (operation !== 'unlink-file' || !removalStarted || removalAcknowledged) {
+					controlState.error = new Error(
+						'Secure artifact helper sent an invalid removal acknowledgment',
+					)
+					child.kill('SIGTERM')
+					continue
+				}
+				removalAcknowledged = true
 			}
 		}
 	})
@@ -758,6 +778,33 @@ async function runHelper(
 	) {
 		return { publicationUncertain: false }
 	}
+	if (
+		operation === 'unlink-file' &&
+		removalAcknowledged &&
+		inputState.error === null &&
+		controlState.error === null
+	) {
+		return { publicationUncertain: false }
+	}
+	if (operation === 'unlink-file' && removalStarted && !removalAcknowledged) {
+		try {
+			await runHelper(rootPath, workingDirectory, identity, ['sync-directory'])
+		} catch (error) {
+			throw new HarnessError(
+				'ARTIFACT_DURABILITY_FAILED',
+				'Artifact removal could not be confirmed durable',
+				{ cause: error instanceof Error ? error.message : String(error) },
+			)
+		}
+		try {
+			await lstat(path.join(workingDirectory, argumentsList[1] ?? ''))
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+				return { publicationUncertain: false }
+			}
+			throw error
+		}
+	}
 	if (signal?.aborted === true && !publicationAcknowledged) {
 		if (operation === 'publish-file' && publicationCommitGranted) {
 			return { publicationUncertain: true }
@@ -769,7 +816,8 @@ async function runHelper(
 		result.code !== 0 ||
 		inputState.error !== null ||
 		controlState.error !== null ||
-		(operation === 'publish-file' && !publicationAcknowledged)
+		(operation === 'publish-file' && !publicationAcknowledged) ||
+		(operation === 'unlink-file' && !removalAcknowledged)
 	) {
 		throw new HarnessError(
 			'ARTIFACT_WRITE_FAILED',

@@ -142,7 +142,8 @@ workflow context can be reused.
 Stale workflow-lease recovery reconciles `.publish-*` event links before a new
 runner is admitted. It removes a staging-only publication by verified identity,
 or retains an already linked final event and removes only its matching staging
-link.
+link. A removal is complete only after the helper acknowledges its directory
+sync; unconfirmed durability stops recovery.
 
 An interrupted atomic publication can leave a UUID task directory without
 `.task-ready`, or a reserved `.publish-*` entry. Read-only queries recognize a

@@ -617,8 +617,7 @@ function isPublicationRace(error: unknown): boolean {
 		return true
 	}
 	return error instanceof HarnessError &&
-		(error.code === 'ARTIFACT_HARD_LINK_DENIED' ||
-			error.code === 'ARTIFACT_WRITE_FAILED')
+		error.code === 'ARTIFACT_HARD_LINK_DENIED'
 }
 
 function eventFileName(sequence: number, sha256: string): string {
