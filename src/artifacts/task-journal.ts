@@ -176,6 +176,8 @@ export class TaskJournal {
 				eventFileName(event.sequence, digest(serializedEvent)),
 			),
 			serializedEvent,
+			0o600,
+			signal,
 		)
 		return event
 	}

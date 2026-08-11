@@ -100,6 +100,8 @@ export class ArtifactStore {
 			input.artifactRoot,
 			reportPath,
 			reportContents,
+			0o600,
+			input.signal,
 		)
 
 		return persistedReport

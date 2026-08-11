@@ -159,6 +159,9 @@ async function publishFile(
 
 	let finalLinked = false
 	try {
+		const commit = waitForPublicationCommit()
+		process.stdout.write('prepared\n')
+		await commit
 		await assertWorkingDirectory(destination)
 		await link(temporaryName, finalName)
 		finalLinked = true
@@ -191,6 +194,36 @@ async function publishFile(
 		}
 		throw error
 	}
+}
+
+async function waitForPublicationCommit(): Promise<void> {
+	if (typeof process.send !== 'function') {
+		throw new Error('Secure filesystem helper requires a commit channel')
+	}
+
+	await new Promise<void>((resolve, reject) => {
+		function cleanup(): void {
+			process.removeListener('message', handleMessage)
+			process.removeListener('disconnect', handleDisconnect)
+		}
+
+		function handleMessage(message: unknown): void {
+			cleanup()
+			if (message !== 'commit') {
+				reject(new Error('Secure filesystem helper received an invalid commit decision'))
+				return
+			}
+			resolve()
+		}
+
+		function handleDisconnect(): void {
+			cleanup()
+			reject(new Error('Secure filesystem helper commit channel closed'))
+		}
+
+		process.once('message', handleMessage)
+		process.once('disconnect', handleDisconnect)
+	})
 }
 
 async function readStandardInput(expectedBytes: number): Promise<Buffer> {

@@ -203,7 +203,9 @@ export async function writeExclusiveRegularFile(
 	filePath: string,
 	contents: string | Buffer,
 	mode = 0o600,
+	signal?: AbortSignal,
 ): Promise<void> {
+	signal?.throwIfAborted()
 	assertPathInside(rootPath, filePath)
 	const parentPath = path.dirname(filePath)
 	const identity = await getDirectoryIdentity(rootPath, parentPath)
@@ -223,6 +225,7 @@ export async function writeExclusiveRegularFile(
 			buffer.length.toString(),
 		],
 		buffer,
+		signal,
 	)
 	const handle = await open(filePath, constants.O_RDONLY | noFollowFlag)
 	try {
@@ -417,7 +420,10 @@ async function runHelper(
 	identity: DirectoryIdentity,
 	argumentsList: Array<string>,
 	input?: Buffer,
+	signal?: AbortSignal,
 ): Promise<void> {
+	signal?.throwIfAborted()
+	const operation = argumentsList[0]
 	const child = spawn(
 		process.execPath,
 		[helperPath, argumentsList[0] ?? '', identity.device, identity.inode,
@@ -426,14 +432,69 @@ async function runHelper(
 		{
 			cwd: workingDirectory,
 			env: {},
-			stdio: ['pipe', 'ignore', 'pipe'],
+			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 		},
 	)
 	const errorChunks: Array<Buffer> = []
 	let errorBytes = 0
 	const inputState: { error: Error | null } = { error: null }
+	const controlState: { error: Error | null } = { error: null }
+	const helperStdin = child.stdin
+	const helperStdout = child.stdout
+	const helperStderr = child.stderr
+	if (helperStdin === null || helperStdout === null || helperStderr === null) {
+		child.kill('SIGTERM')
+		throw new HarnessError(
+			'ARTIFACT_WRITE_FAILED',
+			'Secure artifact helper pipes were not created',
+		)
+	}
+	let helperOutput = ''
+	let publicationCommitted = false
 
-	child.stderr.on('data', (chunk: Buffer) => {
+	function handleAbort(): void {
+		if (!publicationCommitted) {
+			child.kill('SIGTERM')
+		}
+	}
+
+	function commitPublication(): void {
+		if (operation !== 'publish-file' || publicationCommitted) {
+			controlState.error = new Error('Secure artifact helper sent an invalid preparation signal')
+			child.kill('SIGTERM')
+			return
+		}
+		if (signal?.aborted === true) {
+			handleAbort()
+			return
+		}
+
+		try {
+			child.send('commit')
+			publicationCommitted = true
+			signal?.removeEventListener('abort', handleAbort)
+		} catch (error) {
+			controlState.error = error instanceof Error ? error : new Error(String(error))
+			child.kill('SIGTERM')
+		}
+	}
+
+	helperStdout.on('data', (chunk: Buffer) => {
+		helperOutput += chunk.toString('utf8')
+		while (true) {
+			const lineEnd = helperOutput.indexOf('\n')
+			if (lineEnd === -1) {
+				break
+			}
+			const line = helperOutput.slice(0, lineEnd)
+			helperOutput = helperOutput.slice(lineEnd + 1)
+			if (line === 'prepared') {
+				commitPublication()
+			}
+		}
+	})
+
+	helperStderr.on('data', (chunk: Buffer) => {
 		if (errorBytes >= maxHelperErrorBytes) {
 			return
 		}
@@ -442,9 +503,13 @@ async function runHelper(
 		errorChunks.push(bounded)
 		errorBytes += bounded.length
 	})
-	child.stdin.on('error', (error: Error) => {
+	helperStdin.on('error', (error: Error) => {
 		inputState.error = error
 	})
+	signal?.addEventListener('abort', handleAbort, { once: true })
+	if (signal?.aborted === true) {
+		handleAbort()
+	}
 
 	const exitPromise = new Promise<{ code: number | null, signal: NodeJS.Signals | null }>(
 		(resolve, reject) => {
@@ -452,16 +517,26 @@ async function runHelper(
 			child.once('exit', (code, signal) => resolve({ code, signal }))
 		},
 	)
-	child.stdin.end(input)
+	helperStdin.end(input)
 	const result = await exitPromise
+	signal?.removeEventListener('abort', handleAbort)
+	if (signal?.aborted === true && !publicationCommitted) {
+		signal.throwIfAborted()
+	}
 
-	if (result.code !== 0 || inputState.error !== null) {
+	if (
+		result.code !== 0 ||
+		inputState.error !== null ||
+		controlState.error !== null ||
+		(operation === 'publish-file' && !publicationCommitted)
+	) {
 		throw new HarnessError(
 			'ARTIFACT_WRITE_FAILED',
 			'Secure artifact filesystem operation failed',
 			{
 				cause: Buffer.concat(errorChunks).toString('utf8').trim(),
 				inputError: inputState.error?.message ?? null,
+				controlError: controlState.error?.message ?? null,
 				exitCode: result.code,
 				signal: result.signal,
 			},

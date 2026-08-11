@@ -29,6 +29,7 @@ All notable changes are documented here.
 - Reject legacy run reports at the evaluation-bound patch-application gate
 - Bound evaluator execution by cancellation and deadline, and final reports by post-redaction UTF-8 bytes
 - Keep cancellation and deadlines authoritative through final run publication
+- Order cancellation against atomic event publication with an explicit commit grant
 
 - Strip OpenAI API credential environment variables from delegated Codex subprocesses
 - Reject provider-only API configuration on subscription-backed Codex workers

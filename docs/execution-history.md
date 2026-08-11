@@ -111,9 +111,10 @@ incomplete timeline may represent an active operation or a process that stopped
 before writing its terminal event; the journal does not guess between them.
 
 Historical schema-version-1 and version-2 run reports remain readable through
-`get_worker_run` and applicable through `apply_worker_patch`. They do not have
-mandatory evaluation evidence. Version 1 reports do not have a task ID, so the
-harness cannot synthesize a task timeline for them.
+`get_worker_run`, but cannot pass `apply_worker_patch` because they lack
+mandatory evaluation evidence. Rerun the task to produce an applicable report.
+Version 1 reports do not have a task ID, so the harness cannot synthesize a task
+timeline for them.
 
 ## Replay semantics
 
