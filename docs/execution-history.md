@@ -104,7 +104,8 @@ exclusive `.task-ready` marker links the task ID to its first event digest.
 Readers recognize a verified staging/final hard-link pair as committed without
 mutating it, ignore staging-only names, and validate exact event fields, the
 full lifecycle, run relationships, containment, sequence, and digests before
-returning content.
+returning content. Run-report and patch readers use the same pair validation;
+lease release removes only a matching staging link before its final claim.
 
 A process crash may leave a UUID task directory without `.task-ready`, or a
 `.publish-*` staging link. Queries remain read-only: they recognize a matching

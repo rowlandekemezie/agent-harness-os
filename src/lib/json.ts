@@ -21,7 +21,7 @@ export function requireRecord(
 export function requireString(
 	value: unknown,
 	fieldName: string,
-	options: { minLength?: number; maxLength?: number } = {},
+	options: { minLength?: number; maxLength?: number; maxBytes?: number } = {},
 ): string {
 	if (typeof value !== 'string') {
 		throw new HarnessError(
@@ -32,11 +32,16 @@ export function requireString(
 
 	const minLength = options.minLength ?? 0
 	const maxLength = options.maxLength ?? Number.MAX_SAFE_INTEGER
+	const maxBytes = options.maxBytes ?? Number.MAX_SAFE_INTEGER
 
-	if (value.length < minLength || value.length > maxLength) {
+	if (
+		value.length < minLength ||
+		value.length > maxLength ||
+		Buffer.byteLength(value, 'utf8') > maxBytes
+	) {
 		throw new HarnessError(
 			'INVALID_ARGUMENT',
-			`${fieldName} must be between ${minLength} and ${maxLength} characters`,
+			`${fieldName} exceeds its character or byte bound`,
 		)
 	}
 

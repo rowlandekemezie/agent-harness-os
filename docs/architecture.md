@@ -163,7 +163,11 @@ Fallback occurs outside an attempt. The repository lease remains held, while the
 
 Every attempt has its own immutable audit record. Only a completed version 3 run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, patch, and evaluation history deterministically. Removing a failed reviewer from `report.json`, or relabeling the report as legacy, cannot make a patch applicable. Version 1 and 2 reports remain readable for audit but must be rerun before application. Failure to append later patch-lifecycle events does not change patch authority.
 
-Authoritative event publication uses a two-phase helper protocol. The helper stages and fsyncs bytes, then waits. The parent grants commit only while the task signal and deadline remain clear; that grant is the cancellation linearization point before the helper creates the final atomic link.
+Authoritative event publication uses a two-phase helper protocol. The helper
+stages and fsyncs bytes, then waits. The parent keeps cancellation armed after
+granting commit until the helper acknowledges a directory-synced final link. If
+abort races that acknowledgment, the parent syncs the verified directory and
+accepts only the exact final or final/staging inode and bytes.
 
 ## Why this remains one package
 

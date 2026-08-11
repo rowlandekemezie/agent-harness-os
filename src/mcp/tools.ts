@@ -383,7 +383,10 @@ export class McpTools {
 						parseRepositoryPath(argumentsRecord['repositoryPath']),
 						requireString(argumentsRecord['workflowId'], 'workflowId', { minLength: 36, maxLength: 36 }),
 						decision,
-						requireString(argumentsRecord['feedback'] ?? '', 'feedback', { maxLength: 4_000 }),
+						requireString(argumentsRecord['feedback'] ?? '', 'feedback', {
+							maxLength: 4_000,
+							maxBytes: 4_000,
+						}),
 						signal,
 					))
 				}

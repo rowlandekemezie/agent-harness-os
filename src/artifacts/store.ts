@@ -17,7 +17,7 @@ import { isResolvedPolicy } from '../policy/engine.js'
 import {
 	createPrivateDirectory,
 	ensurePrivateDirectory,
-	readBoundedRegularFile,
+	readBoundedPublishedFile,
 	writeExclusiveRegularFile,
 } from './secure-io.js'
 
@@ -60,6 +60,12 @@ export class ArtifactStore {
 			patchPath: input.patch === '' ? null : patchPath,
 			patchSha256: input.patch === '' ? null : sha256(input.patch),
 			reportPath,
+		}
+		if (this.redactor.containsCredentialMaterial(persistedReport)) {
+			throw new HarnessError(
+				'ARTIFACT_CONTAINS_SECRET',
+				'Run report contains credential material and cannot be persisted',
+			)
 		}
 		validateReport(persistedReport, reportPath, input.report.runId)
 		const reportContents = `${JSON.stringify(persistedReport, null, 2)}\n`
@@ -119,7 +125,7 @@ export class ArtifactStore {
 		let contents: Buffer
 
 		try {
-			contents = await readBoundedRegularFile(
+			contents = await readBoundedPublishedFile(
 				artifactRoot,
 				reportPath,
 				maxReportBytes,
@@ -144,14 +150,15 @@ export class ArtifactStore {
 		}
 
 		try {
-			const serializedReport = contents.toString('utf8')
-			if (this.redactor.redact(serializedReport) !== serializedReport) {
+			const serializedReport = new TextDecoder('utf-8', { fatal: true })
+				.decode(contents)
+			const parsed: unknown = JSON.parse(serializedReport)
+			if (this.redactor.containsCredentialMaterial(parsed)) {
 				throw new HarnessError(
 					'ARTIFACT_CONTAINS_SECRET',
 					'Run report contains credential material and cannot be trusted',
 				)
 			}
-			const parsed: unknown = JSON.parse(serializedReport)
 			return validateReport(parsed, reportPath, runId)
 		} catch (error) {
 			if (error instanceof HarnessError) {
@@ -186,7 +193,7 @@ export class ArtifactStore {
 			)
 		}
 
-		return await readBoundedRegularFile(
+		return await readBoundedPublishedFile(
 			artifactRoot,
 			expectedPatchPath,
 			maxArtifactPatchBytes,

@@ -43,6 +43,22 @@ test('serializes workflow execution and releases only its own lease', async func
 	assert.deepEqual(await readdir(lockDirectory), [])
 })
 
+test('releases a live lease with a crash-left publication link', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-lease-live-pair-'))
+	const workflowId = randomUUID()
+	const lease = await acquireWorkflowLease(artifactRoot, workflowId)
+	const lockDirectory = path.join(artifactRoot, 'workflow-locks', workflowId)
+	const finalName = (await readdir(lockDirectory)).find(name => name.endsWith('.lock'))
+	assert.ok(finalName)
+	await link(
+		path.join(lockDirectory, finalName),
+		path.join(lockDirectory, `.publish-${randomUUID()}-${finalName}`),
+	)
+
+	await lease.release()
+	assert.deepEqual(await readdir(lockDirectory), [])
+})
+
 test('fails closed on an invalid workflow lease', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-lease-invalid-'))
 	const workflowId = randomUUID()

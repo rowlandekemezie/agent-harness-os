@@ -58,6 +58,9 @@ async function main(): Promise<void> {
 				destination,
 			)
 			return
+		case 'sync-directory':
+			await syncDirectory(destination)
+			return
 		case 'unlink-file':
 			await removeFile(
 				requireName(argumentsList[0]),
@@ -232,6 +235,7 @@ async function publishFile(
 			await publishedHandle.close()
 		}
 		await syncWorkingDirectory()
+		process.stdout.write('committed\n')
 		try {
 			await assertWorkingDirectory(destination)
 			await unlink(temporaryName)
@@ -243,15 +247,19 @@ async function publishFile(
 		}
 	} catch (error) {
 		if (finalLinked) {
-			// Linking the exclusive final name is the publication linearization
-			// point. Never roll it back; recovery validates and removes any
-			// remaining staging link.
-			await syncWorkingDirectory().catch(() => undefined)
-			return
+			// Never roll an exclusive final link back. The parent treats a missing
+			// durable acknowledgment as uncertain and reconciles the exact file.
+			throw error
 		}
 		await unlink(temporaryName).catch(() => undefined)
 		throw error
 	}
+}
+
+async function syncDirectory(destination: DestinationIdentity): Promise<void> {
+	await assertWorkingDirectory(destination)
+	await syncWorkingDirectory()
+	await assertWorkingDirectory(destination)
 }
 
 async function waitForPublicationCommit(): Promise<void> {

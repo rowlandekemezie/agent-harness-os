@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import {
+	link,
 	mkdtemp,
 	readFile,
 	rename,
@@ -14,6 +15,8 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
 	createPrivateDirectory,
+	readBoundedPublishedFile,
+	removePublishedFileIfContentsMatch,
 	removeRegularFileIfContentsMatch,
 	writeExclusiveRegularFile,
 } from '../../src/artifacts/secure-io.js'
@@ -151,6 +154,56 @@ test('does not publish a prepared file without the parent commit grant', async f
 	await assert.rejects(readFile(path.join(destination, temporaryName)))
 })
 
+test('acknowledges publication only after the exact final link is durable', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-ack-'))
+	const destination = await mkdtemp(path.join(root, 'destination-'))
+	const identity = await stat(destination, { bigint: true })
+	const temporaryName = '.publish-66666666-6666-4666-8666-666666666666-event.json'
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'publish-file',
+			identity.dev.toString(),
+			identity.ino.toString(),
+			root,
+			destination,
+			'event.json',
+			temporaryName,
+			'600',
+			'6',
+		],
+		{ cwd: destination, env: {}, stdio: ['pipe', 'pipe', 'ignore', 'ipc'] },
+	)
+	const childStdin = child.stdin
+	const childStdout = child.stdout
+	assert.ok(childStdin)
+	assert.ok(childStdout)
+	let output = ''
+	const prepared = new Promise<void>((resolve, reject) => {
+		child.once('error', reject)
+		childStdout.on('data', (chunk: Buffer) => {
+			output += chunk.toString('utf8')
+			if (output.split('\n').includes('prepared')) {
+				resolve()
+			}
+		})
+	})
+	childStdin.end('secret')
+	await prepared
+	await new Promise<void>((resolve, reject) => {
+		child.send('commit', error => error === null ? resolve() : reject(error))
+	})
+	const exitCode = await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('exit', resolve)
+	})
+
+	assert.equal(exitCode, 0)
+	assert.equal(output.split('\n').includes('committed'), true)
+	assert.equal(await readFile(path.join(destination, 'event.json'), 'utf8'), 'secret')
+})
+
 test('handles large exclusive-write collisions without crashing', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-epipe-'))
 	const filePath = path.join(root, 'report.json')
@@ -203,6 +256,45 @@ test('removes only the regular file with the expected contents', async function 
 		true,
 	)
 	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+})
+
+test('reads and removes a verified crash-left publication pair', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-pair-'))
+	const filePath = path.join(root, 'report.json')
+	const temporaryPath = path.join(
+		root,
+		'.publish-44444444-4444-4444-8444-444444444444-report.json',
+	)
+	const contents = Buffer.from('exact report bytes\n')
+	await writeFile(filePath, contents, { mode: 0o600 })
+	await link(filePath, temporaryPath)
+
+	assert.deepEqual(
+		await readBoundedPublishedFile(root, filePath, 1_024),
+		contents,
+	)
+	assert.equal(
+		await removePublishedFileIfContentsMatch(root, filePath, contents, 1_024),
+		true,
+	)
+	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+	await assert.rejects(readFile(temporaryPath), hasCode('ENOENT'))
+})
+
+test('rejects a publication staging file with different bytes and identity', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-pair-mismatch-'))
+	const filePath = path.join(root, 'report.json')
+	const temporaryPath = path.join(
+		root,
+		'.publish-55555555-5555-4555-8555-555555555555-report.json',
+	)
+	await writeFile(filePath, 'expected\n', { mode: 0o600 })
+	await writeFile(temporaryPath, 'replacement\n', { mode: 0o600 })
+
+	await assert.rejects(
+		readBoundedPublishedFile(root, filePath, 1_024),
+		hasCode('ARTIFACT_HARD_LINK_DENIED'),
+	)
 })
 
 function hasCode(code: string): (error: unknown) => boolean {

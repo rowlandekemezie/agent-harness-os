@@ -165,6 +165,19 @@ test('forwards MCP cancellation to workflow approval', async function () {
 	assert.equal(receivedSignal, controller.signal)
 })
 
+test('rejects approval feedback that exceeds its UTF-8 byte bound', async function () {
+	const tools = new McpTools(loadConfig({}))
+	const response = await tools.call('approve_workflow', {
+		repositoryPath: '/tmp/repository',
+		workflowId: randomUUID(),
+		decision: 'rejected',
+		feedback: '🙂'.repeat(2_000),
+	})
+
+	assert.equal(response.isError, true)
+	assert.equal(response.structuredContent?.['error'], 'INVALID_ARGUMENT')
+})
+
 test('creates and reads a durable workflow without invoking a provider', async function () {
 	const repositoryPath = await createTestRepository()
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'mcp-workflow-'))

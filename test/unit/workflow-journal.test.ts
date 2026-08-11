@@ -444,10 +444,17 @@ test('fails closed on tampered events and unsafe read permissions', async functi
 
 test('rejects credential material instead of transforming workflow events', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-secret-'))
+	const secret = 'workflow-"secret\\value'
 	const journal = new WorkflowJournal(new Redactor(
-		{ REVIEW_API_KEY: 'workflow-secret-value' },
+		{ REVIEW_API_KEY: secret },
 		[],
 	))
+	const unsafeDefinition = definition()
+	unsafeDefinition.objective = `Persist ${secret}`
+	await assert.rejects(
+		journal.create(artifactRoot, unsafeDefinition),
+		hasCode('WORKFLOW_CONTAINS_SECRET'),
+	)
 	const created = await journal.create(artifactRoot, definition())
 
 	await assert.rejects(
@@ -490,7 +497,19 @@ test('rejects credential material instead of transforming workflow events', asyn
 			type: 'WorkflowApprovalDecided',
 			data: {
 				decision: 'rejected',
-				feedback: 'workflow-secret-value',
+				feedback: '🙂'.repeat(2_000),
+				source: 'mcp_call',
+				nextStage: null,
+			},
+		}),
+		hasCode('INVALID_WORKFLOW_JOURNAL'),
+	)
+	await assert.rejects(
+		journal.append(artifactRoot, created.summary.workflowId, {
+			type: 'WorkflowApprovalDecided',
+			data: {
+				decision: 'rejected',
+				feedback: secret,
 				source: 'mcp_call',
 				nextStage: null,
 			},
@@ -526,7 +545,7 @@ test('rejects credential material instead of transforming workflow events', asyn
 	if (event.type !== 'WorkflowApprovalDecided') {
 		throw new Error('Expected an approval decision event')
 	}
-	event.data.feedback = 'workflow-secret-value'
+	event.data.feedback = secret
 	const serializedEvent = serializeWorkflowEvent(event)
 	const tamperedName = `000000000005-${workflowEventSha256(serializedEvent)}.json`
 	await writeFile(eventPath, serializedEvent)

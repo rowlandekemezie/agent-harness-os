@@ -155,8 +155,7 @@ export class WorkflowJournal {
 				'Workflow definition does not satisfy the durable execution contract',
 			)
 		}
-		const serializedDefinition = JSON.stringify(definition)
-		if (this.redactor.redact(serializedDefinition) !== serializedDefinition) {
+		if (this.redactor.containsCredentialMaterial(definition)) {
 			throw new HarnessError(
 				'WORKFLOW_CONTAINS_SECRET',
 				'Workflow configuration contains credential material and cannot be persisted',
@@ -171,7 +170,7 @@ export class WorkflowJournal {
 			data: { definition },
 		})
 		const serializedEvent = serializeWorkflowEvent(event)
-		this.assertSafeToPersist(serializedEvent)
+		this.assertSafeToPersist(event)
 		assertEventSize(serializedEvent)
 		const eventSha256 = workflowEventSha256(serializedEvent)
 		const projection = projectWorkflowEvent(null, event, eventSha256, true)
@@ -229,8 +228,13 @@ export class WorkflowJournal {
 			input,
 		)
 		const serializedEvent = serializeWorkflowEvent(event)
-		this.assertSafeToPersist(serializedEvent)
+		this.assertSafeToPersist(event)
 		assertEventSize(serializedEvent)
+		validateWorkflowEvent(
+			event,
+			workflowId,
+			current.timeline.events.length + 1,
+		)
 		const eventSha256 = workflowEventSha256(serializedEvent)
 		projectWorkflowEvent(current.projection, event, eventSha256, true)
 		if (current.bytesRead + Buffer.byteLength(serializedEvent) > maxTimelineBytes) {
@@ -256,8 +260,8 @@ export class WorkflowJournal {
 		return event
 	}
 
-	private assertSafeToPersist(serializedEvent: string): void {
-		if (this.redactor.redact(serializedEvent) !== serializedEvent) {
+	private assertSafeToPersist(event: WorkflowEvent): void {
+		if (this.redactor.containsCredentialMaterial(event)) {
 			throw new HarnessError(
 				'WORKFLOW_CONTAINS_SECRET',
 				'Workflow history contains credential material and cannot be persisted',
@@ -483,8 +487,8 @@ export class WorkflowJournal {
 			if (eventSha256 !== match[2]?.toLowerCase()) {
 				throw invalidJournal('Workflow event digest does not match its name')
 			}
-			this.assertSafeToPersist(contents.toString('utf8'))
 			const event = parseEvent(contents, workflowId, expectedSequence)
+			this.assertSafeToPersist(event)
 			if (event.previousEventSha256 !== previousEventSha256) {
 				throw invalidJournal('Workflow event digest chain is broken')
 			}

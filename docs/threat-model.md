@@ -87,8 +87,9 @@
 - Failure status and code are task-history-bound before retry or repair branching
 - Candidate patches are applied only inside fresh detached worktrees and regenerated against the original base before provider invocation
 - Workflow deadlines reach active delegation, while cancellation is terminal and never fallback-eligible
-- Credential-bearing definitions, events, and reports are rejected on write and
-  re-read rather than being forwarded or redacted into false history
+- Credential-bearing definitions, events, and reports are rejected as decoded
+  string values on write and every read, including JSON-escaped credentials
+  rather than being forwarded or redacted into false history
 - Approval records the MCP caller's decision but grants no patch-application authority
 
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
-import { lstat, open, realpath } from 'node:fs/promises'
+import { lstat, open, readdir, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -11,10 +11,16 @@ const noFollowFlag = constants.O_NOFOLLOW ?? 0
 const directoryFlag = constants.O_DIRECTORY ?? 0
 const helperPath = fileURLToPath(new URL('./secure-fs-helper.js', import.meta.url))
 const maxHelperErrorBytes = 16_384
+const maxPublicationDirectoryEntries = 512
+const publicationStagingPattern = /^\.publish-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-(.+)$/i
 
 type DirectoryIdentity = {
 	device: string
 	inode: string
+}
+
+type HelperResult = {
+	publicationUncertain: boolean
 }
 
 export async function ensurePrivateDirectory(
@@ -198,6 +204,22 @@ export async function readBoundedPublicationFile(
 	}
 }
 
+export async function readBoundedPublishedFile(
+	rootPath: string,
+	filePath: string,
+	maxBytes: number,
+): Promise<Buffer> {
+	const temporaryPath = await findPublicationStagingPath(rootPath, filePath)
+	return temporaryPath === null
+		? await readBoundedRegularFile(rootPath, filePath, maxBytes)
+		: await readBoundedPublicationFile(
+			rootPath,
+			filePath,
+			temporaryPath,
+			maxBytes,
+		)
+}
+
 export async function writeExclusiveRegularFile(
 	rootPath: string,
 	filePath: string,
@@ -213,7 +235,7 @@ export async function writeExclusiveRegularFile(
 	const finalName = path.basename(filePath)
 	const temporaryName = `.publish-${randomUUID()}-${finalName}`
 
-	await runHelper(
+	const helperResult = await runHelper(
 		rootPath,
 		parentPath,
 		identity,
@@ -227,12 +249,27 @@ export async function writeExclusiveRegularFile(
 		buffer,
 		signal,
 	)
-	const published = await readBoundedPublicationFile(
-		rootPath,
-		filePath,
-		path.join(parentPath, temporaryName),
-		buffer.length,
-	)
+	if (helperResult.publicationUncertain) {
+		await runHelper(rootPath, parentPath, identity, ['sync-directory'])
+	}
+	let published: Buffer
+	try {
+		published = await readBoundedPublicationFile(
+			rootPath,
+			filePath,
+			path.join(parentPath, temporaryName),
+			buffer.length,
+		)
+	} catch (error) {
+		if (
+			helperResult.publicationUncertain &&
+			signal?.aborted === true &&
+			(error as NodeJS.ErrnoException).code === 'ENOENT'
+		) {
+			signal.throwIfAborted()
+		}
+		throw error
+	}
 	if (!published.equals(buffer)) {
 		throw new HarnessError(
 			'ARTIFACT_WRITE_FAILED',
@@ -277,6 +314,34 @@ export async function removeRegularFileIfContentsMatch(
 		inode,
 	])
 	return true
+}
+
+export async function removePublishedFileIfContentsMatch(
+	rootPath: string,
+	filePath: string,
+	expectedContents: Buffer,
+	maxBytes: number,
+): Promise<boolean> {
+	const temporaryPath = await findPublicationStagingPath(rootPath, filePath)
+	if (temporaryPath !== null) {
+		const removed = await removePublicationStagingIfContentsMatch(
+			rootPath,
+			filePath,
+			temporaryPath,
+			expectedContents,
+			maxBytes,
+		)
+		if (!removed) {
+			return false
+		}
+	}
+
+	return await removeRegularFileIfContentsMatch(
+		rootPath,
+		filePath,
+		expectedContents,
+		maxBytes,
+	)
 }
 
 export async function removePublicationStagingIfContentsMatch(
@@ -346,6 +411,43 @@ export async function removePublicationStagingIfContentsMatch(
 		'2',
 	])
 	return true
+}
+
+async function findPublicationStagingPath(
+	rootPath: string,
+	filePath: string,
+): Promise<string | null> {
+	assertPathInside(rootPath, filePath)
+	const parentPath = path.dirname(filePath)
+	await assertPrivateDirectory(rootPath, parentPath)
+	const entries = await readdir(parentPath, { withFileTypes: true })
+	if (entries.length > maxPublicationDirectoryEntries) {
+		throw new HarnessError(
+			'ARTIFACT_TRAVERSAL_LIMIT',
+			'Artifact directory contains too many entries',
+		)
+	}
+	const fileName = path.basename(filePath)
+	const matching = entries.filter(entry => {
+		const match = publicationStagingPattern.exec(entry.name)
+		return match !== null && match[1] === fileName
+	})
+	if (matching.length > 1) {
+		throw new HarnessError(
+			'ARTIFACT_HARD_LINK_DENIED',
+			'Artifact has multiple publication staging links',
+		)
+	}
+	if (matching.length === 0) {
+		return null
+	}
+	if (matching[0]?.isFile() !== true) {
+		throw new HarnessError(
+			'ARTIFACT_FILE_INVALID',
+			'Artifact publication staging entry is not a regular file',
+		)
+	}
+	return path.join(parentPath, matching[0].name)
 }
 
 export function assertPathInside(rootPath: string, candidatePath: string): void {
@@ -534,7 +636,7 @@ async function runHelper(
 	argumentsList: Array<string>,
 	input?: Buffer,
 	signal?: AbortSignal,
-): Promise<void> {
+): Promise<HelperResult> {
 	signal?.throwIfAborted()
 	const operation = argumentsList[0]
 	const child = spawn(
@@ -563,16 +665,17 @@ async function runHelper(
 		)
 	}
 	let helperOutput = ''
-	let publicationCommitted = false
+	let publicationCommitGranted = false
+	let publicationAcknowledged = false
 
 	function handleAbort(): void {
-		if (!publicationCommitted) {
+		if (!publicationAcknowledged) {
 			child.kill('SIGTERM')
 		}
 	}
 
 	function commitPublication(): void {
-		if (operation !== 'publish-file' || publicationCommitted) {
+		if (operation !== 'publish-file' || publicationCommitGranted) {
 			controlState.error = new Error('Secure artifact helper sent an invalid preparation signal')
 			child.kill('SIGTERM')
 			return
@@ -589,8 +692,7 @@ async function runHelper(
 					child.kill('SIGTERM')
 				}
 			})
-			publicationCommitted = true
-			signal?.removeEventListener('abort', handleAbort)
+			publicationCommitGranted = true
 		} catch (error) {
 			controlState.error = error instanceof Error ? error : new Error(String(error))
 			child.kill('SIGTERM')
@@ -608,6 +710,16 @@ async function runHelper(
 			helperOutput = helperOutput.slice(lineEnd + 1)
 			if (line === 'prepared') {
 				commitPublication()
+			} else if (line === 'committed') {
+				if (!publicationCommitGranted || publicationAcknowledged) {
+					controlState.error = new Error(
+						'Secure artifact helper sent an invalid commit acknowledgment',
+					)
+					child.kill('SIGTERM')
+					continue
+				}
+				publicationAcknowledged = true
+				signal?.removeEventListener('abort', handleAbort)
 			}
 		}
 	})
@@ -632,13 +744,24 @@ async function runHelper(
 	const exitPromise = new Promise<{ code: number | null, signal: NodeJS.Signals | null }>(
 		(resolve, reject) => {
 			child.once('error', reject)
-			child.once('exit', (code, signal) => resolve({ code, signal }))
+			child.once('close', (code, signal) => resolve({ code, signal }))
 		},
 	)
 	helperStdin.end(input)
 	const result = await exitPromise
 	signal?.removeEventListener('abort', handleAbort)
-	if (signal?.aborted === true && !publicationCommitted) {
+	if (
+		operation === 'publish-file' &&
+		publicationAcknowledged &&
+		inputState.error === null &&
+		controlState.error === null
+	) {
+		return { publicationUncertain: false }
+	}
+	if (signal?.aborted === true && !publicationAcknowledged) {
+		if (operation === 'publish-file' && publicationCommitGranted) {
+			return { publicationUncertain: true }
+		}
 		signal.throwIfAborted()
 	}
 
@@ -646,7 +769,7 @@ async function runHelper(
 		result.code !== 0 ||
 		inputState.error !== null ||
 		controlState.error !== null ||
-		(operation === 'publish-file' && !publicationCommitted)
+		(operation === 'publish-file' && !publicationAcknowledged)
 	) {
 		throw new HarnessError(
 			'ARTIFACT_WRITE_FAILED',
@@ -660,6 +783,7 @@ async function runHelper(
 			},
 		)
 	}
+	return { publicationUncertain: false }
 }
 
 function tooLarge(maxBytes: number): HarnessError {

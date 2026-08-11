@@ -135,8 +135,9 @@ references. Before deleting workflow history, stop every server using the
 artifact root, verify no workflow lease is live, and remove the journal and its
 lease together. `get_workflow` and `list_workflows` are read-only and fail closed
 on unsafe permissions, unexpected entries, broken sequences, digest changes, or
-credential material introduced after publication. Run-report reads apply the
-same credential check before workflow context can be reused.
+credential material introduced after publication. Journal and run-report reads
+screen decoded string values, including JSON-escaped credentials, before
+workflow context can be reused.
 
 Stale workflow-lease recovery reconciles `.publish-*` event links before a new
 runner is admitted. It removes a staging-only publication by verified identity,

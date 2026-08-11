@@ -8,7 +8,7 @@ import {
 	readBoundedRegularFile,
 	readBoundedPublicationFile,
 	removePublicationStagingIfContentsMatch,
-	removeRegularFileIfContentsMatch,
+	removePublishedFileIfContentsMatch,
 	writeExclusiveRegularFile,
 } from '../artifacts/secure-io.js'
 import { HarnessError } from '../lib/errors.js'
@@ -248,7 +248,7 @@ async function removeMatchingLock(
 	contents: Buffer,
 ): Promise<void> {
 	try {
-		await removeRegularFileIfContentsMatch(
+		await removePublishedFileIfContentsMatch(
 			artifactRoot,
 			lockPath,
 			contents,
