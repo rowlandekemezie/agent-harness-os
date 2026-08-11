@@ -111,6 +111,29 @@ test('persists an exact patch while redacting the transcript', async function ()
 	assert.equal(transcript.includes('abcdefghijklmnop'), false)
 })
 
+test('rejects credential material injected into a persisted report', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-read-secret-'))
+	const secret = 'custom-provider-secret'
+	const report = createReport('14141414-1414-4141-8141-141414141414')
+	const store = new ArtifactStore(new Redactor({}, [secret]))
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: 'candidate',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		workerSummary: string
+	}
+	value.workerSummary = secret
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('ARTIFACT_CONTAINS_SECRET'),
+	)
+})
+
 
 test('rejects a patch artifact replaced by a symbolic link', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-link-'))

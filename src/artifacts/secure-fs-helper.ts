@@ -211,7 +211,6 @@ async function publishFile(
 		await assertWorkingDirectory(destination)
 		await link(temporaryName, finalName)
 		finalLinked = true
-		await unlink(temporaryName)
 		await assertWorkingDirectory(destination)
 		const publishedHandle = await open(
 			finalName,
@@ -223,7 +222,7 @@ async function publishFile(
 			if (
 				temporaryStats === null ||
 				!publishedStats.isFile() ||
-				publishedStats.nlink !== 1 ||
+				(publishedStats.nlink !== 1 && publishedStats.nlink !== 2) ||
 				publishedStats.dev !== temporaryStats.dev ||
 				publishedStats.ino !== temporaryStats.ino
 			) {
@@ -233,11 +232,24 @@ async function publishFile(
 			await publishedHandle.close()
 		}
 		await syncWorkingDirectory()
-	} catch (error) {
-		await unlink(temporaryName).catch(() => undefined)
-		if (finalLinked) {
-			await unlink(finalName).catch(() => undefined)
+		try {
+			await assertWorkingDirectory(destination)
+			await unlink(temporaryName)
+			await assertWorkingDirectory(destination)
+			await syncWorkingDirectory()
+		} catch {
+			// The final link is already validated and durable. Recovery can remove
+			// a crash-left staging link without rolling the publication back.
 		}
+	} catch (error) {
+		if (finalLinked) {
+			// Linking the exclusive final name is the publication linearization
+			// point. Never roll it back; recovery validates and removes any
+			// remaining staging link.
+			await syncWorkingDirectory().catch(() => undefined)
+			return
+		}
+		await unlink(temporaryName).catch(() => undefined)
 		throw error
 	}
 }

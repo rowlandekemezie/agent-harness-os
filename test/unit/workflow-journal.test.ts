@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { access, chmod, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdtemp, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import type {
 	WorkflowDefinition,
+	WorkflowEvent,
 	WorkflowWorkerStage,
 } from '../../src/domain/types.js'
 import { Redactor } from '../../src/lib/redaction.js'
+import {
+	serializeWorkflowEvent,
+	workflowEventSha256,
+} from '../../src/workflow/event-model.js'
 import { WorkflowJournal } from '../../src/workflow/journal.js'
 
 test('persists and projects a complete workflow timeline', async function () {
@@ -228,6 +233,68 @@ test('rejects failed patch promotion into a retry stage', async function () {
 	)
 })
 
+test('rejects demoting a successful verification run to its input candidate', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-demotion-'))
+	const journal = new WorkflowJournal()
+	const workflowDefinition = definition()
+	workflowDefinition.stages.test = {
+		...stage(),
+		objective: 'Test the candidate.',
+	}
+	const created = await journal.create(artifactRoot, workflowDefinition)
+	const implementationExecutionId = randomUUID()
+	const implementationRunId = randomUUID()
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId: implementationExecutionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'implement',
+			executionId: implementationExecutionId,
+			taskId: randomUUID(),
+			runId: implementationRunId,
+			status: 'completed',
+			failureCode: null,
+			candidateRunId: implementationRunId,
+			nextStage: 'test',
+		},
+	})
+	const testExecutionId = randomUUID()
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'test',
+			executionId: testExecutionId,
+			attemptNumber: 1,
+			sourceRunId: implementationRunId,
+		},
+	})
+
+	await assert.rejects(
+		journal.append(artifactRoot, created.summary.workflowId, {
+			type: 'WorkflowStageCompleted',
+			data: {
+				stage: 'test',
+				executionId: testExecutionId,
+				taskId: randomUUID(),
+				runId: randomUUID(),
+				status: 'completed',
+				failureCode: null,
+				candidateRunId: implementationRunId,
+				nextStage: 'approval',
+			},
+		}),
+		hasCode('INVALID_WORKFLOW_TRANSITION'),
+	)
+})
+
 test('rejects repair transitions without a validated candidate run', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'workflow-repair-'))
 	const journal = new WorkflowJournal()
@@ -433,6 +500,40 @@ test('rejects credential material instead of transforming workflow events', asyn
 	assert.equal(
 		(await journal.timeline(artifactRoot, created.summary.workflowId)).events.length,
 		4,
+	)
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowApprovalDecided',
+		data: {
+			decision: 'rejected',
+			feedback: 'Needs revision.',
+			source: 'mcp_call',
+			nextStage: null,
+		},
+	})
+	const eventsDirectory = path.join(
+		artifactRoot,
+		'workflows',
+		created.summary.workflowId,
+		'events',
+	)
+	const eventName = (await readdir(eventsDirectory)).find(name =>
+		name.startsWith('000000000005-')
+	)
+	assert.ok(eventName)
+	const eventPath = path.join(eventsDirectory, eventName)
+	const event = JSON.parse(await readFile(eventPath, 'utf8')) as WorkflowEvent
+	assert.equal(event.type, 'WorkflowApprovalDecided')
+	if (event.type !== 'WorkflowApprovalDecided') {
+		throw new Error('Expected an approval decision event')
+	}
+	event.data.feedback = 'workflow-secret-value'
+	const serializedEvent = serializeWorkflowEvent(event)
+	const tamperedName = `000000000005-${workflowEventSha256(serializedEvent)}.json`
+	await writeFile(eventPath, serializedEvent)
+	await rename(eventPath, path.join(eventsDirectory, tamperedName))
+	await assert.rejects(
+		journal.timeline(artifactRoot, created.summary.workflowId),
+		hasCode('WORKFLOW_CONTAINS_SECRET'),
 	)
 })
 

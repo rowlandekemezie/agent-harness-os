@@ -9,6 +9,7 @@ import {
 import type {
 	RunStatus,
 	WorkflowDefinition,
+	WorkflowEvent,
 	WorkflowEventInput,
 	WorkflowPage,
 	WorkflowStageName,
@@ -27,7 +28,10 @@ import {
 import { HarnessError } from '../lib/errors.js'
 import { Redactor } from '../lib/redaction.js'
 import { truncateUtf8 } from '../lib/text.js'
-import { WorkerService } from '../worker/service.js'
+import {
+	WorkerService,
+	type WorkflowCandidateRequirement,
+} from '../worker/service.js'
 import { validateWorkflowDefinition } from './event-model.js'
 import { WorkflowJournal } from './journal.js'
 import { acquireWorkflowLease } from './lease.js'
@@ -51,7 +55,7 @@ export type CreateWorkflowInput = {
 
 type WorkflowWorker = Pick<
 	WorkerService,
-	'delegate' | 'getRun' | 'validateCandidateRun' | 'validateWorkflowRun'
+	'delegate' | 'validateCandidateRun' | 'validateWorkflowRun'
 >
 
 export type WorkflowServiceDependencies = {
@@ -660,11 +664,9 @@ export class WorkflowService {
 
 			const executionId = randomUUID()
 			const attemptNumber = (timeline.summary.stageAttempts[stageName] ?? 0) + 1
-			const completedAttempts = completedStageAttemptCount(timeline, stageName)
-			const attemptLimitReached = stageName === 'repair'
-				? completedAttempts >= timeline.definition.maxRepairAttempts
-				: completedAttempts >
-					(timeline.definition.stages[stageName]?.retryLimit ?? 0)
+			const attemptLimitReached = stageName === 'repair' &&
+				timeline.summary.repairAttemptCount >=
+					timeline.definition.maxRepairAttempts
 			if (attemptLimitReached) {
 				await this.completeBeforeDeadline(
 					artifactRoot,
@@ -696,6 +698,35 @@ export class WorkflowService {
 					`Current workflow stage is not configured: ${stageName}`,
 				)
 			}
+			try {
+				await this.validateBranchEvidence(timeline, stageName, stageSignal)
+			} catch {
+				clearTimeout(deadlineTimer)
+				const cancelled = signal.aborted
+				const timedOut = deadlineSignal.aborted ||
+					Date.now() >= Date.parse(timeline.definition.deadlineAt)
+				if (cancelled || timedOut) {
+					await this.complete(
+						artifactRoot,
+						workflowId,
+						timeline,
+						cancelled ? 'cancelled' : 'timed_out',
+						cancelled
+							? 'WORKFLOW_CANCELLED'
+							: 'WORKFLOW_DEADLINE_EXCEEDED',
+					)
+				} else {
+					await this.completeBeforeDeadline(
+						artifactRoot,
+						workflowId,
+						timeline,
+						'blocked',
+						'WORKFLOW_RUN_HISTORY_MISMATCH',
+						signal,
+					)
+				}
+				return await this.journal.timeline(artifactRoot, workflowId)
+			}
 			let report: WorkerRunReport | null = null
 			let thrownError: unknown = null
 			let stageStarted = false
@@ -707,6 +738,9 @@ export class WorkflowService {
 						data: { stage: stageName, executionId, attemptNumber, sourceRunId },
 					}, stageSignal)
 					stageStarted = true
+					const candidateRequirement = sourceRunId === null
+						? undefined
+						: this.sourceCandidateRequirement(timeline, sourceRunId)
 					const task = await this.buildTask(
 						timeline,
 						stageName,
@@ -714,8 +748,13 @@ export class WorkflowService {
 						executionId,
 						sourceRunId,
 						remainingMs,
+						stageSignal,
 					)
-					report = await this.workerService.delegate(task, stageSignal)
+					report = await this.workerService.delegate(
+						task,
+						stageSignal,
+						candidateRequirement,
+					)
 				} catch (error) {
 					if (!stageStarted) {
 						throw error
@@ -842,8 +881,7 @@ export class WorkflowService {
 			}
 			if (
 				candidateRunId === null ||
-				((stageName === 'implement' || stageName === 'repair') &&
-					candidateRunId !== report?.runId)
+				candidateRunId !== report?.runId
 			) {
 				return {
 					report,
@@ -862,7 +900,7 @@ export class WorkflowService {
 			}
 		}
 
-		const completedAttempts = completedStageAttemptCount(timeline, stageName)
+		const completedAttempts = retryTransitionCount(timeline, stageName)
 		if (
 			stageName !== 'repair' &&
 			(status === 'failed' || status === 'blocked') &&
@@ -911,8 +949,9 @@ export class WorkflowService {
 		executionId: string,
 		sourceRunId: string | null,
 		remainingMs: number,
+		signal: AbortSignal,
 	): Promise<WorkerTask> {
-		const context = await this.stageContext(timeline, stageName)
+		const context = await this.stageContext(timeline, stageName, signal)
 		const objective = context === ''
 			? stage.objective
 			: truncateUtf8(`${stage.objective}\n\nWORKFLOW CONTEXT:\n${context}`, 4_000)
@@ -952,6 +991,7 @@ export class WorkflowService {
 	private async stageContext(
 		timeline: WorkflowTimeline,
 		stageName: WorkflowWorkerStageName,
+		signal: AbortSignal,
 	): Promise<string> {
 		const parts = [`Workflow objective: ${timeline.definition.objective}`]
 		if (stageName === 'implement') {
@@ -961,9 +1001,11 @@ export class WorkflowService {
 				event.data.runId !== null
 			)
 			if (plan?.type === 'WorkflowStageCompleted' && plan.data.runId !== null) {
-				const report = await this.workerService.getRun(
-					timeline.definition.repositoryPath,
-					plan.data.runId,
+				const report = await this.validateStageRunEvidence(
+					timeline,
+					plan,
+					false,
+					signal,
 				)
 				parts.push(`Plan: ${truncateUtf8(report.workerSummary, 1_500)}`)
 			}
@@ -987,9 +1029,11 @@ export class WorkflowService {
 				failedStage?.type === 'WorkflowStageCompleted' &&
 				failedStage.data.runId !== null
 			) {
-				const report = await this.workerService.getRun(
-					timeline.definition.repositoryPath,
-					failedStage.data.runId,
+				const report = await this.validateStageRunEvidence(
+					timeline,
+					failedStage,
+					false,
+					signal,
 				)
 				parts.push(
 					`Failed ${failedStage.data.stage} stage: ${failedStage.data.failureCode ?? 'unknown'}`,
@@ -1250,58 +1294,15 @@ export class WorkflowService {
 					)
 				}
 				seenRunIds.add(event.data.runId)
-				const started = timeline.events.find(candidate =>
-					candidate.type === 'WorkflowStageStarted' &&
-					candidate.data.stage === event.data.stage &&
-					candidate.data.executionId === event.data.executionId
-				)
-				const stageContract = timeline.definition.stages[event.data.stage]
-				if (
-					started?.type !== 'WorkflowStageStarted' ||
-					stageContract === null
-				) {
-					throw new HarnessError(
-						'WORKFLOW_RUN_PROVENANCE_MISSING',
-						'Workflow stage evidence has no originating stage contract',
-					)
-				}
-				const expectedProvenance = createWorkflowTaskProvenance(
-					timeline.summary.workflowId,
-					event.data.stage,
-					event.data.executionId,
-					stageContract,
-					started.data.sourceRunId,
-				)
 				const candidateSource = event.data.status === 'completed' &&
 					event.data.runId === candidateRunId &&
 					event.data.candidateRunId === candidateRunId
-				const report = await waitForSignal(
-					candidateSource
-						? async () => await this.workerService.validateCandidateRun(
-							timeline.summary.repositoryPath,
-							event.data.runId as string,
-							timeline.summary.baseCommit,
-							stageMode(event.data.stage),
-							expectedProvenance,
-							validationSignal,
-						)
-						: async () => await this.workerService.validateWorkflowRun(
-							timeline.summary.repositoryPath,
-							event.data.runId as string,
-							timeline.summary.baseCommit,
-							event.data.status,
-							stageMode(event.data.stage),
-							expectedProvenance,
-							validationSignal,
-						),
+				await this.validateStageRunEvidence(
+					timeline,
+					event,
+					candidateSource,
 					validationSignal,
 				)
-				if (event.data.taskId !== report.taskId) {
-					throw new HarnessError(
-						'WORKFLOW_RUN_HISTORY_MISMATCH',
-						'Workflow stage evidence does not match validated run history',
-					)
-				}
 				candidateValidated ||= candidateSource
 			}
 			if (!candidateValidated) {
@@ -1339,6 +1340,127 @@ export class WorkflowService {
 			return false
 		} finally {
 			clearTimeout(deadlineTimer)
+		}
+	}
+
+	private sourceCandidateRequirement(
+		timeline: WorkflowTimeline,
+		sourceRunId: string,
+	): WorkflowCandidateRequirement {
+		const sourceEvents = timeline.events.filter(event =>
+			event.type === 'WorkflowStageCompleted' &&
+			event.data.runId === sourceRunId &&
+			event.data.candidateRunId === sourceRunId
+		)
+		if (sourceEvents.length !== 1) {
+			throw new HarnessError(
+				'WORKFLOW_CANDIDATE_HISTORY_MISMATCH',
+				'Workflow stage source does not have one originating run',
+			)
+		}
+		const sourceEvent = sourceEvents[0]
+		if (sourceEvent?.type !== 'WorkflowStageCompleted') {
+			throw new HarnessError(
+				'WORKFLOW_CANDIDATE_HISTORY_MISMATCH',
+				'Workflow stage source evidence is missing',
+			)
+		}
+		return this.stageRunRequirement(timeline, sourceEvent)
+	}
+
+	private async validateBranchEvidence(
+		timeline: WorkflowTimeline,
+		stageName: WorkflowWorkerStageName,
+		signal: AbortSignal,
+	): Promise<void> {
+		const branch = [...timeline.events].reverse().find(event =>
+			event.type === 'WorkflowStageCompleted' ||
+			event.type === 'WorkflowApprovalDecided'
+		)
+		if (
+			branch?.type === 'WorkflowStageCompleted' &&
+			branch.data.status !== 'completed' &&
+			branch.data.nextStage === stageName
+		) {
+			await this.validateStageRunEvidence(timeline, branch, false, signal)
+		}
+	}
+
+	private async validateStageRunEvidence(
+		timeline: WorkflowTimeline,
+		event: Extract<WorkflowEvent, { type: 'WorkflowStageCompleted' }>,
+		requireApplicableCandidate: boolean,
+		signal: AbortSignal,
+	): Promise<WorkerRunReport> {
+		const requirement = this.stageRunRequirement(timeline, event)
+		const report = await waitForSignal(
+			requireApplicableCandidate
+				? async () => await this.workerService.validateCandidateRun(
+					timeline.summary.repositoryPath,
+					requirement.runId,
+					timeline.summary.baseCommit,
+					requirement.mode,
+					requirement.provenance,
+					signal,
+				)
+				: async () => await this.workerService.validateWorkflowRun(
+					timeline.summary.repositoryPath,
+					requirement.runId,
+					timeline.summary.baseCommit,
+					requirement.status,
+					requirement.mode,
+					requirement.provenance,
+					signal,
+				),
+			signal,
+		)
+		if (
+			requirement.taskId !== report.taskId ||
+			requirement.failureCode !== (report.failureCode ?? null)
+		) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_HISTORY_MISMATCH',
+				'Workflow stage evidence does not match validated run history',
+			)
+		}
+		return report
+	}
+
+	private stageRunRequirement(
+		timeline: WorkflowTimeline,
+		event: Extract<WorkflowEvent, { type: 'WorkflowStageCompleted' }>,
+	): WorkflowCandidateRequirement {
+		if (event.data.runId === null || event.data.taskId === null) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_PROVENANCE_MISSING',
+				'Workflow stage evidence does not identify a worker run',
+			)
+		}
+		const started = timeline.events.find(candidate =>
+			candidate.type === 'WorkflowStageStarted' &&
+			candidate.data.stage === event.data.stage &&
+			candidate.data.executionId === event.data.executionId
+		)
+		const stageContract = timeline.definition.stages[event.data.stage]
+		if (started?.type !== 'WorkflowStageStarted' || stageContract === null) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_PROVENANCE_MISSING',
+				'Workflow stage evidence has no originating stage contract',
+			)
+		}
+		return {
+			runId: event.data.runId,
+			taskId: event.data.taskId,
+			status: event.data.status,
+			failureCode: event.data.failureCode,
+			mode: stageMode(event.data.stage),
+			provenance: createWorkflowTaskProvenance(
+				timeline.summary.workflowId,
+				event.data.stage,
+				event.data.executionId,
+				stageContract,
+				started.data.sourceRunId,
+			),
 		}
 	}
 
@@ -1429,13 +1551,14 @@ function workflowTerminalStatus(
 	return 'failed'
 }
 
-function completedStageAttemptCount(
+function retryTransitionCount(
 	timeline: WorkflowTimeline,
 	stageName: WorkflowWorkerStageName,
 ): number {
 	return timeline.events.filter(event =>
 		event.type === 'WorkflowStageCompleted' &&
-		event.data.stage === stageName
+		event.data.stage === stageName &&
+		event.data.nextStage === stageName
 	).length
 }
 

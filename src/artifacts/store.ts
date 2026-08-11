@@ -144,7 +144,14 @@ export class ArtifactStore {
 		}
 
 		try {
-			const parsed: unknown = JSON.parse(contents.toString('utf8'))
+			const serializedReport = contents.toString('utf8')
+			if (this.redactor.redact(serializedReport) !== serializedReport) {
+				throw new HarnessError(
+					'ARTIFACT_CONTAINS_SECRET',
+					'Run report contains credential material and cannot be trusted',
+				)
+			}
+			const parsed: unknown = JSON.parse(serializedReport)
 			return validateReport(parsed, reportPath, runId)
 		} catch (error) {
 			if (error instanceof HarnessError) {

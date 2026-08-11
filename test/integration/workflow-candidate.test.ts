@@ -156,11 +156,40 @@ test('feeds a validated cumulative candidate into a fresh workflow stage', async
 			hasCode('CANDIDATE_HISTORY_MISMATCH'),
 		)
 		await writeFile(implementation.reportPath, originalReport)
+		const credentialReport = JSON.parse(originalReport) as WorkerRunReport
+		credentialReport.workerSummary = 'sk-1234567890abcdef'
+		await writeFile(
+			implementation.reportPath,
+			`${JSON.stringify(credentialReport)}\n`,
+		)
+		await assert.rejects(
+			service.delegate({
+				...task(repositoryPath, 'review'),
+				candidateRunId: implementation.runId,
+			}),
+			hasCode('ARTIFACT_CONTAINS_SECRET'),
+		)
+		assert.equal(requestCount, 2)
+		await writeFile(implementation.reportPath, originalReport)
+		if (implementation.taskId === undefined) {
+			throw new Error('Workflow implementation did not record a task ID')
+		}
 
-		const review = await service.delegate({
-			...task(repositoryPath, 'review'),
-			candidateRunId: implementation.runId,
-		})
+		const review = await service.delegate(
+			{
+				...task(repositoryPath, 'review'),
+				candidateRunId: implementation.runId,
+			},
+			undefined,
+			{
+				runId: implementation.runId,
+				taskId: implementation.taskId,
+				status: 'completed',
+				failureCode: null,
+				mode: 'implementation',
+				provenance: workflowProvenance,
+			},
+		)
 		assert.equal(review.status, 'completed')
 		assert.equal(review.patchSha256, implementation.patchSha256)
 		assert.deepEqual(review.changedFiles, implementation.changedFiles)

@@ -19,6 +19,8 @@ import {
 	ensurePrivateDirectory,
 	readBoundedPublicationFile,
 	readBoundedRegularFile,
+	removePublicationStagingIfContentsMatch,
+	removeRegularFileIfContentsMatch,
 	writeExclusiveRegularFile,
 } from '../artifacts/secure-io.js'
 import {
@@ -43,6 +45,7 @@ const maxListBytes = 8_388_608
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const eventFilePattern = /^([0-9]{12})-([a-f0-9]{64})\.json$/i
 const pendingFilePattern = /^\.publish-[0-9a-f-]{36}-(.+)$/i
+const maxPublicationReconciliationPasses = 4
 
 type WorkflowReadResult = {
 	timeline: WorkflowTimeline
@@ -54,6 +57,85 @@ type WorkflowReadyMarker = {
 	schemaVersion: 1
 	workflowId: string
 	firstEventSha256: string
+}
+
+export async function reconcileWorkflowEventPublications(
+	artifactRoot: string,
+	workflowId: string,
+): Promise<void> {
+	validateUuid(workflowId)
+	const eventsDirectory = path.join(
+		artifactRoot,
+		workflowsDirectoryName,
+		workflowId,
+		'events',
+	)
+	try {
+		await assertPrivateDirectory(artifactRoot, eventsDirectory)
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return
+		}
+		throw error
+	}
+
+	for (let pass = 0; pass < maxPublicationReconciliationPasses; pass += 1) {
+		const entries = await readdir(eventsDirectory, { withFileTypes: true })
+		if (entries.length > maxEventsPerWorkflow * 2) {
+			throw new HarnessError('WORKFLOW_EVENT_LIMIT', 'Workflow has too many events')
+		}
+		const pendingByFinalName = collectPendingPublications(entries)
+		if (pendingByFinalName.size === 0) {
+			return
+		}
+
+		for (const [finalName, pendingName] of pendingByFinalName) {
+			const finalPath = path.join(eventsDirectory, finalName)
+			const pendingPath = path.join(eventsDirectory, pendingName)
+			const finalExists = entries.some(entry => entry.name === finalName)
+			try {
+				const contents = finalExists
+					? await readBoundedPublicationFile(
+						artifactRoot,
+						finalPath,
+						pendingPath,
+						maxEventBytes,
+					)
+					: await readBoundedRegularFile(
+						artifactRoot,
+						pendingPath,
+						maxEventBytes,
+					)
+				assertRecoverableEvent(contents, workflowId, finalName)
+				const removed = finalExists
+					? await removePublicationStagingIfContentsMatch(
+						artifactRoot,
+						finalPath,
+						pendingPath,
+						contents,
+						maxEventBytes,
+					)
+					: await removeRegularFileIfContentsMatch(
+						artifactRoot,
+						pendingPath,
+						contents,
+						maxEventBytes,
+					)
+				if (!removed) {
+					throw invalidJournal('Workflow event staging changed during recovery')
+				}
+			} catch (error) {
+				if (!isPublicationRace(error)) {
+					throw error
+				}
+			}
+		}
+	}
+
+	throw new HarnessError(
+		'WORKFLOW_BUSY',
+		'Workflow event publication did not settle during recovery',
+	)
 }
 
 export class WorkflowJournal {
@@ -401,6 +483,7 @@ export class WorkflowJournal {
 			if (eventSha256 !== match[2]?.toLowerCase()) {
 				throw invalidJournal('Workflow event digest does not match its name')
 			}
+			this.assertSafeToPersist(contents.toString('utf8'))
 			const event = parseEvent(contents, workflowId, expectedSequence)
 			if (event.previousEventSha256 !== previousEventSha256) {
 				throw invalidJournal('Workflow event digest chain is broken')
@@ -508,6 +591,30 @@ function collectPendingPublications(
 		pending.set(finalName, entry.name)
 	}
 	return pending
+}
+
+function assertRecoverableEvent(
+	contents: Buffer,
+	workflowId: string,
+	finalName: string,
+): void {
+	const match = eventFilePattern.exec(finalName)
+	if (
+		match === null ||
+		workflowEventSha256(contents) !== match[2]?.toLowerCase()
+	) {
+		throw invalidJournal('Workflow event staging digest is invalid')
+	}
+	parseEvent(contents, workflowId, Number(match[1]))
+}
+
+function isPublicationRace(error: unknown): boolean {
+	if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+		return true
+	}
+	return error instanceof HarnessError &&
+		(error.code === 'ARTIFACT_HARD_LINK_DENIED' ||
+			error.code === 'ARTIFACT_WRITE_FAILED')
 }
 
 function eventFileName(sequence: number, sha256: string): string {

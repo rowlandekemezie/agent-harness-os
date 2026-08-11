@@ -102,6 +102,15 @@ type CandidateSeed = {
 	changedFiles: Array<string>
 }
 
+export type WorkflowCandidateRequirement = {
+	runId: string
+	taskId: string
+	status: RunStatus
+	failureCode: string | null
+	mode: WorkerMode
+	provenance: WorkflowTaskProvenance
+}
+
 export type WorkerServiceDependencies = {
 	evaluators?: Array<Evaluator>
 }
@@ -146,6 +155,7 @@ export class WorkerService {
 	async delegate(
 		task: WorkerTask,
 		externalSignal?: AbortSignal,
+		candidateRequirement?: WorkflowCandidateRequirement,
 	): Promise<WorkerRunReport> {
 		return await this.semaphore.use(async () => {
 			throwIfAborted(externalSignal)
@@ -174,12 +184,15 @@ export class WorkerService {
 				this.assertTaskContract(resolvedTask)
 				this.assertPolicySafeToPersist(resolvedTask)
 				const candidateSeed = resolvedTask.candidateRunId === undefined
-					? null
+					? assertNoCandidateRequirement(candidateRequirement)
 					: await this.loadCandidateSeed(
 						artifactRoot,
 						resolvedTask.candidateRunId,
 						repositoryPath,
 						baseCommit,
+						undefined,
+						false,
+						candidateRequirement,
 					)
 				const deadlineMs = Date.now() + resolvedTask.timeoutSeconds * 1_000
 				const routingEvidence = await this.routingEvidenceStore.collect({
@@ -621,6 +634,7 @@ export class WorkerService {
 				mode: report.mode,
 				workflowProvenance: report.workflowProvenance ?? null,
 				status: report.status,
+				failureCode: report.failureCode ?? null,
 				patchSha256: report.patchSha256,
 				changedFileCount: report.changedFiles.length,
 				workerId,
@@ -1293,6 +1307,7 @@ export class WorkerService {
 		baseCommit: string,
 		loadedReport?: WorkerRunReport,
 		historyValidated = false,
+		requirement?: WorkflowCandidateRequirement,
 	): Promise<CandidateSeed> {
 		const report = loadedReport ?? await this.artifactStore.loadReport(
 			artifactRoot,
@@ -1305,7 +1320,22 @@ export class WorkerService {
 				runId,
 				repositoryPath,
 				baseCommit,
-				['completed', 'failed'],
+				requirement === undefined
+					? ['completed', 'failed']
+					: [requirement.status],
+				requirement?.mode,
+				requirement?.provenance,
+			)
+		}
+		if (
+			requirement !== undefined &&
+			(requirement.runId !== runId ||
+				requirement.taskId !== report.taskId ||
+				requirement.failureCode !== (report.failureCode ?? null))
+		) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_HISTORY_MISMATCH',
+				'Workflow candidate does not match its originating stage evidence',
 			)
 		}
 		if (
@@ -1400,6 +1430,7 @@ export class WorkerService {
 			mode: report.mode,
 			workflowProvenance: report.workflowProvenance ?? null,
 			status: report.status,
+			failureCode: report.failureCode ?? null,
 			patchSha256: report.patchSha256,
 			changedFileCount: report.changedFiles.length,
 			workerId: report.provider.workerId,
@@ -1858,6 +1889,18 @@ function arraysEqual(left: Array<string>, right: Array<string>): boolean {
 		left.length === right.length &&
 		left.every((value, index) => value === right[index])
 	)
+}
+
+function assertNoCandidateRequirement(
+	requirement: WorkflowCandidateRequirement | undefined,
+): null {
+	if (requirement !== undefined) {
+		throw new HarnessError(
+			'WORKFLOW_RUN_HISTORY_MISMATCH',
+			'Workflow candidate validation requires a candidate run',
+		)
+	}
+	return null
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

@@ -13,6 +13,7 @@ import {
 } from '../artifacts/secure-io.js'
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
+import { reconcileWorkflowEventPublications } from './journal.js'
 
 const maxLockBytes = 1_024
 const staleRemoteLockMs = 24 * 60 * 60 * 1_000
@@ -90,6 +91,7 @@ export async function acquireWorkflowLease(
 					'Another process is publishing a workflow lease claim',
 				)
 			}
+			await reconcileWorkflowEventPublications(artifactRoot, workflowId)
 			await removeMatchingLock(artifactRoot, pendingPath, pending.contents)
 		}
 		for (const name of names) {
@@ -136,6 +138,9 @@ export async function acquireWorkflowLease(
 					: path.join(lockDirectory, pendingName),
 				contents: existing.contents,
 			})
+		}
+		if (staleClaims.length > 0) {
+			await reconcileWorkflowEventPublications(artifactRoot, workflowId)
 		}
 		for (const stale of staleClaims) {
 			if (stale.temporaryPath !== null) {

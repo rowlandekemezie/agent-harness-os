@@ -21,6 +21,7 @@ import {
 	WorkflowService,
 	type CreateWorkflowInput,
 } from '../../src/workflow/service.js'
+import type { WorkflowCandidateRequirement } from '../../src/worker/service.js'
 import { createTestRepository } from '../helpers/git.js'
 
 class FakeWorkerService {
@@ -54,7 +55,31 @@ class FakeWorkerService {
 		this.validationBlocking = true
 	}
 
-	async delegate(task: WorkerTask, signal?: AbortSignal): Promise<WorkerRunReport> {
+	async delegate(
+		task: WorkerTask,
+		signal?: AbortSignal,
+		candidateRequirement?: WorkflowCandidateRequirement,
+	): Promise<WorkerRunReport> {
+		if (candidateRequirement !== undefined) {
+			const source = await this.validateWorkflowRun(
+				'',
+				candidateRequirement.runId,
+				'',
+				candidateRequirement.status,
+				candidateRequirement.mode,
+				candidateRequirement.provenance,
+				signal,
+			)
+			if (
+				task.candidateRunId !== source.runId ||
+				source.taskId !== candidateRequirement.taskId ||
+				(source.failureCode ?? null) !== candidateRequirement.failureCode ||
+				source.patchPath === null ||
+				source.patchSha256 === null
+			) {
+				throw new Error('Invalid fake workflow candidate')
+			}
+		}
 		this.tasks.push(task)
 		this.startedResolve?.()
 		if (this.blocking) {
@@ -282,12 +307,60 @@ test('rejects a candidate into a bounded repair loop with cumulative input', asy
 	assert.equal(exhausted.summary.lastFailureCode, 'WORKFLOW_APPROVAL_REJECTED')
 })
 
+test('revisits successful verification stages after repair without spending retries', async function () {
+	const repositoryPath = await createTestRepository()
+	const reports = [
+		report('completed', true, 'implementation'),
+		report('completed', true, 'testing'),
+		report('completed', true, 'review'),
+		report('completed', true, 'implementation'),
+		report('completed', true, 'testing'),
+		report('completed', true, 'review'),
+	]
+	const worker = new FakeWorkerService(reports)
+	const service = await createService(worker)
+	const input = workflowInput(repositoryPath)
+	input.maxTransitions = 12
+	input.maxRepairAttempts = 1
+	input.stages.test = stage('Test the candidate.', 0)
+	input.stages.review = stage('Review the candidate.', 0)
+	input.stages.repair = stage('Repair the rejected candidate.', 0)
+	const created = await service.create(input)
+
+	const firstReview = await service.run(
+		repositoryPath,
+		created.summary.workflowId,
+	)
+	assert.equal(firstReview.summary.status, 'waiting_for_approval')
+	await service.approve(
+		repositoryPath,
+		created.summary.workflowId,
+		'rejected',
+		'Repair and verify again.',
+	)
+	const secondReview = await service.run(
+		repositoryPath,
+		created.summary.workflowId,
+	)
+
+	assert.equal(secondReview.summary.status, 'waiting_for_approval')
+	assert.deepEqual(worker.tasks.map(task => task.mode), [
+		'implementation',
+		'testing',
+		'review',
+		'implementation',
+		'testing',
+		'review',
+	])
+	assert.equal(secondReview.summary.repairAttemptCount, 1)
+})
+
 test('advances each configured optional stage exactly once', async function () {
 	const repositoryPath = await createTestRepository()
 	const planning = report('completed', false, 'research')
 	const implementation = report('completed', true, 'implementation')
-	const testing = report('completed', false, 'testing')
-	const review = report('completed', false, 'review')
+	const testing = report('completed', true, 'testing')
+	const review = report('completed', true, 'review')
 	const worker = new FakeWorkerService([
 		planning,
 		implementation,
@@ -310,13 +383,198 @@ test('advances each configured optional stage exactly once', async function () {
 		'review',
 	])
 	assert.equal(worker.tasks[2]?.candidateRunId, implementation.runId)
-	assert.equal(worker.tasks[3]?.candidateRunId, implementation.runId)
+	assert.equal(worker.tasks[3]?.candidateRunId, testing.runId)
 	assert.deepEqual(worker.validationCalls, [
+		planning.runId,
+		implementation.runId,
+		testing.runId,
 		planning.runId,
 		implementation.runId,
 		testing.runId,
 		review.runId,
 	])
+})
+
+test('rejects a substituted source run before invoking the next worker', async function () {
+	const repositoryPath = await createTestRepository()
+	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+	const journal = new WorkflowJournal()
+	const candidate = report('completed', true)
+	const worker = new FakeWorkerService([candidate])
+	const service = await createService(worker, journal)
+	const input = workflowInput(repositoryRoot)
+	input.stages.test = stage('Test the candidate.')
+	const artifactRoot = artifactRootFor(service, repositoryRoot)
+	const created = await journal.create(artifactRoot, {
+		schemaVersion: 1,
+		objective: input.objective,
+		repositoryPath: repositoryRoot,
+		baseCommit: await resolveCommit(repositoryRoot, 'HEAD'),
+		deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+		maxTransitions: input.maxTransitions,
+		maxRepairAttempts: 0,
+		dependencyWorkflowIds: [],
+		stages: input.stages,
+	})
+	const executionId = randomUUID()
+	candidate.workflowProvenance = createWorkflowTaskProvenance(
+		randomUUID(),
+		'implement',
+		executionId,
+		input.stages.implement,
+		null,
+	)
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'implement',
+			executionId,
+			taskId: candidate.taskId ?? null,
+			runId: candidate.runId,
+			status: 'completed',
+			failureCode: null,
+			candidateRunId: candidate.runId,
+			nextStage: 'test',
+		},
+	})
+
+	const failed = await service.run(repositoryRoot, created.summary.workflowId)
+	assert.equal(failed.summary.status, 'failed')
+	assert.equal(worker.tasks.length, 0)
+	assert.deepEqual(worker.validationCalls, [candidate.runId])
+})
+
+test('rejects a relabelled retry failure before invoking another worker', async function () {
+	const repositoryPath = await createTestRepository()
+	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+	const journal = new WorkflowJournal()
+	const failedReport = report('failed', false)
+	const worker = new FakeWorkerService([failedReport])
+	const service = await createService(worker, journal)
+	const input = workflowInput(repositoryRoot)
+	const artifactRoot = artifactRootFor(service, repositoryRoot)
+	const created = await journal.create(artifactRoot, {
+		schemaVersion: 1,
+		objective: input.objective,
+		repositoryPath: repositoryRoot,
+		baseCommit: await resolveCommit(repositoryRoot, 'HEAD'),
+		deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+		maxTransitions: input.maxTransitions,
+		maxRepairAttempts: 0,
+		dependencyWorkflowIds: [],
+		stages: input.stages,
+	})
+	const executionId = randomUUID()
+	failedReport.workflowProvenance = createWorkflowTaskProvenance(
+		created.summary.workflowId,
+		'implement',
+		executionId,
+		input.stages.implement,
+		null,
+	)
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'implement',
+			executionId,
+			taskId: failedReport.taskId ?? null,
+			runId: failedReport.runId,
+			status: 'failed',
+			failureCode: 'PROVIDER_RESPONSE_INVALID',
+			candidateRunId: null,
+			nextStage: 'implement',
+		},
+	})
+
+	const blocked = await service.run(repositoryRoot, created.summary.workflowId)
+	assert.equal(blocked.summary.status, 'blocked')
+	assert.equal(worker.tasks.length, 0)
+	assert.deepEqual(worker.validationCalls, [failedReport.runId])
+	assert.equal(
+		blocked.events.filter(event => event.type === 'WorkflowStageStarted').length,
+		1,
+	)
+})
+
+test('rejects a relabelled repair failure before starting repair', async function () {
+	const repositoryPath = await createTestRepository()
+	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+	const journal = new WorkflowJournal()
+	const failedReport = report('failed', true)
+	failedReport.failureCode = 'PROVIDER_RESPONSE_INVALID'
+	const worker = new FakeWorkerService([failedReport])
+	const service = await createService(worker, journal)
+	const input = workflowInput(repositoryRoot)
+	input.maxRepairAttempts = 1
+	input.stages.repair = stage('Repair the candidate.', 0)
+	const artifactRoot = artifactRootFor(service, repositoryRoot)
+	const created = await journal.create(artifactRoot, {
+		schemaVersion: 1,
+		objective: input.objective,
+		repositoryPath: repositoryRoot,
+		baseCommit: await resolveCommit(repositoryRoot, 'HEAD'),
+		deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+		maxTransitions: input.maxTransitions,
+		maxRepairAttempts: input.maxRepairAttempts,
+		dependencyWorkflowIds: [],
+		stages: input.stages,
+	})
+	const executionId = randomUUID()
+	failedReport.workflowProvenance = createWorkflowTaskProvenance(
+		created.summary.workflowId,
+		'implement',
+		executionId,
+		input.stages.implement,
+		null,
+	)
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageStarted',
+		data: {
+			stage: 'implement',
+			executionId,
+			attemptNumber: 1,
+			sourceRunId: null,
+		},
+	})
+	await journal.append(artifactRoot, created.summary.workflowId, {
+		type: 'WorkflowStageCompleted',
+		data: {
+			stage: 'implement',
+			executionId,
+			taskId: failedReport.taskId ?? null,
+			runId: failedReport.runId,
+			status: 'failed',
+			failureCode: 'EVALUATION_FAILED',
+			candidateRunId: failedReport.runId,
+			nextStage: 'repair',
+		},
+	})
+
+	const blocked = await service.run(repositoryRoot, created.summary.workflowId)
+	assert.equal(blocked.summary.status, 'blocked')
+	assert.equal(worker.tasks.length, 0)
+	assert.equal(
+		blocked.events.filter(event => event.type === 'WorkflowStageStarted').length,
+		1,
+	)
 })
 
 test('does not seed a retry from a failed partial patch', async function () {
@@ -333,6 +591,27 @@ test('does not seed a retry from a failed partial patch', async function () {
 	assert.equal(waiting.summary.candidateRunId, completed.runId)
 	assert.equal(worker.tasks.length, 2)
 	assert.equal(worker.tasks[1]?.candidateRunId, undefined)
+})
+
+test('bounds same-stage failure retries independently of stage visits', async function () {
+	const repositoryPath = await createTestRepository()
+	const first = report('failed', false)
+	const second = report('failed', false)
+	first.failureCode = 'PROVIDER_RESPONSE_INVALID'
+	second.failureCode = 'PROVIDER_RESPONSE_INVALID'
+	const worker = new FakeWorkerService([first, second])
+	const service = await createService(worker)
+	const input = workflowInput(repositoryPath)
+	input.stages.implement.retryLimit = 1
+	const created = await service.create(input)
+
+	const failed = await service.run(repositoryPath, created.summary.workflowId)
+	assert.equal(failed.summary.status, 'failed')
+	assert.equal(worker.tasks.length, 2)
+	assert.equal(
+		failed.events.filter(event => event.type === 'WorkflowStageStarted').length,
+		2,
+	)
 })
 
 test('resumes an interrupted stage as a fresh bounded delegation', async function () {
@@ -559,7 +838,7 @@ test('blocks approval when valid run evidence comes from another stage', async f
 	const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
 	const journal = new WorkflowJournal()
 	const candidate = report('completed', true)
-	const substitutedReview = report('completed', false, 'review')
+	const substitutedReview = report('completed', true, 'review')
 	const worker = new FakeWorkerService([candidate, substitutedReview])
 	const service = await createService(worker, journal)
 	const input = workflowInput(repositoryRoot)
@@ -632,7 +911,7 @@ test('blocks approval when valid run evidence comes from another stage', async f
 			runId: substitutedReview.runId,
 			status: 'completed',
 			failureCode: null,
-			candidateRunId: candidate.runId,
+			candidateRunId: substitutedReview.runId,
 			nextStage: 'approval',
 		},
 	})

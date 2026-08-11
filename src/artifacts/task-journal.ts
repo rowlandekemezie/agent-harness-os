@@ -67,6 +67,7 @@ export type RunHistoryLink = {
 	mode: WorkerMode
 	workflowProvenance: WorkflowTaskProvenance | null
 	status: RunStatus
+	failureCode: string | null
 	patchSha256: string | null
 	changedFileCount: number
 	workerId: string
@@ -309,6 +310,7 @@ export class TaskJournal {
 			patchEvidenceMatches &&
 			attempt?.type === 'AttemptCompleted' &&
 			attempt.data.status === input.status &&
+			attempt.data.failureCode === input.failureCode &&
 			(input.evaluation === null ||
 				(evaluation?.type === 'EvaluationCompleted' &&
 					evaluation.data.outcome === input.evaluation.outcome &&

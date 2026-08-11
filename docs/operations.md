@@ -134,7 +134,14 @@ active claims live under `workflow-locks/<workflowId>/`. Retain a workflow with 
 references. Before deleting workflow history, stop every server using the
 artifact root, verify no workflow lease is live, and remove the journal and its
 lease together. `get_workflow` and `list_workflows` are read-only and fail closed
-on unsafe permissions, unexpected entries, broken sequences, or digest changes.
+on unsafe permissions, unexpected entries, broken sequences, digest changes, or
+credential material introduced after publication. Run-report reads apply the
+same credential check before workflow context can be reused.
+
+Stale workflow-lease recovery reconciles `.publish-*` event links before a new
+runner is admitted. It removes a staging-only publication by verified identity,
+or retains an already linked final event and removes only its matching staging
+link.
 
 An interrupted atomic publication can leave a UUID task directory without
 `.task-ready`, or a reserved `.publish-*` entry. Read-only queries recognize a

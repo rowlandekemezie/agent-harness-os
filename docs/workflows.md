@@ -21,8 +21,10 @@ The latest successful patch-bearing run is the workflow candidate. A failed
 validation or evaluation patch can become repair input, but never retry input.
 Test, review, and repair receive the candidate in a fresh detached worktree at
 the workflow's verified base commit. The harness checks the source report, task
-history, patch digest, changed files, and next-stage path policy before
-contacting a provider. Before requesting or recording approval, it revalidates
+history, patch digest, changed files, and next-stage path policy in the same
+bounded report snapshot that supplies candidate bytes, before contacting a
+provider. Plan and repair summaries are likewise validated before reuse.
+Before requesting or recording approval, it revalidates
 the candidate and every completed stage run against task history. Each run is
 bound to the workflow ID, stage, execution ID, stage-contract digest, and source
 candidate, so another valid run cannot be substituted during replay. Later
@@ -31,6 +33,8 @@ stages return a cumulative patch against the original base.
 Every later stage's `allowedPaths` must therefore cover the whole candidate,
 not only files that stage might add. A failed deterministic evaluation may feed
 repair only when its exact patch was retained and its history remains valid.
+Retry limits count same-stage failure retries; repaired candidates re-enter
+verification under the repair and global transition bounds.
 
 A review-stage worker produces an auditable run summary; its prose is not a
 trusted pass/fail signal. Harness evaluation policy still decides the run
@@ -57,8 +61,10 @@ first committed terminal event wins.
 
 The journal records `WorkflowCreated`, dependency state changes, stage starts,
 interruptions and completions, approval requests and decisions, and one terminal
-`WorkflowCompleted`. One timeline is capped at 512 events and 2 MiB. Listing is
-capped at 10,000 workflow directories, 25,000 events, and 8 MiB per request.
+`WorkflowCompleted`. Failure status and code are task-history-bound before a
+retry or repair branch starts. One timeline is capped at 512 events and 2 MiB.
+Listing is capped at 10,000 workflow directories, 25,000 events, and 8 MiB per
+request.
 
 Dependency waits are persisted. A failed dependency blocks the dependent
 workflow. Definitions are immutable, so requiring an existing dependency also
