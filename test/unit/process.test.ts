@@ -33,3 +33,21 @@ test('marks invalid process UTF-8 without replacement decoding', async function 
 	assert.equal(result.invalidUtf8, true)
 	assert.equal(result.stdout, '')
 })
+
+test('can preserve token-shaped stdout while retaining safe defaults', async function () {
+	const token = 'sk-1234567890abcdef'
+	const redacted = await runProcess(process.execPath, ['-e', `process.stdout.write('${token}')`], {
+		cwd: process.cwd(),
+		timeoutMs: 5_000,
+		maxOutputBytes: 1_024,
+	})
+	const exact = await runProcess(process.execPath, ['-e', `process.stdout.write('${token}')`], {
+		cwd: process.cwd(),
+		timeoutMs: 5_000,
+		maxOutputBytes: 1_024,
+		redactStdout: false,
+	})
+
+	assert.equal(redacted.stdout, '[REDACTED]')
+	assert.equal(exact.stdout, token)
+})

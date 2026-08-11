@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -247,6 +248,32 @@ test('treats repository policy locations as Git paths on every host', function (
 	assert.equal(isSafeGitRelativePath('../policy.json'), false)
 	assert.equal(isSafeGitRelativePath('C:\\policy.json'), false)
 	assert.equal(isSafeGitRelativePath('.agent-os\\policy.json'), false)
+	assert.equal(isSafeGitRelativePath('.agent-os/policy.json\0hidden'), false)
+})
+
+test('preserves exact repository policy bytes and source digest', async function () {
+	const repositoryPath = await createTestRepository()
+	await mkdir(path.join(repositoryPath, '.agent-os'))
+	const contents = '{"schemaVersion":1,"prohibitedPaths":["sk-1234567890abcdef"]}'
+	await writeFile(path.join(repositoryPath, repositoryPolicyPath), contents)
+	await runGit(repositoryPath, ['add', repositoryPolicyPath])
+	await runGit(repositoryPath, ['commit', '-m', 'Add token-shaped policy'])
+	const baseCommit = await runGit(repositoryPath, ['rev-parse', 'HEAD'])
+
+	const resolved = await resolveTaskPolicy(
+		loadConfig({}),
+		repositoryPath,
+		baseCommit,
+		createTask(repositoryPath),
+	)
+	assert.equal(
+		resolved.prohibitedPaths.includes('sk-1234567890abcdef'),
+		true,
+	)
+	assert.equal(
+		resolved.policy.sources[0]?.sha256,
+		createHash('sha256').update(contents).digest('hex'),
+	)
 })
 
 function hasHarnessCode(code: string): (error: unknown) => boolean {

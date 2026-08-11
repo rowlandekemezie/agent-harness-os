@@ -216,6 +216,7 @@ export function isSafeGitRelativePath(relativePath: string): boolean {
 	return relativePath.length > 0 &&
 		!path.posix.isAbsolute(relativePath) &&
 		!path.win32.isAbsolute(relativePath) &&
+		!relativePath.includes('\0') &&
 		!relativePath.includes('\\') &&
 		path.posix.normalize(relativePath) === relativePath &&
 		!relativePath.startsWith('../')
@@ -392,6 +393,7 @@ async function runGitBounded(
 		timeoutMs: 120_000,
 		maxOutputBytes,
 		requireValidUtf8,
+		redactStdout: false,
 		...(input === undefined ? {} : { input }),
 	})
 }

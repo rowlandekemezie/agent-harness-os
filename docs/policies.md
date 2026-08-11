@@ -60,6 +60,10 @@ misleading policy digest. Bounds are:
 - `routing.requiredCapabilities`: at most 16 known capabilities
 - `routing.maxAttempts`: 1–8
 
+Glob evaluation uses a bounded state-machine matcher, not dynamically generated
+regular expressions, so adversarial wildcard patterns cannot trigger unbounded
+regex backtracking.
+
 ## Audit and operation
 
 Each new run report contains the fully resolved policy, its SHA-256 digest, and

@@ -66,6 +66,7 @@
 - Explicit non-empty repository path allowlist
 - Repository-relative paths only
 - Allowlist and denylist globs with bounded pattern counts and lengths
+- Bounded state-machine glob evaluation without regular-expression backtracking
 - Direct and nested `.git`, environment, private-key, credential, package-registry, infrastructure-state, and harness-artifact denial
 - Separate worker-write denial for manifests, lockfiles, CI, Docker, development-container, MCP, editor, and agent-control files
 - Lexical path containment and realpath containment
@@ -117,6 +118,7 @@
 - Handle-bound artifact reads and helper-confined atomic writes that verify the destination directory inode before mutation
 - Digest-named, chained task events; task summaries are projected from the validated chain
 - Patch SHA-256
+- Git standard output remains byte-faithful; only diagnostic standard error is redacted
 - Patch bytes passed to Git over standard input after verification, avoiding a second patch-path lookup
 - Clean caller working tree
 - Exact base-commit match before and after patch verification

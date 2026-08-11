@@ -37,6 +37,21 @@ test('collects staged and worker-committed changes against the original base', a
 	)
 })
 
+test('preserves token-shaped patch bytes exactly', async function () {
+	const repositoryPath = await createTestRepository()
+	const baseCommit = await resolveCommit(repositoryPath, 'HEAD')
+	const token = 'sk-1234567890abcdef'
+	await writeFile(
+		path.join(repositoryPath, 'token.txt'),
+		`${token}\n`,
+		'utf8',
+	)
+
+	const patch = await getBinaryPatch(repositoryPath, baseCommit)
+	assert.equal(patch.includes(token), true)
+	assert.equal(patch.includes('[REDACTED]'), false)
+})
+
 test('reports both sides of a rename so prohibited source paths cannot disappear', async function () {
 	const repositoryPath = await createTestRepository()
 	await writeFile(

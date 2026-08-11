@@ -731,7 +731,7 @@ test('rejects an invalid repository policy before invoking a worker', async func
 
 		await writeFile(
 			path.join(repositoryPath, '.agent-os/policy.json'),
-			'{"schemaVersion":1,"prohibitedPaths":["test-api-key-123456"]}',
+			'{"schemaVersion":1,"prohibitedPaths":["sk-1234567890abcdef"]}',
 		)
 		await runGit(repositoryPath, ['add', '.agent-os/policy.json'])
 		await runGit(repositoryPath, ['commit', '-m', 'Add unsafe policy evidence'])

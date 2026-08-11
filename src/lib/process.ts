@@ -11,6 +11,7 @@ export type RunProcessOptions = {
 	signal?: AbortSignal
 	input?: string | Buffer
 	requireValidUtf8?: boolean
+	redactStdout?: boolean
 }
 
 export type ProcessResult = CommandResult & {
@@ -144,7 +145,9 @@ export async function runProcess(
 				args,
 				exitCode,
 				signal,
-				stdout: redactor.redact(stdout),
+				stdout: options.redactStdout === false
+					? stdout
+					: redactor.redact(stdout),
 				stderr: redactor.redact(stderr),
 				durationMs: Date.now() - startedAt,
 				timedOut,
