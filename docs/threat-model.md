@@ -22,6 +22,7 @@
 - A locally authenticated Codex CLI process that is unavailable, mis-authenticated, compromised, or instructed to use authority outside the Agent OS tool contract
 - Incorrect or malicious worker profile, capability, cost, latency, priority, endpoint, or pricing configuration
 - Corrupt, oversized, or adversarial task history used as routing evidence
+- Corrupt workflow events, stale leases, forged dependencies, or tampered candidate links
 - Malformed, unsafe, mutable-checkout, or authority-expanding policy input
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
@@ -71,6 +72,25 @@
 - Missing or malformed provider usage never becomes zero-cost routing evidence
 - Reports retain source event hashes, evidence, scores, and reasons; task history binds evidence and decision digests
 - Invalid history fails before provider invocation; a zero task limit disables evidence reads
+
+### Durable workflows
+
+- Definitions, events, dependencies, transitions, retries, repairs, and deadlines are schema- and count-bounded
+- Digest-chained append-only events are replayed instead of trusting mutable workflow status
+- Dependency workflows must already exist in the same repository scope; immutable definitions prevent cycles
+- Active stages left by a crash are recorded as interrupted and resumed as fresh delegations without consuming completed-attempt retry budgets
+- Owner-private, uniquely named per-workflow claims serialize runners, avoid stale-path reuse, recover validated crash-left publication links, and fail closed on invalid or live ownership
+- Stale workflow claims reconcile event staging first: staging removal fences
+  unlinked helpers, while an already linked final event is retained
+- Candidate runs are report/history validated before delegation and approval; they require the same repository and base commit, an exact patch digest, and next-stage path authority
+- Every completed stage run is history-bound to its workflow, stage, execution, stage-contract digest, and source candidate before approval; repair always requires a retained candidate
+- Failure status and code are task-history-bound before retry or repair branching
+- Candidate patches are applied only inside fresh detached worktrees and regenerated against the original base before provider invocation
+- Workflow deadlines reach active delegation, while cancellation is terminal and never fallback-eligible
+- Credential-bearing definitions, events, and reports are rejected as decoded
+  string values on write and every read, including JSON-escaped credentials
+  rather than being forwarded or redacted into false history
+- Approval records the MCP caller's decision but grants no patch-application authority
 
 
 ### Filesystem
@@ -191,6 +211,8 @@
 - A user can intentionally supply a broad allowlist, enable plaintext provider transport, enable local execution, permit validation networking, disable image pinning, or configure a dangerous image.
 - Patches may contain proprietary source code or inline secrets from otherwise allowed paths. Secure the host account and artifact volume, and configure retention.
 - Task-event digests detect partial or accidental mutation but are not signed or externally anchored; a compromised host account can rewrite an entire chain.
+- Workflow-event digests and leases are local integrity and concurrency controls, not a signed ledger or distributed consensus system.
+- MCP approval identifies the authenticated tool caller, not a verified human approver. Add identity and authorization outside this process when policy requires named-human approval.
 - Deterministic evaluation proves only the evidence it was given. Missing criterion-specific checks and warning baselines remain explicitly inconclusive.
 - An external editor or process can still race the final patch application between the last precondition check and the operating-system write. Repeated checks narrow but cannot eliminate that host-level race.
 

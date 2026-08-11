@@ -3,8 +3,10 @@ import type { Dirent } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import type {
+	EvaluationDimensionId,
 	EvaluationOutcome,
 	ResolvedPolicy,
+	RunStatus,
 	TaskEvent,
 	TaskEventInput,
 	TaskListQuery,
@@ -12,10 +14,12 @@ import type {
 	TaskSummary,
 	TaskTimeline,
 	WorkerMode,
+	WorkflowTaskProvenance,
 } from '../domain/types.js'
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
 import { Redactor } from '../lib/redaction.js'
+import { workflowProvenanceEquals } from '../workflow/provenance.js'
 import {
 	projectTaskEvent,
 	type TaskEventProjection,
@@ -51,6 +55,7 @@ export type CreateTaskInput = {
 	repositoryPath: string
 	baseCommit: string
 	policy?: ResolvedPolicy
+	workflowProvenance?: WorkflowTaskProvenance
 }
 
 export type RunHistoryLink = {
@@ -59,14 +64,19 @@ export type RunHistoryLink = {
 	runId: string
 	repositoryPath: string
 	baseCommit: string
-	status: 'completed'
-	patchSha256: string
+	mode: WorkerMode
+	workflowProvenance: WorkflowTaskProvenance | null
+	status: RunStatus
+	failureCode: string | null
+	patchSha256: string | null
 	changedFileCount: number
 	workerId: string
 	evaluation: {
 		evaluatorIds: Array<string>
 		outcome: EvaluationOutcome
 		evaluationPolicy: 'default' | 'strict'
+		failedDimensions: Array<EvaluationDimensionId>
+		unknownDimensions: Array<EvaluationDimensionId>
 	} | null
 	policySha256?: string | null
 	routingEvidenceSha256?: string | null
@@ -109,13 +119,19 @@ export class TaskJournal {
 		}
 		await createPrivateDirectory(input.artifactRoot, eventsDirectory)
 
-		const event = createEvent(input.policy === undefined ? 3 : 5, taskId, 1, null, {
+		const schemaVersion = input.workflowProvenance === undefined
+			? input.policy === undefined ? 3 : 5
+			: 6
+		const event = createEvent(schemaVersion, taskId, 1, null, {
 			type: 'TaskCreated',
 			data: {
 				objective: this.redactor.redact(input.objective),
 				mode: input.mode,
 				repositoryPath: input.repositoryPath,
 				baseCommit: input.baseCommit,
+				...(input.workflowProvenance === undefined
+					? {}
+					: { workflowProvenance: { ...input.workflowProvenance } }),
 				...(input.policy === undefined
 					? {}
 					: {
@@ -257,11 +273,28 @@ export class TaskJournal {
 		)
 		const completed = timeline.events.find(event => event.type === 'TaskCompleted')
 		const route = timeline.events.find(event => event.type === 'RouteSelected')
+		const patchEvidenceMatches = input.patchSha256 === null
+			? input.changedFileCount === 0
+				? produced === undefined
+				: input.status === 'failed' &&
+					input.evaluation?.failedDimensions.includes('patch_size') === true &&
+					produced?.type === 'PatchProduced' &&
+					produced.data.changedFileCount === input.changedFileCount
+			: produced?.type === 'PatchProduced' &&
+				produced.data.patchSha256 === input.patchSha256 &&
+				produced.data.changedFileCount === input.changedFileCount
 
 		return (
 			created?.type === 'TaskCreated' &&
 			created.data.repositoryPath === input.repositoryPath &&
 			created.data.baseCommit === input.baseCommit &&
+			created.data.mode === input.mode &&
+			(created.schemaVersion >= 6
+				? workflowProvenanceEquals(
+					created.data.workflowProvenance ?? null,
+					input.workflowProvenance,
+				)
+				: input.workflowProvenance === null) &&
 			(created.schemaVersion >= 4
 				? created.data.policySha256 === (input.policySha256 ?? null)
 				: (input.policySha256 ?? null) === null) &&
@@ -274,11 +307,10 @@ export class TaskJournal {
 				: (input.routingEvidenceSha256 ?? null) === null) &&
 			started?.type === 'WorkerStarted' &&
 			started.data.workerId === input.workerId &&
-			produced?.type === 'PatchProduced' &&
-			produced.data.patchSha256 === input.patchSha256 &&
-			produced.data.changedFileCount === input.changedFileCount &&
+			patchEvidenceMatches &&
 			attempt?.type === 'AttemptCompleted' &&
 			attempt.data.status === input.status &&
+			attempt.data.failureCode === input.failureCode &&
 			(input.evaluation === null ||
 				(evaluation?.type === 'EvaluationCompleted' &&
 					evaluation.data.outcome === input.evaluation.outcome &&
@@ -287,6 +319,14 @@ export class TaskJournal {
 					arraysEqual(
 						evaluation.data.evaluatorIds,
 						input.evaluation.evaluatorIds,
+					) &&
+					arraysEqual(
+						evaluation.data.failedDimensions,
+						input.evaluation.failedDimensions,
+					) &&
+					arraysEqual(
+						evaluation.data.unknownDimensions,
+						input.evaluation.unknownDimensions,
 					))) &&
 			completed?.type === 'TaskCompleted' &&
 			completed.data.runId === input.runId &&
@@ -866,7 +906,7 @@ function parseTaskReadyMarker(
 }
 
 function createEvent(
-	schemaVersion: 1 | 2 | 3 | 4 | 5,
+	schemaVersion: 1 | 2 | 3 | 4 | 5 | 6,
 	taskId: string,
 	sequence: number,
 	previousEventSha256: string | null,

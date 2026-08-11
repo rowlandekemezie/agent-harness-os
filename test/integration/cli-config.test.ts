@@ -48,4 +48,8 @@ test('includes custom worker secret environment names in generated Codex configu
 	assert.match(stdout, /"AGENT_OS_WORKER_PROFILES_JSON"/)
 	assert.match(stdout, /"AGENT_OS_ORGANIZATION_POLICY_PATH"/)
 	assert.match(stdout, /"AGENT_OS_ROUTING_EVIDENCE_TASK_LIMIT"/)
+	assert.match(stdout, /tools\.create_coding_workflow/)
+	assert.match(stdout, /tools\.run_workflow/)
+	assert.match(stdout, /tools\.approve_workflow/)
+	assert.match(stdout, /tools\.cancel_workflow/)
 })

@@ -134,6 +134,121 @@ test('persists and projects an append-only task timeline', async function () {
 	)
 })
 
+test('links completed task history that produced no patch', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-no-patch-'))
+	const journal = new TaskJournal()
+	const task = await createTask(journal, artifactRoot, 'Review without changes.')
+	const runId = randomUUID()
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerStarted',
+		data: { runId, workerId: 'worker-one', attemptNumber: 1 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerCompleted',
+		data: {
+			runId,
+			outcome: 'succeeded',
+			failureCode: null,
+			requestCount: 1,
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'ValidationCompleted',
+		data: { runId, outcome: 'skipped', commandCount: 0 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'EvaluationCompleted',
+		data: {
+			runId,
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			evaluationPolicy: 'default',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'AttemptCompleted',
+		data: { runId, status: 'completed', failureCode: null },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'TaskCompleted',
+		data: { runId, status: 'completed' },
+	})
+
+	assert.equal(await journal.isRunLinked({
+		artifactRoot,
+		taskId: task.taskId,
+		runId,
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		mode: 'implementation',
+		workflowProvenance: null,
+		status: 'completed',
+		failureCode: null,
+		patchSha256: null,
+		changedFileCount: 0,
+		workerId: 'worker-one',
+		evaluation: {
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			evaluationPolicy: 'default',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	}), true)
+	assert.equal(await journal.isRunLinked({
+		artifactRoot,
+		taskId: task.taskId,
+		runId,
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		mode: 'implementation',
+		workflowProvenance: null,
+		status: 'completed',
+		failureCode: 'PROVIDER_RESPONSE_INVALID',
+		patchSha256: null,
+		changedFileCount: 0,
+		workerId: 'worker-one',
+		evaluation: {
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			evaluationPolicy: 'default',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	}), false)
+	assert.equal(await journal.isRunLinked({
+		artifactRoot,
+		taskId: task.taskId,
+		runId,
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		mode: 'review',
+		workflowProvenance: null,
+		status: 'completed',
+		failureCode: null,
+		patchSha256: null,
+		changedFileCount: 0,
+		workerId: 'worker-one',
+		evaluation: {
+			evaluatorIds: ['deterministic-v1'],
+			outcome: 'passed',
+			evaluationPolicy: 'default',
+			failedDimensions: [],
+			unknownDimensions: [],
+		},
+	}), false)
+})
+
 test('binds a resolved policy to current task history', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-policy-'))
 	const journal = new TaskJournal()

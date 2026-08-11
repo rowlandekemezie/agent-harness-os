@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import {
+	link,
 	mkdtemp,
 	readFile,
 	rename,
@@ -14,6 +15,9 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
 	createPrivateDirectory,
+	readBoundedPublishedFile,
+	removePublishedFileIfContentsMatch,
+	removeRegularFileIfContentsMatch,
 	writeExclusiveRegularFile,
 } from '../../src/artifacts/secure-io.js'
 
@@ -150,6 +154,99 @@ test('does not publish a prepared file without the parent commit grant', async f
 	await assert.rejects(readFile(path.join(destination, temporaryName)))
 })
 
+test('acknowledges publication only after the exact final link is durable', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-ack-'))
+	const destination = await mkdtemp(path.join(root, 'destination-'))
+	const identity = await stat(destination, { bigint: true })
+	const temporaryName = '.publish-66666666-6666-4666-8666-666666666666-event.json'
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'publish-file',
+			identity.dev.toString(),
+			identity.ino.toString(),
+			root,
+			destination,
+			'event.json',
+			temporaryName,
+			'600',
+			'6',
+		],
+		{ cwd: destination, env: {}, stdio: ['pipe', 'pipe', 'ignore', 'ipc'] },
+	)
+	const childStdin = child.stdin
+	const childStdout = child.stdout
+	assert.ok(childStdin)
+	assert.ok(childStdout)
+	let output = ''
+	const prepared = new Promise<void>((resolve, reject) => {
+		child.once('error', reject)
+		childStdout.on('data', (chunk: Buffer) => {
+			output += chunk.toString('utf8')
+			if (output.split('\n').includes('prepared')) {
+				resolve()
+			}
+		})
+	})
+	childStdin.end('secret')
+	await prepared
+	await new Promise<void>((resolve, reject) => {
+		child.send('commit', error => error === null ? resolve() : reject(error))
+	})
+	const exitCode = await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('exit', resolve)
+	})
+
+	assert.equal(exitCode, 0)
+	assert.equal(output.split('\n').includes('committed'), true)
+	assert.equal(await readFile(path.join(destination, 'event.json'), 'utf8'), 'secret')
+})
+
+test('acknowledges removal only after its directory sync completes', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-remove-ack-'))
+	const filePath = path.join(root, 'workflow.lock')
+	await writeFile(filePath, 'lease\n', { mode: 0o600 })
+	const [directoryIdentity, fileIdentity] = await Promise.all([
+		stat(root, { bigint: true }),
+		stat(filePath, { bigint: true }),
+	])
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'unlink-file',
+			directoryIdentity.dev.toString(),
+			directoryIdentity.ino.toString(),
+			root,
+			root,
+			'workflow.lock',
+			fileIdentity.dev.toString(),
+			fileIdentity.ino.toString(),
+		],
+		{ cwd: root, env: {}, stdio: ['ignore', 'pipe', 'ignore'] },
+	)
+	const childStdout = child.stdout
+	assert.ok(childStdout)
+	let output = ''
+	childStdout.on('data', (chunk: Buffer) => {
+		output += chunk.toString('utf8')
+	})
+	const exitCode = await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('close', resolve)
+	})
+	const lines = output.trim().split('\n')
+
+	assert.equal(exitCode, 0)
+	assert.equal(lines.indexOf('removal-started') < lines.indexOf('removal-committed'), true)
+	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+	assert.equal(await confirmRemoval(root, directoryIdentity, 'workflow.lock'), 0)
+	await writeFile(filePath, 'replacement\n', { mode: 0o600 })
+	assert.notEqual(await confirmRemoval(root, directoryIdentity, 'workflow.lock'), 0)
+})
+
 test('handles large exclusive-write collisions without crashing', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-epipe-'))
 	const filePath = path.join(root, 'report.json')
@@ -180,3 +277,172 @@ test('creates private directories exclusively', async function () {
 			error.code === 'ARTIFACT_WRITE_FAILED',
 	)
 })
+
+test('removes only the regular file with the expected contents', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-unlink-'))
+	const filePath = path.join(root, 'workflow.lock')
+	const original = Buffer.from('original lock\n')
+	await writeExclusiveRegularFile(root, filePath, original)
+
+	assert.equal(
+		await removeRegularFileIfContentsMatch(
+			root,
+			filePath,
+			Buffer.from('replacement lock\n'),
+			1_024,
+		),
+		false,
+	)
+	assert.deepEqual(await readFile(filePath), original)
+	assert.equal(
+		await removeRegularFileIfContentsMatch(root, filePath, original, 1_024),
+		true,
+	)
+	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+})
+
+test('reads and removes a verified crash-left publication pair', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-pair-'))
+	const filePath = path.join(root, 'report.json')
+	const temporaryPath = path.join(
+		root,
+		'.publish-44444444-4444-4444-8444-444444444444-report.json',
+	)
+	const contents = Buffer.from('exact report bytes\n')
+	await writeFile(filePath, contents, { mode: 0o600 })
+	await link(filePath, temporaryPath)
+
+	assert.deepEqual(
+		await readBoundedPublishedFile(root, filePath, 1_024),
+		contents,
+	)
+	assert.equal(
+		await removePublishedFileIfContentsMatch(root, filePath, contents, 1_024),
+		true,
+	)
+	await assert.rejects(readFile(filePath), hasCode('ENOENT'))
+	await assert.rejects(readFile(temporaryPath), hasCode('ENOENT'))
+})
+
+test('rejects a publication staging file with different bytes and identity', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-pair-mismatch-'))
+	const filePath = path.join(root, 'report.json')
+	const temporaryPath = path.join(
+		root,
+		'.publish-55555555-5555-4555-8555-555555555555-report.json',
+	)
+	await writeFile(filePath, 'expected\n', { mode: 0o600 })
+	await writeFile(temporaryPath, 'replacement\n', { mode: 0o600 })
+
+	await assert.rejects(
+		readBoundedPublishedFile(root, filePath, 1_024),
+		hasCode('ARTIFACT_HARD_LINK_DENIED'),
+	)
+})
+
+test('rejects hostile FIFO artifacts without blocking', {
+	skip: process.platform === 'win32',
+}, async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'secure-io-fifo-'))
+	const fifoPath = path.join(root, 'workflow.lock')
+	const mkfifo = spawn('mkfifo', [fifoPath], { stdio: 'ignore' })
+	assert.equal(await waitForChild(mkfifo, 1_000), 0)
+
+	const secureIoUrl = new URL('../../src/artifacts/secure-io.js', import.meta.url).href
+	const parentProbe = spawn(
+		process.execPath,
+		[
+			'--input-type=module',
+			'-e',
+			`import { readBoundedRegularFile, removeRegularFileIfContentsMatch } from ${JSON.stringify(secureIoUrl)}
+const [root, fifoPath] = process.argv.slice(1)
+for (const operation of [
+	() => readBoundedRegularFile(root, fifoPath, 1024),
+	() => removeRegularFileIfContentsMatch(root, fifoPath, Buffer.from('lease\\n'), 1024),
+]) {
+	try {
+		await operation()
+		process.exit(2)
+	} catch (error) {
+		if (error?.code !== 'ARTIFACT_FILE_INVALID') process.exit(3)
+	}
+}`,
+			root,
+			fifoPath,
+		],
+		{ env: {}, stdio: 'ignore' },
+	)
+	assert.equal(await waitForChild(parentProbe, 1_000), 0)
+	const [directoryIdentity, fifoIdentity] = await Promise.all([
+		stat(root, { bigint: true }),
+		stat(fifoPath, { bigint: true }),
+	])
+	const helper = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'unlink-file',
+			directoryIdentity.dev.toString(),
+			directoryIdentity.ino.toString(),
+			root,
+			root,
+			'workflow.lock',
+			fifoIdentity.dev.toString(),
+			fifoIdentity.ino.toString(),
+		],
+		{ cwd: root, env: {}, stdio: 'ignore' },
+	)
+	assert.notEqual(await waitForChild(helper, 1_000), 0)
+})
+
+function hasCode(code: string): (error: unknown) => boolean {
+	return error => typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		error.code === code
+}
+
+async function confirmRemoval(
+	root: string,
+	directoryIdentity: Awaited<ReturnType<typeof stat>>,
+	name: string,
+): Promise<number | null> {
+	const child = spawn(
+		process.execPath,
+		[
+			helperPath,
+			'confirm-removal',
+			directoryIdentity.dev.toString(),
+			directoryIdentity.ino.toString(),
+			root,
+			root,
+			name,
+		],
+		{ cwd: root, env: {}, stdio: 'ignore' },
+	)
+	return await new Promise<number | null>((resolve, reject) => {
+		child.once('error', reject)
+		child.once('close', resolve)
+	})
+}
+
+async function waitForChild(
+	child: ReturnType<typeof spawn>,
+	timeoutMs: number,
+): Promise<number | null> {
+	let timeout: NodeJS.Timeout | null = null
+	try {
+		return await new Promise<number | null>((resolve, reject) => {
+			timeout = setTimeout(() => {
+				child.kill('SIGKILL')
+				reject(new Error('Child process did not exit within its test bound'))
+			}, timeoutMs)
+			child.once('error', reject)
+			child.once('close', resolve)
+		})
+	} finally {
+		if (timeout !== null) {
+			clearTimeout(timeout)
+		}
+	}
+}

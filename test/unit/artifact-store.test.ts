@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { access, link, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -111,6 +112,57 @@ test('persists an exact patch while redacting the transcript', async function ()
 	assert.equal(transcript.includes('abcdefghijklmnop'), false)
 })
 
+test('rejects credential material injected into a persisted report', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-read-secret-'))
+	const secret = 'custom-"provider\\secret'
+	const report = createReport('14141414-1414-4141-8141-141414141414')
+	const store = new ArtifactStore(new Redactor({}, [secret]))
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: 'candidate',
+		workerTranscript: '',
+	})
+	const value = JSON.parse(await readFile(persisted.reportPath, 'utf8')) as {
+		workerSummary: string
+	}
+	value.workerSummary = secret
+	await writeFile(persisted.reportPath, `${JSON.stringify(value)}\n`, 'utf8')
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('ARTIFACT_CONTAINS_SECRET'),
+	)
+})
+
+test('reads report and patch from verified crash-left publication pairs', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-pair-'))
+	const report = createReport('15151515-1515-4151-8151-151515151515')
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: 'exact patch bytes\n',
+		workerTranscript: '',
+	})
+	assert.ok(persisted.patchPath)
+	const reportTemporaryPath = path.join(
+		path.dirname(persisted.reportPath),
+		`.publish-${randomUUID()}-report.json`,
+	)
+	const patchTemporaryPath = path.join(
+		path.dirname(persisted.patchPath),
+		`.publish-${randomUUID()}-changes.patch`,
+	)
+	await link(persisted.reportPath, reportTemporaryPath)
+	await link(persisted.patchPath, patchTemporaryPath)
+
+	assert.equal((await store.loadReport(root, report.runId)).runId, report.runId)
+	assert.deepEqual(
+		await store.loadPatch(root, persisted),
+		Buffer.from('exact patch bytes\n'),
+	)
+})
 
 test('rejects a patch artifact replaced by a symbolic link', async function () {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-link-'))
@@ -276,6 +328,28 @@ test('rejects a corrupted run report as invalid rather than missing', async func
 			error !== null &&
 			'code' in error &&
 			error.code === 'INVALID_RUN_REPORT',
+	)
+})
+
+test('rejects invalid UTF-8 in an otherwise structured run report', async function () {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'artifact-store-utf8-'))
+	const report = createReport('34343434-3434-4434-8434-343434343434')
+	const store = new ArtifactStore()
+	const persisted = await store.persist({
+		artifactRoot: root,
+		report,
+		patch: '',
+		workerTranscript: '',
+	})
+	const contents = await readFile(persisted.reportPath)
+	const summaryOffset = contents.indexOf(Buffer.from('done'))
+	assert.notEqual(summaryOffset, -1)
+	contents[summaryOffset] = 0xff
+	await writeFile(persisted.reportPath, contents)
+
+	await assert.rejects(
+		store.loadReport(root, report.runId),
+		hasHarnessCode('INVALID_RUN_REPORT'),
 	)
 })
 

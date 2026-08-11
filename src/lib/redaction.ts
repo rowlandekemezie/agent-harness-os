@@ -39,4 +39,29 @@ export class Redactor {
 
 		return redacted
 	}
+
+	containsCredentialMaterial(value: unknown): boolean {
+		const pending: Array<unknown> = [value]
+		const seen = new Set<object>()
+
+		while (pending.length > 0) {
+			const current = pending.pop()
+			if (typeof current === 'string') {
+				if (this.redact(current) !== current) {
+					return true
+				}
+				continue
+			}
+			if (current === null || typeof current !== 'object') {
+				continue
+			}
+			if (seen.has(current)) {
+				continue
+			}
+			seen.add(current)
+			pending.push(...Object.values(current))
+		}
+
+		return false
+	}
 }

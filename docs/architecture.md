@@ -8,7 +8,11 @@ Codex
         |
         v
 MCP tools
-  health, registry inspection, route preview, delegation, history, report, apply
+  health, routing, delegation, workflow control, history, report, apply
+        |
+        v
+Workflow service
+  replay, dependencies, bounded stages, repair, approval, resume, cancellation
         |
         v
 Policy resolver
@@ -20,7 +24,7 @@ Worker registry and deterministic router
         |
         v
 Provider adapter
-  OpenAI-compatible or Anthropic Messages API
+  Codex CLI, OpenAI-compatible, or Anthropic Messages API
         |
         v
 Secure execution kernel
@@ -126,14 +130,31 @@ filenames include their content digest and each event links to its predecessor.
 The journal projects summaries from the validated chain instead of trusting a
 mutable summary file.
 
+### Workflow service and journal
+
+`src/workflow/service.ts` coordinates stages only through the `WorkerService`
+contract; it never reaches into adapters or execution internals.
+`src/workflow/journal.ts` and `src/workflow/event-model.ts` persist and replay
+workflow decisions. A workflow stage maps to one ordinary delegation, so all
+policy, routing, evaluation, artifact, and fresh-worktree gates still apply.
+
+Patch-bearing stages are chained by run ID. `WorkerService` validates the source
+report and task history, seeds the exact patch into a fresh worktree, and checks
+the regenerated cumulative patch before provider execution. Task history and
+the report bind each run to its workflow, stage, execution, stage-contract
+digest, and source candidate. Workflow approval records intent only; the patch
+application service remains the sole checkout mutation boundary. See
+[Durable coding workflows](workflows.md).
+
 ### Secure artifact I/O
 
-`src/artifacts/secure-io.ts` verifies handle identity and containment for reads.
+`src/artifacts/secure-io.ts` opens hostile files nonblocking, then verifies
+regular-file type, handle identity, and containment for reads.
 For writes, a sanitized Node helper starts in the verified destination
 directory inode, rechecks containment around mutation, stages and syncs content,
 publishes it with a no-replace hard link, and syncs the directory. Task
 directories use exclusive creation plus a final readiness marker. Both run
-artifacts and task events use this module.
+artifacts, task events, workflow events, and workflow leases use this module.
 
 ### Fallback
 
@@ -143,7 +164,13 @@ Fallback occurs outside an attempt. The repository lease remains held, while the
 
 Every attempt has its own immutable audit record. Only a completed version 3 run with a valid patch can pass `apply_worker_patch`. The apply path does not consult routing or a model; it verifies the repository, artifact, base commit, patch, and evaluation history deterministically. Removing a failed reviewer from `report.json`, or relabeling the report as legacy, cannot make a patch applicable. Version 1 and 2 reports remain readable for audit but must be rerun before application. Failure to append later patch-lifecycle events does not change patch authority.
 
-Authoritative event publication uses a two-phase helper protocol. The helper stages and fsyncs bytes, then waits. The parent grants commit only while the task signal and deadline remain clear; that grant is the cancellation linearization point before the helper creates the final atomic link.
+Authoritative event publication uses a two-phase helper protocol. The helper
+stages and fsyncs bytes, then waits. The parent keeps cancellation armed after
+granting commit until the helper acknowledges a directory-synced final link. If
+abort races that acknowledgment, the parent syncs the verified directory and
+accepts only the exact final or final/staging inode and bytes. Removal helpers
+likewise acknowledge only after directory sync; an unacknowledged mutation is
+resynced or fails closed.
 
 ## Why this remains one package
 
@@ -156,5 +183,6 @@ provider adapters -> domain contracts
 router -> worker metadata + domain contracts
 execution kernel -> router + provider registry + security modules
 MCP -> execution service
-UI/durable workflows -> MCP or application service, never provider internals
+UI -> MCP or workflow application service
+workflow service -> execution service, never provider internals
 ```

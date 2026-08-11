@@ -8,6 +8,7 @@ import type {
 	WorkerMode,
 	WorkerRoutingPolicy,
 	WorkerTask,
+	WorkflowWorkerStage,
 } from '../domain/types.js'
 import type { HarnessConfig } from '../config.js'
 import {
@@ -29,6 +30,10 @@ import { WorkerRegistry } from '../provider/registry.js'
 import type { WorkerRoute } from '../provider/router.js'
 import { Logger } from '../lib/logger.js'
 import { WorkerService } from '../worker/service.js'
+import {
+	WorkflowService,
+	type CreateWorkflowInput,
+} from '../workflow/service.js'
 
 export type McpToolDefinition = {
 	name: string
@@ -150,6 +155,90 @@ const toolDefinitions: Array<McpToolDefinition> = [
 		annotations: annotation('Read worker run', true, false, true),
 	},
 	{
+		name: 'create_coding_workflow',
+		description: 'Create a durable plan, implement, test, review, repair, and approval workflow without invoking a worker.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				objective: { type: 'string', minLength: 1, maxLength: 4000 },
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				baseRef: { type: 'string', minLength: 1, maxLength: 1024 },
+				deadlineSeconds: { type: 'integer', minimum: 60, maximum: 86400 },
+				maxTransitions: { type: 'integer', minimum: 1, maximum: 64 },
+				maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 5 },
+				dependencyWorkflowIds: {
+					type: 'array',
+					items: { type: 'string', minLength: 36, maxLength: 36 },
+					maxItems: 16,
+				},
+				stages: {
+					type: 'object',
+					properties: {
+						plan: workflowStageSchema(),
+						implement: workflowStageSchema(),
+						test: workflowStageSchema(),
+						review: workflowStageSchema(),
+						repair: workflowStageSchema(),
+					},
+					required: ['implement'],
+					additionalProperties: false,
+				},
+			},
+			required: ['objective', 'repositoryPath', 'stages'],
+			additionalProperties: false,
+		},
+		annotations: annotation('Create coding workflow', false, false, false),
+	},
+	{
+		name: 'run_workflow',
+		description: 'Run or resume a durable coding workflow until it completes, fails, or waits for approval or dependencies.',
+		inputSchema: workflowIdentitySchema(),
+		annotations: annotation('Run coding workflow', false, false, false, true),
+	},
+	{
+		name: 'approve_workflow',
+		description: 'Approve or reject a workflow candidate. Approval records the decision but never applies the patch.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				workflowId: { type: 'string', minLength: 36, maxLength: 36 },
+				decision: { enum: ['approved', 'rejected'] },
+				feedback: { type: 'string', maxLength: 4000 },
+			},
+			required: ['repositoryPath', 'workflowId', 'decision'],
+			additionalProperties: false,
+		},
+		annotations: annotation('Decide workflow approval', false, true, false),
+	},
+	{
+		name: 'cancel_workflow',
+		description: 'Cancel a durable workflow and abort its active delegation when this server owns it.',
+		inputSchema: workflowIdentitySchema(),
+		annotations: annotation('Cancel coding workflow', false, true, true),
+	},
+	{
+		name: 'get_workflow',
+		description: 'Load a validated workflow definition, summary, and append-only event timeline.',
+		inputSchema: workflowIdentitySchema(),
+		annotations: annotation('Read coding workflow', true, false, true),
+	},
+	{
+		name: 'list_workflows',
+		description: 'List durable workflows for one repository with bounded cursor pagination.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+				limit: { type: 'integer', minimum: 1, maximum: 100 },
+				cursor: { type: 'string', minLength: 36, maxLength: 36 },
+			},
+			required: ['repositoryPath'],
+			additionalProperties: false,
+		},
+		annotations: annotation('List coding workflows', true, false, true),
+	},
+	{
 		name: 'list_tasks',
 		description: 'List durable task history for one repository with bounded filters and cursor pagination.',
 		inputSchema: {
@@ -211,6 +300,7 @@ export class McpTools {
 	private readonly config: HarnessConfig
 	private readonly workerRegistry: WorkerRegistry
 	private readonly workerService: WorkerService
+	private readonly workflowService: WorkflowService
 
 	constructor(config: HarnessConfig) {
 		this.config = config
@@ -219,6 +309,9 @@ export class McpTools {
 			new Logger('worker-registry', config.logLevel),
 		)
 		this.workerService = new WorkerService(config)
+		this.workflowService = new WorkflowService(config, {
+			workerService: this.workerService,
+		})
 	}
 
 	list(): Array<McpToolDefinition> {
@@ -262,6 +355,65 @@ export class McpTools {
 							requireString(argumentsRecord['runId'], 'runId', { minLength: 36, maxLength: 36 }),
 						),
 					)
+				}
+				case 'create_coding_workflow':
+					return result(
+						await this.workflowService.create(
+							parseWorkflowInput(rawArguments, this.config),
+						),
+					)
+				case 'run_workflow': {
+					const identity = parseWorkflowIdentity(rawArguments)
+					return result(await this.workflowService.run(
+						identity.repositoryPath,
+						identity.workflowId,
+						signal,
+					))
+				}
+				case 'approve_workflow': {
+					const argumentsRecord = requireRecord(rawArguments, 'arguments')
+					const decision = argumentsRecord['decision']
+					if (decision !== 'approved' && decision !== 'rejected') {
+						throw new HarnessError(
+							'INVALID_ARGUMENT',
+							'decision must be approved or rejected',
+						)
+					}
+					return result(await this.workflowService.approve(
+						parseRepositoryPath(argumentsRecord['repositoryPath']),
+						requireString(argumentsRecord['workflowId'], 'workflowId', { minLength: 36, maxLength: 36 }),
+						decision,
+						requireString(argumentsRecord['feedback'] ?? '', 'feedback', {
+							maxLength: 4_000,
+							maxBytes: 4_000,
+						}),
+						signal,
+					))
+				}
+				case 'cancel_workflow': {
+					const identity = parseWorkflowIdentity(rawArguments)
+					return result(await this.workflowService.cancel(
+						identity.repositoryPath,
+						identity.workflowId,
+					))
+				}
+				case 'get_workflow': {
+					const identity = parseWorkflowIdentity(rawArguments)
+					return result(await this.workflowService.get(
+						identity.repositoryPath,
+						identity.workflowId,
+					))
+				}
+				case 'list_workflows': {
+					const argumentsRecord = requireRecord(rawArguments, 'arguments')
+					return result(await this.workflowService.list(
+						parseRepositoryPath(argumentsRecord['repositoryPath']),
+						optionalInteger(argumentsRecord['limit'], 'limit', 50, { min: 1, max: 100 }),
+						argumentsRecord['cursor'] === undefined
+							? null
+							: requireString(argumentsRecord['cursor'], 'cursor', { minLength: 36, maxLength: 36 }),
+						signal,
+					))
 				}
 				case 'list_tasks': {
 					const argumentsRecord = requireRecord(rawArguments, 'arguments')
@@ -397,12 +549,7 @@ export class McpTools {
 
 function parseWorkerTask(value: unknown, config: HarnessConfig): WorkerTask {
 	const input = requireRecord(value, 'arguments')
-	const repositoryPath = path.resolve(
-		requireString(input['repositoryPath'], 'repositoryPath', {
-			minLength: 1,
-			maxLength: 4_096,
-		}),
-	)
+	const repositoryPath = parseRepositoryPath(input['repositoryPath'])
 	const mode = parseMode(input['mode'])
 	const requiredCommands = parseCommandSpecs(input['requiredCommands'])
 
@@ -443,6 +590,154 @@ function parseWorkerTask(value: unknown, config: HarnessConfig): WorkerTask {
 		allowNetwork: optionalBoolean(input['allowNetwork'], 'allowNetwork', false),
 		routing: parseRoutingPolicy(input['routing'], config),
 	}
+}
+
+function parseWorkflowInput(
+	value: unknown,
+	config: HarnessConfig,
+): CreateWorkflowInput {
+	const input = requireRecord(value, 'arguments')
+	const stagesInput = requireRecord(input['stages'], 'stages')
+	const stages = {
+		plan: parseWorkflowStage(stagesInput['plan'], 'plan', config, false),
+		implement: parseWorkflowStage(
+			stagesInput['implement'],
+			'implement',
+			config,
+			true,
+		) as WorkflowWorkerStage,
+		test: parseWorkflowStage(stagesInput['test'], 'test', config, false),
+		review: parseWorkflowStage(stagesInput['review'], 'review', config, false),
+		repair: parseWorkflowStage(stagesInput['repair'], 'repair', config, false),
+	}
+	return {
+		objective: requireString(input['objective'], 'objective', {
+			minLength: 1,
+			maxLength: 4_000,
+		}),
+		repositoryPath: parseRepositoryPath(input['repositoryPath']),
+		baseRef: optionalString(input['baseRef'], 'baseRef', 'HEAD'),
+		deadlineSeconds: optionalInteger(
+			input['deadlineSeconds'],
+			'deadlineSeconds',
+			3_600,
+			{ min: 60, max: 86_400 },
+		),
+		maxTransitions: optionalInteger(
+			input['maxTransitions'],
+			'maxTransitions',
+			16,
+			{ min: 1, max: 64 },
+		),
+		maxRepairAttempts: optionalInteger(
+			input['maxRepairAttempts'],
+			'maxRepairAttempts',
+			stages.repair === null ? 0 : 2,
+			{ min: 0, max: 5 },
+		),
+		dependencyWorkflowIds: parseBoundedStringArray(
+			input['dependencyWorkflowIds'],
+			'dependencyWorkflowIds',
+			{ maxItems: 16, maxItemLength: 36 },
+		),
+		stages,
+	}
+}
+
+function parseWorkflowStage(
+	value: unknown,
+	stageName: string,
+	config: HarnessConfig,
+	required: boolean,
+): WorkflowWorkerStage | null {
+	if (value === undefined) {
+		if (required) {
+			throw new HarnessError(
+				'INVALID_ARGUMENT',
+				`stages.${stageName} is required`,
+			)
+		}
+		return null
+	}
+	const input = requireRecord(value, `stages.${stageName}`)
+	const requiredCommands = parseCommandSpecs(input['requiredCommands'])
+	if (
+		(stageName === 'plan' || stageName === 'review') &&
+		requiredCommands.length > 0
+	) {
+		throw new HarnessError(
+			'INVALID_ARGUMENT',
+			`Workflow ${stageName} stages are read-only and cannot run commands`,
+		)
+	}
+	return {
+		objective: requireString(
+			input['objective'],
+			`stages.${stageName}.objective`,
+			{ minLength: 1, maxLength: 4_000 },
+		),
+		allowedPaths: parseBoundedStringArray(
+			input['allowedPaths'],
+			`stages.${stageName}.allowedPaths`,
+			{ required: true, minItems: 1, maxItems: 100, maxItemLength: 1_024 },
+		),
+		prohibitedPaths: parseBoundedStringArray(
+			input['prohibitedPaths'],
+			`stages.${stageName}.prohibitedPaths`,
+			{ maxItems: 100, maxItemLength: 1_024 },
+		),
+		acceptanceCriteria: parseBoundedStringArray(
+			input['acceptanceCriteria'],
+			`stages.${stageName}.acceptanceCriteria`,
+			{ maxItems: 100, maxItemLength: 2_000 },
+		),
+		requiredCommands,
+		maxIterations: optionalInteger(
+			input['maxIterations'],
+			`stages.${stageName}.maxIterations`,
+			24,
+			{ min: 1, max: 64 },
+		),
+		timeoutSeconds: optionalInteger(
+			input['timeoutSeconds'],
+			`stages.${stageName}.timeoutSeconds`,
+			900,
+			{ min: 30, max: 3_600 },
+		),
+		allowNetwork: optionalBoolean(
+			input['allowNetwork'],
+			`stages.${stageName}.allowNetwork`,
+			false,
+		),
+		routing: parseRoutingPolicy(input['routing'], config),
+		retryLimit: optionalInteger(
+			input['retryLimit'],
+			`stages.${stageName}.retryLimit`,
+			stageName === 'repair' ? 0 : 1,
+			{ min: 0, max: 2 },
+		),
+	}
+}
+
+function parseWorkflowIdentity(value: unknown): {
+	repositoryPath: string
+	workflowId: string
+} {
+	const input = requireRecord(value, 'arguments')
+	return {
+		repositoryPath: parseRepositoryPath(input['repositoryPath']),
+		workflowId: requireString(input['workflowId'], 'workflowId', {
+			minLength: 36,
+			maxLength: 36,
+		}),
+	}
+}
+
+function parseRepositoryPath(value: unknown): string {
+	return path.resolve(requireString(value, 'repositoryPath', {
+		minLength: 1,
+		maxLength: 4_096,
+	}))
 }
 
 function parseMode(value: unknown): WorkerMode {
@@ -593,6 +888,68 @@ function routingSchema(): Record<string, unknown> {
 			allowFallback: { type: 'boolean' },
 			maxAttempts: { type: 'integer', minimum: 1, maximum: 8 },
 		},
+		additionalProperties: false,
+	}
+}
+
+function workflowIdentitySchema(): Record<string, unknown> {
+	return {
+		type: 'object',
+		properties: {
+			repositoryPath: { type: 'string', minLength: 1, maxLength: 4096 },
+			workflowId: { type: 'string', minLength: 36, maxLength: 36 },
+		},
+		required: ['repositoryPath', 'workflowId'],
+		additionalProperties: false,
+	}
+}
+
+function workflowStageSchema(): Record<string, unknown> {
+	return {
+		type: 'object',
+		properties: {
+			objective: { type: 'string', minLength: 1, maxLength: 4000 },
+			allowedPaths: {
+				type: 'array',
+				items: { type: 'string', minLength: 1, maxLength: 1024 },
+				minItems: 1,
+				maxItems: 100,
+			},
+			prohibitedPaths: {
+				type: 'array',
+				items: { type: 'string', minLength: 1, maxLength: 1024 },
+				maxItems: 100,
+			},
+			acceptanceCriteria: {
+				type: 'array',
+				items: { type: 'string', minLength: 1, maxLength: 2000 },
+				maxItems: 100,
+			},
+			requiredCommands: {
+				type: 'array',
+				maxItems: 20,
+				items: {
+					type: 'object',
+					properties: {
+						command: { type: 'string', minLength: 1, maxLength: 100 },
+						args: {
+							type: 'array',
+							items: { type: 'string', maxLength: 2000 },
+							maxItems: 100,
+						},
+						timeoutMs: { type: 'integer', minimum: 1000, maximum: 900000 },
+					},
+					required: ['command', 'args'],
+					additionalProperties: false,
+				},
+			},
+			maxIterations: { type: 'integer', minimum: 1, maximum: 64 },
+			timeoutSeconds: { type: 'integer', minimum: 30, maximum: 3600 },
+			allowNetwork: { type: 'boolean' },
+			routing: routingSchema(),
+			retryLimit: { type: 'integer', minimum: 0, maximum: 2 },
+		},
+		required: ['objective', 'allowedPaths'],
 		additionalProperties: false,
 	}
 }

@@ -61,7 +61,15 @@ Recommended approvals:
 - `list_workers`: approve
 - `route_worker`: approve
 - `get_worker_run`: approve
+- `list_tasks`: approve
+- `get_task_timeline`: approve
+- `get_workflow`: approve
+- `list_workflows`: approve
 - `delegate_to_worker`: prompt
+- `create_coding_workflow`: prompt
+- `run_workflow`: prompt
+- `approve_workflow`: prompt
+- `cancel_workflow`: prompt
 - `apply_worker_patch`: prompt
 
 Delegation is non-destructive to the caller's checkout. A Codex worker consumes the local Codex account allowance; external workers send bounded repository context to their configured provider. Patch application modifies the checkout.
@@ -88,3 +96,6 @@ From Codex, call:
 4. `delegate_to_worker` against a disposable repository
 5. `get_worker_run`
 6. `apply_worker_patch` after reviewing the result
+
+For multi-stage work, create a workflow, run it to approval, inspect
+`get_workflow`, approve it, and apply only the returned `candidateRunId`.

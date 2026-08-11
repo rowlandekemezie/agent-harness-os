@@ -1,6 +1,7 @@
 import { constants } from 'node:fs'
 import {
 	link,
+	lstat,
 	mkdir,
 	open,
 	realpath,
@@ -11,6 +12,7 @@ import {
 import path from 'node:path'
 
 const noFollowFlag = constants.O_NOFOLLOW ?? 0
+const nonBlockingFlag = constants.O_NONBLOCK ?? 0
 const directoryFlag = constants.O_DIRECTORY ?? 0
 
 await main()
@@ -58,9 +60,66 @@ async function main(): Promise<void> {
 				destination,
 			)
 			return
+		case 'sync-directory':
+			await syncDirectory(destination)
+			return
+		case 'confirm-removal':
+			await confirmRemoval(requireName(argumentsList[0]), destination)
+			return
+		case 'unlink-file':
+			await removeFile(
+				requireName(argumentsList[0]),
+				requireValue(argumentsList[1]),
+				requireValue(argumentsList[2]),
+				argumentsList[3] === undefined
+					? 1n
+					: parseLinkCount(argumentsList[3]),
+				destination,
+			)
+			return
 		default:
 			throw new Error('Secure filesystem helper received an unknown operation')
 	}
+}
+
+async function removeFile(
+	name: string,
+	expectedDevice: string,
+	expectedInode: string,
+	expectedLinkCount: bigint,
+	destination: DestinationIdentity,
+): Promise<void> {
+	await assertWorkingDirectory(destination)
+	const handle = await open(
+		name,
+		constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
+	)
+	try {
+		const fileStats = await handle.stat({ bigint: true })
+		if (
+			!fileStats.isFile() ||
+			fileStats.nlink !== expectedLinkCount ||
+			fileStats.dev.toString() !== expectedDevice ||
+			fileStats.ino.toString() !== expectedInode
+		) {
+			throw new Error('Artifact file identity changed before removal')
+		}
+	} finally {
+		await handle.close()
+	}
+	await assertWorkingDirectory(destination)
+	await writeControlLine('removal-started')
+	await unlink(name)
+	await assertWorkingDirectory(destination)
+	await syncWorkingDirectory()
+	await writeControlLine('removal-committed')
+}
+
+function parseLinkCount(value: string): bigint {
+	if (value !== '1' && value !== '2') {
+		throw new Error('Secure filesystem helper received an invalid link count')
+	}
+	return BigInt(value)
 }
 
 type DestinationIdentity = {
@@ -165,11 +224,10 @@ async function publishFile(
 		await assertWorkingDirectory(destination)
 		await link(temporaryName, finalName)
 		finalLinked = true
-		await unlink(temporaryName)
 		await assertWorkingDirectory(destination)
 		const publishedHandle = await open(
 			finalName,
-			constants.O_RDONLY | noFollowFlag,
+			constants.O_RDONLY | noFollowFlag | nonBlockingFlag,
 		)
 
 		try {
@@ -177,7 +235,7 @@ async function publishFile(
 			if (
 				temporaryStats === null ||
 				!publishedStats.isFile() ||
-				publishedStats.nlink !== 1 ||
+				(publishedStats.nlink !== 1 && publishedStats.nlink !== 2) ||
 				publishedStats.dev !== temporaryStats.dev ||
 				publishedStats.ino !== temporaryStats.ino
 			) {
@@ -187,13 +245,67 @@ async function publishFile(
 			await publishedHandle.close()
 		}
 		await syncWorkingDirectory()
+		await writeControlLine('committed')
+		try {
+			await assertWorkingDirectory(destination)
+			await unlink(temporaryName)
+			await assertWorkingDirectory(destination)
+			await syncWorkingDirectory()
+		} catch {
+			// The final link is already validated and durable. Recovery can remove
+			// a crash-left staging link without rolling the publication back.
+		}
 	} catch (error) {
-		await unlink(temporaryName).catch(() => undefined)
 		if (finalLinked) {
-			await unlink(finalName).catch(() => undefined)
+			// Never roll an exclusive final link back. The parent treats a missing
+			// durable acknowledgment as uncertain and reconciles the exact file.
+			throw error
+		}
+		await unlink(temporaryName).catch(() => undefined)
+		throw error
+	}
+}
+
+async function syncDirectory(destination: DestinationIdentity): Promise<void> {
+	await assertWorkingDirectory(destination)
+	await syncWorkingDirectory()
+	await assertWorkingDirectory(destination)
+}
+
+async function confirmRemoval(
+	name: string,
+	destination: DestinationIdentity,
+): Promise<void> {
+	await assertWorkingDirectory(destination)
+	await assertEntryMissing(name)
+	await syncWorkingDirectory()
+	await assertWorkingDirectory(destination)
+	await assertEntryMissing(name)
+	await assertWorkingDirectory(destination)
+}
+
+async function assertEntryMissing(name: string): Promise<void> {
+	try {
+		await lstat(name)
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return
 		}
 		throw error
 	}
+	throw new Error('Artifact removal was not completed')
+}
+
+async function writeControlLine(value: string): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		process.stdout.write(`${value}\n`, error => {
+			if (error === null) {
+				resolve()
+				return
+			}
+			reject(error)
+		})
+	})
 }
 
 async function waitForPublicationCommit(): Promise<void> {

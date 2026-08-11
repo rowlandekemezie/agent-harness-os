@@ -11,9 +11,11 @@ import type {
 	TaskPage,
 	TaskTimeline,
 	WorkerAttemptSummary,
+	WorkerMode,
 	WorkerProvider,
 	WorkerRunReport,
 	WorkerTask,
+	WorkflowTaskProvenance,
 } from '../domain/types.js'
 import type { HarnessConfig, WorkerConfig } from '../config.js'
 import {
@@ -42,6 +44,10 @@ import { WorktreeManager } from '../git/worktree.js'
 import { HarnessError, getErrorMessage } from '../lib/errors.js'
 import { Logger } from '../lib/logger.js'
 import { Redactor } from '../lib/redaction.js'
+import {
+	isWorkflowTaskProvenance,
+	workflowProvenanceEquals,
+} from '../workflow/provenance.js'
 import { acquireRepositoryLease } from '../lib/repository-lock.js'
 import { Semaphore } from '../lib/semaphore.js'
 import { WorkerRegistry } from '../provider/registry.js'
@@ -86,6 +92,23 @@ type AttemptContext = {
 	artifactRoot: string
 	taskId: string
 	externalSignal: AbortSignal | undefined
+	candidateSeed: CandidateSeed | null
+}
+
+type CandidateSeed = {
+	sourceRunId: string
+	patch: Buffer
+	patchSha256: string
+	changedFiles: Array<string>
+}
+
+export type WorkflowCandidateRequirement = {
+	runId: string
+	taskId: string
+	status: RunStatus
+	failureCode: string | null
+	mode: WorkerMode
+	provenance: WorkflowTaskProvenance
 }
 
 export type WorkerServiceDependencies = {
@@ -132,6 +155,7 @@ export class WorkerService {
 	async delegate(
 		task: WorkerTask,
 		externalSignal?: AbortSignal,
+		candidateRequirement?: WorkflowCandidateRequirement,
 	): Promise<WorkerRunReport> {
 		return await this.semaphore.use(async () => {
 			throwIfAborted(externalSignal)
@@ -159,6 +183,17 @@ export class WorkerService {
 				)
 				this.assertTaskContract(resolvedTask)
 				this.assertPolicySafeToPersist(resolvedTask)
+				const candidateSeed = resolvedTask.candidateRunId === undefined
+					? assertNoCandidateRequirement(candidateRequirement)
+					: await this.loadCandidateSeed(
+						artifactRoot,
+						resolvedTask.candidateRunId,
+						repositoryPath,
+						baseCommit,
+						undefined,
+						false,
+						candidateRequirement,
+					)
 				const deadlineMs = Date.now() + resolvedTask.timeoutSeconds * 1_000
 				const routingEvidence = await this.routingEvidenceStore.collect({
 					artifactRoot,
@@ -180,6 +215,9 @@ export class WorkerService {
 					repositoryPath,
 					baseCommit,
 					policy: resolvedTask.policy,
+					...(resolvedTask.workflowProvenance === undefined
+						? {}
+						: { workflowProvenance: resolvedTask.workflowProvenance }),
 				})
 				await this.taskJournal.append(artifactRoot, taskSummary.taskId, {
 					type: 'RouteSelected',
@@ -219,6 +257,7 @@ export class WorkerService {
 							artifactRoot,
 							taskId: taskSummary.taskId,
 							externalSignal,
+							candidateSeed,
 						},
 					)
 					lastReport = report
@@ -284,6 +323,75 @@ export class WorkerService {
 			await this.getArtifactRoot(repositoryRoot),
 			runId,
 		)
+	}
+
+	async validateCandidateRun(
+		repositoryPath: string,
+		runId: string,
+		baseCommit: string,
+		expectedMode: WorkerMode,
+		expectedWorkflowProvenance: WorkflowTaskProvenance | null,
+		signal?: AbortSignal,
+	): Promise<WorkerRunReport> {
+		signal?.throwIfAborted()
+		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+		signal?.throwIfAborted()
+		const resolvedBaseCommit = await resolveCommit(repositoryRoot, baseCommit)
+		const artifactRoot = await this.getArtifactRoot(repositoryRoot)
+		signal?.throwIfAborted()
+		const report = await this.artifactStore.loadReport(artifactRoot, runId)
+		signal?.throwIfAborted()
+		await this.validateRunReportHistory(
+			artifactRoot,
+			report,
+			runId,
+			repositoryRoot,
+			resolvedBaseCommit,
+			['completed'],
+			expectedMode,
+			expectedWorkflowProvenance,
+		)
+		signal?.throwIfAborted()
+		await this.loadCandidateSeed(
+			artifactRoot,
+			runId,
+			repositoryRoot,
+			resolvedBaseCommit,
+			report,
+			true,
+		)
+		signal?.throwIfAborted()
+		return report
+	}
+
+	async validateWorkflowRun(
+		repositoryPath: string,
+		runId: string,
+		baseCommit: string,
+		expectedStatus: RunStatus,
+		expectedMode: WorkerMode,
+		expectedWorkflowProvenance: WorkflowTaskProvenance | null,
+		signal?: AbortSignal,
+	): Promise<WorkerRunReport> {
+		signal?.throwIfAborted()
+		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+		const resolvedBaseCommit = await resolveCommit(repositoryRoot, baseCommit)
+		const artifactRoot = await this.getArtifactRoot(repositoryRoot)
+		signal?.throwIfAborted()
+		const report = await this.artifactStore.loadReport(artifactRoot, runId)
+		signal?.throwIfAborted()
+		await this.validateRunReportHistory(
+			artifactRoot,
+			report,
+			runId,
+			repositoryRoot,
+			resolvedBaseCommit,
+			[expectedStatus],
+			expectedMode,
+			expectedWorkflowProvenance,
+		)
+		signal?.throwIfAborted()
+		return report
 	}
 
 	async getTaskTimeline(
@@ -523,7 +631,10 @@ export class WorkerService {
 				runId: report.runId,
 				repositoryPath: report.repositoryPath,
 				baseCommit: report.baseRef,
+				mode: report.mode,
+				workflowProvenance: report.workflowProvenance ?? null,
 				status: report.status,
+				failureCode: report.failureCode ?? null,
 				patchSha256: report.patchSha256,
 				changedFileCount: report.changedFiles.length,
 				workerId,
@@ -540,6 +651,14 @@ export class WorkerService {
 						outcome: report.evaluation.outcome,
 						evaluationPolicy:
 							report.provider.profile?.evaluationPolicy ?? 'default',
+						failedDimensions: collectDimensionIds(
+							report.evaluation,
+							'failed',
+						),
+						unknownDimensions: collectDimensionIds(
+							report.evaluation,
+							'unknown',
+						),
 					}
 					: null,
 			})
@@ -618,6 +737,16 @@ export class WorkerService {
 			task.baseRef,
 		)
 		try {
+			if (context.candidateSeed !== null) {
+				await this.seedWorktree(
+					task,
+					worktree.path,
+					worktree.baseCommit,
+					context.candidateSeed,
+					context.externalSignal,
+					context.deadlineMs,
+				)
+			}
 			await this.taskJournal.append(context.artifactRoot, context.taskId, {
 				type: 'WorkerStarted',
 				data: {
@@ -1031,6 +1160,9 @@ export class WorkerService {
 				acceptanceCriteria,
 				policyViolations,
 				warnings,
+				...(task.workflowProvenance === undefined
+					? {}
+					: { workflowProvenance: task.workflowProvenance }),
 				evaluation,
 				policy: task.policy,
 				provider: {
@@ -1168,6 +1300,196 @@ export class WorkerService {
 		return { changedFiles, patch, policyViolations }
 	}
 
+	private async loadCandidateSeed(
+		artifactRoot: string,
+		runId: string,
+		repositoryPath: string,
+		baseCommit: string,
+		loadedReport?: WorkerRunReport,
+		historyValidated = false,
+		requirement?: WorkflowCandidateRequirement,
+	): Promise<CandidateSeed> {
+		const report = loadedReport ?? await this.artifactStore.loadReport(
+			artifactRoot,
+			runId,
+		)
+		if (!historyValidated) {
+			await this.validateRunReportHistory(
+				artifactRoot,
+				report,
+				runId,
+				repositoryPath,
+				baseCommit,
+				requirement === undefined
+					? ['completed', 'failed']
+					: [requirement.status],
+				requirement?.mode,
+				requirement?.provenance,
+			)
+		}
+		if (
+			requirement !== undefined &&
+			(requirement.runId !== runId ||
+				requirement.taskId !== report.taskId ||
+				requirement.failureCode !== (report.failureCode ?? null))
+		) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_HISTORY_MISMATCH',
+				'Workflow candidate does not match its originating stage evidence',
+			)
+		}
+		if (
+			report.patchPath === null ||
+			report.patchSha256 === null ||
+			report.changedFiles.length === 0
+		) {
+			throw new HarnessError(
+				'RUN_HAS_NO_PATCH',
+				'Candidate run does not contain a patch',
+			)
+		}
+		const patch = await this.artifactStore.loadPatch(artifactRoot, report)
+		if (sha256(patch) !== report.patchSha256) {
+			throw new HarnessError(
+				'PATCH_INTEGRITY_FAILED',
+				'Candidate patch does not match its recorded digest',
+			)
+		}
+		return {
+			sourceRunId: report.runId,
+			patch,
+			patchSha256: report.patchSha256,
+			changedFiles: [...report.changedFiles],
+		}
+	}
+
+	private async validateRunReportHistory(
+		artifactRoot: string,
+		report: WorkerRunReport,
+		runId: string,
+		repositoryPath: string,
+		baseCommit: string,
+		allowedStatuses: Array<RunStatus>,
+		expectedMode?: WorkerMode,
+		expectedWorkflowProvenance?: WorkflowTaskProvenance | null,
+	): Promise<void> {
+		if (
+			report.runId !== runId ||
+			report.schemaVersion !== 3 ||
+			report.taskId === undefined ||
+			report.provider.workerId === undefined ||
+			report.evaluation === undefined
+		) {
+			throw new HarnessError(
+				'CANDIDATE_HISTORY_INVALID',
+				'Workflow runs require current evaluation-bound history',
+			)
+		}
+		if (path.resolve(report.repositoryPath) !== repositoryPath) {
+			throw new HarnessError(
+				'CANDIDATE_REPOSITORY_MISMATCH',
+				'Workflow run belongs to a different repository',
+			)
+		}
+		if (report.baseRef !== baseCommit) {
+			throw new HarnessError(
+				'CANDIDATE_BASE_MISMATCH',
+				'Workflow run uses a different base commit',
+			)
+		}
+		if (expectedMode !== undefined && report.mode !== expectedMode) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_MODE_MISMATCH',
+				`Workflow run mode does not match its stage: ${report.mode}`,
+			)
+		}
+		if (
+			expectedWorkflowProvenance !== undefined &&
+			!workflowProvenanceEquals(
+				report.workflowProvenance ?? null,
+				expectedWorkflowProvenance,
+			)
+		) {
+			throw new HarnessError(
+				'WORKFLOW_RUN_PROVENANCE_MISMATCH',
+				'Workflow run provenance does not match its recorded stage',
+			)
+		}
+		if (!allowedStatuses.includes(report.status)) {
+			throw new HarnessError(
+				'CANDIDATE_STATUS_INVALID',
+				`Workflow run has an unexpected status: ${report.status}`,
+			)
+		}
+		const linked = await this.taskJournal.isRunLinked({
+			artifactRoot,
+			taskId: report.taskId,
+			runId: report.runId,
+			repositoryPath: report.repositoryPath,
+			baseCommit: report.baseRef,
+			mode: report.mode,
+			workflowProvenance: report.workflowProvenance ?? null,
+			status: report.status,
+			failureCode: report.failureCode ?? null,
+			patchSha256: report.patchSha256,
+			changedFileCount: report.changedFiles.length,
+			workerId: report.provider.workerId,
+			policySha256: report.policy?.digest ?? null,
+			routingEvidenceSha256: report.routing?.evidence?.sha256 ?? null,
+			routeDecisionSha256: report.routing?.decisionSha256 ?? null,
+			evaluation: {
+				evaluatorIds: report.evaluation.results.map(result => result.evaluatorId),
+				outcome: report.evaluation.outcome,
+				evaluationPolicy:
+					report.provider.profile?.evaluationPolicy ?? 'default',
+				failedDimensions: collectDimensionIds(report.evaluation, 'failed'),
+				unknownDimensions: collectDimensionIds(report.evaluation, 'unknown'),
+			},
+		})
+		if (!linked) {
+			throw new HarnessError(
+				'CANDIDATE_HISTORY_MISMATCH',
+				'Candidate run does not match its validated task history',
+			)
+		}
+	}
+
+	private async seedWorktree(
+		task: PolicyBoundTask,
+		worktreePath: string,
+		baseCommit: string,
+		seed: CandidateSeed,
+		signal?: AbortSignal,
+		deadlineMs?: number,
+	): Promise<void> {
+		throwIfAbortedOrExpired(signal, deadlineMs)
+		await checkPatch(worktreePath, seed.patch)
+		throwIfAbortedOrExpired(signal, deadlineMs)
+		await applyPatch(worktreePath, seed.patch)
+		throwIfAbortedOrExpired(signal, deadlineMs)
+		const candidate = await this.collectPatchCandidate(
+			task,
+			worktreePath,
+			baseCommit,
+			signal,
+			deadlineMs,
+		)
+		if (
+			candidate.policyViolations.length > 0 ||
+			!arraysEqual(candidate.changedFiles, seed.changedFiles) ||
+			sha256(candidate.patch) !== seed.patchSha256
+		) {
+			throw new HarnessError(
+				'CANDIDATE_PATCH_INVALID',
+				'Candidate patch changed or exceeds the next stage authority',
+				{
+					sourceRunId: seed.sourceRunId,
+					policyViolations: candidate.policyViolations,
+				},
+			)
+		}
+	}
+
 	private async assertValidationPreservedCandidate(
 		task: PolicyBoundTask,
 		worktreePath: string,
@@ -1255,6 +1577,26 @@ export class WorkerService {
 	}
 
 	private assertTaskContract(task: WorkerTask): void {
+		if (
+			task.workflowProvenance !== undefined &&
+			(!isWorkflowTaskProvenance(task.workflowProvenance) ||
+				task.workflowProvenance.sourceRunId !==
+					(task.candidateRunId ?? null))
+		) {
+			throw new HarnessError(
+				'INVALID_WORKFLOW_PROVENANCE',
+				'Workflow provenance must match the task candidate context',
+			)
+		}
+		if (
+			task.candidateRunId !== undefined &&
+			!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(task.candidateRunId)
+		) {
+			throw new HarnessError(
+				'INVALID_CANDIDATE_RUN_ID',
+				'Candidate run ID must be a UUID',
+			)
+		}
 		if (task.allowedPaths.length === 0) {
 			throw new HarnessError(
 				'EMPTY_PATH_ALLOWLIST',
@@ -1547,6 +1889,18 @@ function arraysEqual(left: Array<string>, right: Array<string>): boolean {
 		left.length === right.length &&
 		left.every((value, index) => value === right[index])
 	)
+}
+
+function assertNoCandidateRequirement(
+	requirement: WorkflowCandidateRequirement | undefined,
+): null {
+	if (requirement !== undefined) {
+		throw new HarnessError(
+			'WORKFLOW_RUN_HISTORY_MISMATCH',
+			'Workflow candidate validation requires a candidate run',
+		)
+	}
+	return null
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

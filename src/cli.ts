@@ -126,7 +126,25 @@ approval_mode = "approve"
 [mcp_servers.agent_os.tools.get_worker_run]
 approval_mode = "approve"
 
+[mcp_servers.agent_os.tools.get_workflow]
+approval_mode = "approve"
+
+[mcp_servers.agent_os.tools.list_workflows]
+approval_mode = "approve"
+
 [mcp_servers.agent_os.tools.delegate_to_worker]
+approval_mode = "prompt"
+
+[mcp_servers.agent_os.tools.create_coding_workflow]
+approval_mode = "prompt"
+
+[mcp_servers.agent_os.tools.run_workflow]
+approval_mode = "prompt"
+
+[mcp_servers.agent_os.tools.approve_workflow]
+approval_mode = "prompt"
+
+[mcp_servers.agent_os.tools.cancel_workflow]
 approval_mode = "prompt"
 
 [mcp_servers.agent_os.tools.apply_worker_patch]

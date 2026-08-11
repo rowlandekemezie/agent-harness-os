@@ -9,6 +9,7 @@ import type {
 } from '../domain/types.js'
 import { HarnessError } from '../lib/errors.js'
 import { isRecord } from '../lib/json.js'
+import { isWorkflowTaskProvenance } from '../workflow/provenance.js'
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const sha256Pattern = /^[a-f0-9]{64}$/i
@@ -39,7 +40,7 @@ export type TaskEventProjection = {
 	lastAttempt: AttemptProjection | null
 	knownRunIds: Set<string>
 	applicationRunId: string | null
-	eventSchemaVersion: 1 | 2 | 3 | 4 | 5
+	eventSchemaVersion: 1 | 2 | 3 | 4 | 5 | 6
 }
 
 export function validateTaskEvent(
@@ -63,7 +64,8 @@ export function validateTaskEvent(
 			value['schemaVersion'] !== 2 &&
 			value['schemaVersion'] !== 3 &&
 			value['schemaVersion'] !== 4 &&
-			value['schemaVersion'] !== 5) ||
+			value['schemaVersion'] !== 5 &&
+			value['schemaVersion'] !== 6) ||
 		!isUuid(value['eventId']) ||
 		value['taskId'] !== expectedTaskId ||
 		value['sequence'] !== expectedSequence ||
@@ -84,7 +86,17 @@ export function validateTaskEvent(
 				expectedSequence !== 1 ||
 				!hasExactKeys(
 					data,
-					value['schemaVersion'] >= 4
+					value['schemaVersion'] >= 6
+						? [
+							'objective',
+							'mode',
+							'repositoryPath',
+							'baseCommit',
+							'policySha256',
+							'policySourceCount',
+							'workflowProvenance',
+						]
+						: value['schemaVersion'] >= 4
 						? [
 							'objective',
 							'mode',
@@ -107,7 +119,9 @@ export function validateTaskEvent(
 				(value['schemaVersion'] >= 4 &&
 					(typeof data['policySha256'] !== 'string' ||
 						!sha256Pattern.test(data['policySha256']) ||
-						!isIntegerInRange(data['policySourceCount'], 0, 2)))
+						!isIntegerInRange(data['policySourceCount'], 0, 2))) ||
+				(value['schemaVersion'] >= 6 &&
+					!isWorkflowTaskProvenance(data['workflowProvenance']))
 			) {
 				throw invalidJournal('TaskCreated event has invalid data')
 			}
@@ -235,7 +249,8 @@ export function validateTaskEvent(
 				(value['schemaVersion'] !== 2 &&
 					value['schemaVersion'] !== 3 &&
 					value['schemaVersion'] !== 4 &&
-					value['schemaVersion'] !== 5) ||
+					value['schemaVersion'] !== 5 &&
+					value['schemaVersion'] !== 6) ||
 				!hasExactKeys(
 					data,
 					value['schemaVersion'] >= 3

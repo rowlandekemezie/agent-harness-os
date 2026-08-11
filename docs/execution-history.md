@@ -27,6 +27,10 @@ Version 1 and 2 reports remain readable for audit but cannot pass the
 evaluation-bound patch gate. Failure to append new patch-lifecycle events after
 a successful link check remains a warning.
 
+A workflow is a separate durable aggregate. Its stages reference task and run
+IDs but do not replace task history or run-report authority. See
+[Durable coding workflows](workflows.md).
+
 ## Event model
 
 The harness records these versioned events:
@@ -69,6 +73,10 @@ token, and estimated-cost measurements in `AttemptCompleted`. These fields feed
 deterministic routing; older events remain replayable but are not treated as
 measured samples.
 
+Workflow-created tasks use event schema version 6. `TaskCreated` then binds the
+workflow ID, stage, execution ID, stage-contract digest, and source candidate to
+the run report and task history. Approval fails closed if any binding differs.
+
 `PatchApplicationRequested` records the incoming destructive MCP request.
 `PatchApproved` is emitted only after deterministic pre-application checks pass
 and immediately before Git is invoked. Its source is `mcp_call`; it records the
@@ -96,7 +104,8 @@ exclusive `.task-ready` marker links the task ID to its first event digest.
 Readers recognize a verified staging/final hard-link pair as committed without
 mutating it, ignore staging-only names, and validate exact event fields, the
 full lifecycle, run relationships, containment, sequence, and digests before
-returning content.
+returning content. Run-report and patch readers use the same pair validation;
+lease release removes only a matching staging link before its final claim.
 
 A process crash may leave a UUID task directory without `.task-ready`, or a
 `.publish-*` staging link. Queries remain read-only: they recognize a matching
@@ -110,7 +119,7 @@ a second mutable source of truth. One timeline is bounded to 10,000 events and
 8 MiB. Task listing is bounded to 10,000 directory entries, 25,000 events, and 8 MiB of
 event bytes per request.
 
-Event-schema-version-5 tasks also publish a small immutable routing-index entry
+Event-schema-version-5 and version-6 tasks also publish a small immutable routing-index entry
 after `TaskCreated` becomes visible. Evidence reads sort those names newest
 first, validate each entry against the task's ready marker and event chain, and
 read at most the configured sample window. The index avoids reparsing all
