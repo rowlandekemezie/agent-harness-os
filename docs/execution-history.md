@@ -74,9 +74,10 @@ token, and estimated-cost measurements in `AttemptCompleted`. These fields feed
 deterministic routing; older events remain replayable but are not treated as
 measured samples.
 
-Workflow-created tasks use event schema version 6. `TaskCreated` then binds the
-workflow ID, stage, execution ID, stage-contract digest, and source candidate to
-the run report and task history. Approval fails closed if any binding differs.
+Event schema version 6 added workflow provenance. Workflow-created tasks bind
+the workflow ID, stage, execution ID, stage-contract digest, and source
+candidate to the run report and task history. New workflow tasks use the latest
+event schema. Approval fails closed if any binding differs.
 
 Event schema version 7 records bounded wall timestamps and monotonic durations
 for task, routing, attempt, model-turn, tool, validation, and evaluation phases.

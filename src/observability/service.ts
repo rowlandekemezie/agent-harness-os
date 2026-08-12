@@ -560,7 +560,7 @@ export class ObservabilityService {
 		signal: AbortSignal,
 	): Promise<string> {
 		signal.throwIfAborted()
-		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
+		const repositoryRoot = await resolveRepositoryRoot(repositoryPath, signal)
 		signal.throwIfAborted()
 		return repositoryRoot
 	}
@@ -603,7 +603,22 @@ export class ObservabilityService {
 		}
 		try {
 			check()
-			const result = await operation(signal, check)
+			const operationPromise = operation(signal, check)
+			const abortPromise = new Promise<never>((_resolve, reject) => {
+				function abort(): void {
+					reject(signal.reason)
+				}
+
+				if (signal.aborted) {
+					abort()
+					return
+				}
+				signal.addEventListener('abort', abort, { once: true })
+				operationPromise.finally(() => {
+					signal.removeEventListener('abort', abort)
+				}).catch(() => undefined)
+			})
+			const result = await Promise.race([operationPromise, abortPromise])
 			check()
 			return result
 		} catch (error) {
@@ -1114,7 +1129,11 @@ function evaluationSpan(
 		completedAt: event.data.completedAt ?? event.occurredAt,
 		durationMs: event.data.durationMs ?? null,
 		timingSource: event.data.durationMs === undefined ? 'missing' : 'measured',
-		status: event.data.outcome === 'passed' ? 'ok' : 'error',
+		status: event.data.outcome === 'passed'
+			? 'ok'
+			: event.data.outcome === 'failed'
+				? 'error'
+				: 'unset',
 		runId: event.data.runId,
 		outcome: event.data.outcome,
 		evaluatorCount: event.data.evaluatorIds.length,

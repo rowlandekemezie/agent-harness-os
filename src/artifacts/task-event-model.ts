@@ -20,6 +20,7 @@ type AttemptProjection = {
 	attemptNumber: number
 	lastModelIteration: number
 	modelFailed: boolean
+	modelTerminal: boolean
 	expectedToolCallCount: number
 	observedToolCallCount: number
 	workerCompleted: boolean
@@ -590,6 +591,7 @@ export function projectTaskEvent(
 				attemptNumber: event.data.attemptNumber,
 				lastModelIteration: 0,
 				modelFailed: false,
+				modelTerminal: false,
 				expectedToolCallCount: 0,
 				observedToolCallCount: 0,
 				workerCompleted: false,
@@ -622,7 +624,7 @@ export function projectTaskEvent(
 			)
 			if (
 				activeAttempt.workerCompleted ||
-				activeAttempt.modelFailed ||
+				activeAttempt.modelTerminal ||
 				activeAttempt.observedToolCallCount !==
 					activeAttempt.expectedToolCallCount ||
 				event.data.iteration !== activeAttempt.lastModelIteration + 1
@@ -634,6 +636,8 @@ export function projectTaskEvent(
 			}
 			activeAttempt.lastModelIteration = event.data.iteration
 			activeAttempt.modelFailed = event.data.outcome === 'failed'
+			activeAttempt.modelTerminal =
+				event.data.outcome === 'failed' || event.data.toolCallCount === 0
 			activeAttempt.expectedToolCallCount = event.data.toolCallCount
 			activeAttempt.observedToolCallCount = 0
 			break

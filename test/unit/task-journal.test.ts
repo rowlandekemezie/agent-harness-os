@@ -1211,6 +1211,60 @@ test('records schema-version-7 timings and rejects tools after a failed model tu
 		}),
 		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
 	)
+	const terminalModelTask = await journal.create({
+		artifactRoot,
+		objective: 'Reject model turns after a final response.',
+		mode: 'implementation',
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		executionStartedAt,
+		policy,
+	})
+	await journal.append(artifactRoot, terminalModelTask.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+			...timing,
+			evidenceSha256: 'b'.repeat(64),
+			evidenceTaskCount: 0,
+			evidenceAttemptCount: 0,
+			decisionSha256: 'c'.repeat(64),
+		},
+	})
+	const terminalModelRunId = randomUUID()
+	await journal.append(artifactRoot, terminalModelTask.taskId, {
+		type: 'WorkerStarted',
+		data: {
+			runId: terminalModelRunId,
+			workerId: 'worker-one',
+			attemptNumber: 1,
+		},
+	})
+	await journal.append(artifactRoot, terminalModelTask.taskId, {
+		type: 'ModelTurnCompleted',
+		data: {
+			runId: terminalModelRunId,
+			iteration: 1,
+			outcome: 'succeeded',
+			toolCallCount: 0,
+			...timing,
+		},
+	})
+	await assert.rejects(
+		journal.append(artifactRoot, terminalModelTask.taskId, {
+			type: 'ModelTurnCompleted',
+			data: {
+				runId: terminalModelRunId,
+				iteration: 2,
+				outcome: 'succeeded',
+				toolCallCount: 0,
+				...timing,
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
 	const timeline = await journal.timeline(artifactRoot, task.taskId)
 	assert.equal(timeline.events[0]?.schemaVersion, 7)
 })

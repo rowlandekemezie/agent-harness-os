@@ -388,6 +388,56 @@ test('enforces the absolute query deadline when synchronous work starves timers'
 	assert.equal(projectionStarted, true)
 })
 
+test('settles promptly when an in-flight journal read ignores the query deadline', async function () {
+	const repositoryRoot = await resolveRepositoryRoot(await createTestRepository())
+	const artifactOverride = await mkdtemp(path.join(os.tmpdir(), 'observability-stalled-'))
+	const config = loadConfig({ AGENT_HARNESS_ARTIFACT_ROOT: artifactOverride })
+	const taskJournal = new TaskJournal()
+	let readStarted!: () => void
+	const started = new Promise<void>(resolve => {
+		readStarted = resolve
+	})
+	taskJournal.recentTimelines = async function () {
+		readStarted()
+		return await new Promise<never>(() => undefined)
+	}
+	const service = new ObservabilityService(config, {
+		taskJournal,
+		queryTimeoutMs: 25,
+	})
+	const query = service.metrics(repositoryRoot, {
+		mode: 'implementation',
+		taskLimit: 10,
+	})
+	await started
+	await assert.rejects(query, hasCode('OBSERVABILITY_QUERY_TIMED_OUT'))
+})
+
+test('settles promptly when an in-flight journal read ignores cancellation', async function () {
+	const repositoryRoot = await resolveRepositoryRoot(await createTestRepository())
+	const artifactOverride = await mkdtemp(path.join(os.tmpdir(), 'observability-cancel-'))
+	const config = loadConfig({ AGENT_HARNESS_ARTIFACT_ROOT: artifactOverride })
+	const taskJournal = new TaskJournal()
+	let readStarted!: () => void
+	const started = new Promise<void>(resolve => {
+		readStarted = resolve
+	})
+	taskJournal.recentTimelines = async function () {
+		readStarted()
+		return await new Promise<never>(() => undefined)
+	}
+	const service = new ObservabilityService(config, { taskJournal })
+	const controller = new AbortController()
+	const query = service.metrics(
+		repositoryRoot,
+		{ mode: 'implementation', taskLimit: 10 },
+		controller.signal,
+	)
+	await started
+	controller.abort()
+	await assert.rejects(query, hasCode('OBSERVABILITY_QUERY_CANCELLED'))
+})
+
 type Fixture = Awaited<ReturnType<typeof createFixture>>
 
 type AttemptInput = {
