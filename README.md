@@ -46,14 +46,16 @@ your clean checkout
 - Durable plan, implement, test, review, repair, dependency, and approval workflows
 - Mandatory deterministic evaluation with optional independent reviewer results
 - Bounded task-history listing and timeline inspection
+- Read-only task/workflow traces and recent task metrics with explicit coverage
 - `list_workers` and `route_worker` MCP inspection tools
 - Legacy `QWEN_*` configuration compatibility
 - The hardened execution kernel from version 0.1: strict path authority, file-only worker tools, immutable patch validation, isolated command execution, artifact integrity, cancellation, bounded resources, and approval-separated application
 
 Historical evidence adjusts deterministic scores; it does not learn or rewrite
 weights, capabilities, or policy. Workflows are local artifact-backed state
-machines, not distributed queues. This release does not add semantic memory or
-a dashboard.
+machines, not distributed queues. Observability is a bounded projection of
+validated journals, not a separate telemetry store. This release does not add
+semantic memory or a dashboard.
 
 ## Security model
 
@@ -307,6 +309,8 @@ The MCP tools are:
 - `get_worker_run`: persisted report retrieval
 - `list_tasks`: bounded, filtered task-history listing
 - `get_task_timeline`: validated task summary and event timeline
+- `get_observability_trace`: bounded task or workflow trace projection
+- `get_observability_metrics`: bounded recent same-mode task metrics
 - `create_coding_workflow`: persist a fixed-base, bounded workflow
 - `run_workflow`: run or resume until a wait or terminal state
 - `approve_workflow`: approve or reject without applying
@@ -325,6 +329,8 @@ See [Historical routing evidence](docs/routing-evidence.md) for measured inputs,
 weights, cold-start behavior, and audit binding.
 See [Durable coding workflows](docs/workflows.md) for stages, candidate chaining,
 resume, dependencies, approvals, and limits.
+See [Observability](docs/observability.md) for trace structure, metric formulas,
+coverage, bounds, and trust boundaries.
 
 ## Operating workflow
 
@@ -361,6 +367,7 @@ provide:
 - dynamic provider discovery
 - self-modifying routing weights
 - long-term semantic memory
+- external telemetry export
 - a web dashboard
 - autonomous merge or deployment
 

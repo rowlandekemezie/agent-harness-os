@@ -129,6 +129,13 @@ Delete task journals only under the same retention policy as their run reports,
 and remove the matching `routing-index/` entry in the same stopped-server
 maintenance operation.
 
+Use `get_observability_trace` for a bounded task or workflow phase view and
+`get_observability_metrics` for recent same-mode task metrics. The latter is a
+retention-window sample, not a lifetime counter: it returns its actual task and
+attempt counts plus source event digests. Missing cost, token, or duration data
+remains explicit. Queries are read-only, cancellation-aware, limited to 30
+seconds, and never export telemetry.
+
 Workflow journals live under `workflows/<workflowId>/events/`; uniquely named
 active claims live under `workflow-locks/<workflowId>/`. Retain a workflow with every task and run it
 references. Before deleting workflow history, stop every server using the

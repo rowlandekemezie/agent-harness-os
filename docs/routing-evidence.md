@@ -17,7 +17,7 @@ Evidence validates only the selected entries and linked timelines, rather than
 walking every retained task. If aggregate event or byte limits are reached, the
 valid window is shortened. Malformed index or timeline data still fails closed.
 
-Only event-schema-version-5 attempts contain routing metrics. Older history
+Only event-schema-version-5 and later attempts contain routing metrics. Older history
 remains readable but does not invent measurements. Evidence is grouped by exact
 worker/profile ID and task mode, so review results do not score implementation
 work and a renamed profile starts with no samples.
@@ -65,7 +65,7 @@ remains the final tie breaker.
 
 The run report stores the complete evidence snapshot, the sampled task IDs and
 latest event hashes, its SHA-256 digest, and each candidate's score and reasons.
-Event schema version 5 binds the digest and sample counts in `RouteSelected`;
+Event schema version 5 and later bind the digest and sample counts in `RouteSelected`;
 `AttemptCompleted` records the bounded metrics that future routes consume.
 The event also binds a routing-decision digest over the strategy, eligible
 candidates, scores, reasons, attempt bound, and evidence digest. Removing or

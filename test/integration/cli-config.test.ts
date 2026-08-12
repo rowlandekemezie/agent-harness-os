@@ -52,4 +52,8 @@ test('includes custom worker secret environment names in generated Codex configu
 	assert.match(stdout, /tools\.run_workflow/)
 	assert.match(stdout, /tools\.approve_workflow/)
 	assert.match(stdout, /tools\.cancel_workflow/)
+	assert.match(stdout, /tools\.list_tasks/)
+	assert.match(stdout, /tools\.get_task_timeline/)
+	assert.match(stdout, /tools\.get_observability_trace/)
+	assert.match(stdout, /tools\.get_observability_metrics/)
 })

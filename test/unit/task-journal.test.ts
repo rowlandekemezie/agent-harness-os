@@ -19,6 +19,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { TaskJournal } from '../../src/artifacts/task-journal.js'
 import type { ResolvedPolicy } from '../../src/domain/types.js'
+import { Redactor } from '../../src/lib/redaction.js'
 
 async function createTask(
 	journal: TaskJournal,
@@ -1026,6 +1027,260 @@ test('detects event mutation through the projected digest', async function () {
 	)
 })
 
+test('rejects invalid UTF-8 even when replacement decoding would produce JSON', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-utf8-'))
+	const journal = new TaskJournal()
+	const task = await createTask(journal, artifactRoot, 'Reject invalid UTF-8')
+	const eventPath = await getEventPath(artifactRoot, task.taskId, 1)
+	const contents = Buffer.from(await readFile(eventPath))
+	const objectiveOffset = contents.indexOf(Buffer.from('Reject invalid UTF-8'))
+	assert.notEqual(objectiveOffset, -1)
+	contents[objectiveOffset] = 0xff
+	await replaceFirstEvent(artifactRoot, task.taskId, eventPath, contents)
+
+	await assert.rejects(
+		journal.timeline(artifactRoot, task.taskId),
+		hasHarnessCode('INVALID_TASK_JOURNAL'),
+	)
+})
+
+test('rejects re-digested credential material in decoded task events', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-secret-'))
+	const secret = 'secret"quoted'
+	const journal = new TaskJournal(new Redactor({ CUSTOM_API_KEY: secret }))
+	const task = await createTask(journal, artifactRoot, 'Safe objective')
+	const eventPath = await getEventPath(artifactRoot, task.taskId, 1)
+	const event = JSON.parse(await readFile(eventPath, 'utf8')) as {
+		data: { objective: string }
+	}
+	event.data.objective = secret
+	const contents = Buffer.from(`${JSON.stringify(event)}\n`)
+	await replaceFirstEvent(artifactRoot, task.taskId, eventPath, contents)
+
+	await assert.rejects(
+		journal.timeline(artifactRoot, task.taskId),
+		hasHarnessCode('TASK_CONTAINS_SECRET'),
+	)
+})
+
+test('records schema-version-7 timings and rejects tools after a failed model turn', async function () {
+	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-v7-'))
+	const journal = new TaskJournal()
+	const policyWithoutDigest = {
+		schemaVersion: 1 as const,
+		sources: [],
+		maxChangedFiles: 10,
+		maxIterations: 4,
+		maxTaskSeconds: 60,
+		allowNetwork: false,
+		prohibitedPaths: [],
+		routing: {
+			requiredCapabilities: [],
+			maxCostTier: null,
+			maxLatencyTier: null,
+			allowFallback: false,
+			maxAttempts: 1,
+		},
+	}
+	const policy: ResolvedPolicy = {
+		...policyWithoutDigest,
+		digest: createHash('sha256')
+			.update(JSON.stringify(policyWithoutDigest))
+			.digest('hex'),
+	}
+	await assert.rejects(
+		journal.create({
+			artifactRoot,
+			objective: 'Reject non-canonical time.',
+			mode: 'implementation',
+			repositoryPath: '/tmp/repository',
+			baseCommit: 'a'.repeat(40),
+			executionStartedAt: '0',
+			policy,
+		}),
+		hasHarnessCode('INVALID_TASK_JOURNAL'),
+	)
+	const executionStartedAt = new Date(Date.now() - 100).toISOString()
+	const task = await journal.create({
+		artifactRoot,
+		objective: 'Observe model turns.',
+		mode: 'implementation',
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		executionStartedAt,
+		policy,
+	})
+	const timing = {
+		startedAt: executionStartedAt,
+		completedAt: new Date().toISOString(),
+		durationMs: 10,
+	}
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+			...timing,
+			evidenceSha256: 'b'.repeat(64),
+			evidenceTaskCount: 0,
+			evidenceAttemptCount: 0,
+			decisionSha256: 'c'.repeat(64),
+		},
+	})
+	const runId = randomUUID()
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'WorkerStarted',
+		data: { runId, workerId: 'worker-one', attemptNumber: 1 },
+	})
+	await journal.append(artifactRoot, task.taskId, {
+		type: 'ModelTurnCompleted',
+		data: {
+			runId,
+			iteration: 1,
+			outcome: 'failed',
+			toolCallCount: 0,
+			...timing,
+		},
+	})
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'ToolCalled',
+			data: {
+				runId,
+				toolName: 'read_file',
+				iteration: 1,
+				outcome: 'succeeded',
+				inputBytes: 1,
+				outputBytes: 1,
+				...timing,
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'WorkerCompleted',
+			data: {
+				runId,
+				outcome: 'succeeded',
+				failureCode: null,
+				requestCount: 1,
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+	const secondTask = await journal.create({
+		artifactRoot,
+		objective: 'Reject incomplete tool evidence.',
+		mode: 'implementation',
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		executionStartedAt,
+		policy,
+	})
+	await journal.append(artifactRoot, secondTask.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+			...timing,
+			evidenceSha256: 'b'.repeat(64),
+			evidenceTaskCount: 0,
+			evidenceAttemptCount: 0,
+			decisionSha256: 'c'.repeat(64),
+		},
+	})
+	const secondRunId = randomUUID()
+	await journal.append(artifactRoot, secondTask.taskId, {
+		type: 'WorkerStarted',
+		data: {
+			runId: secondRunId,
+			workerId: 'worker-one',
+			attemptNumber: 1,
+		},
+	})
+	await journal.append(artifactRoot, secondTask.taskId, {
+		type: 'ModelTurnCompleted',
+		data: {
+			runId: secondRunId,
+			iteration: 1,
+			outcome: 'succeeded',
+			toolCallCount: 1,
+			...timing,
+		},
+	})
+	await assert.rejects(
+		journal.append(artifactRoot, secondTask.taskId, {
+			type: 'WorkerCompleted',
+			data: {
+				runId: secondRunId,
+				outcome: 'succeeded',
+				failureCode: null,
+				requestCount: 1,
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+	const terminalModelTask = await journal.create({
+		artifactRoot,
+		objective: 'Reject model turns after a final response.',
+		mode: 'implementation',
+		repositoryPath: '/tmp/repository',
+		baseCommit: 'a'.repeat(40),
+		executionStartedAt,
+		policy,
+	})
+	await journal.append(artifactRoot, terminalModelTask.taskId, {
+		type: 'RouteSelected',
+		data: {
+			strategy: 'balanced',
+			candidateWorkerIds: ['worker-one'],
+			maxAttempts: 1,
+			...timing,
+			evidenceSha256: 'b'.repeat(64),
+			evidenceTaskCount: 0,
+			evidenceAttemptCount: 0,
+			decisionSha256: 'c'.repeat(64),
+		},
+	})
+	const terminalModelRunId = randomUUID()
+	await journal.append(artifactRoot, terminalModelTask.taskId, {
+		type: 'WorkerStarted',
+		data: {
+			runId: terminalModelRunId,
+			workerId: 'worker-one',
+			attemptNumber: 1,
+		},
+	})
+	await journal.append(artifactRoot, terminalModelTask.taskId, {
+		type: 'ModelTurnCompleted',
+		data: {
+			runId: terminalModelRunId,
+			iteration: 1,
+			outcome: 'succeeded',
+			toolCallCount: 0,
+			...timing,
+		},
+	})
+	await assert.rejects(
+		journal.append(artifactRoot, terminalModelTask.taskId, {
+			type: 'ModelTurnCompleted',
+			data: {
+				runId: terminalModelRunId,
+				iteration: 2,
+				outcome: 'succeeded',
+				toolCallCount: 0,
+				...timing,
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
+	const timeline = await journal.timeline(artifactRoot, task.taskId)
+	assert.equal(timeline.events[0]?.schemaVersion, 7)
+})
+
 test('detects mutation of an earlier event through the digest chain', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-event-chain-'))
 	const journal = new TaskJournal()
@@ -1067,6 +1322,30 @@ test('rejects invalid patch lifecycle transitions', async function () {
 		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
 	)
 })
+
+async function replaceFirstEvent(
+	artifactRoot: string,
+	taskId: string,
+	eventPath: string,
+	contents: Buffer,
+): Promise<void> {
+	const eventSha256 = createHash('sha256').update(contents).digest('hex')
+	const replacementPath = path.join(
+		path.dirname(eventPath),
+		`000000000001-${eventSha256}.json`,
+	)
+	await writeFile(replacementPath, contents, { mode: 0o600 })
+	await rm(eventPath)
+	await writeFile(
+		path.join(artifactRoot, 'tasks', taskId, '.task-ready'),
+		`${JSON.stringify({
+			schemaVersion: 1,
+			taskId,
+			firstEventSha256: eventSha256,
+		})}\n`,
+		{ mode: 0o600 },
+	)
+}
 
 test('rejects fallback history after a policy failure', async function () {
 	const artifactRoot = await mkdtemp(path.join(os.tmpdir(), 'task-fallback-policy-'))

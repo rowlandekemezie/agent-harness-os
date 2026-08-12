@@ -23,6 +23,7 @@
 - Incorrect or malicious worker profile, capability, cost, latency, priority, endpoint, or pricing configuration
 - Corrupt, oversized, or adversarial task history used as routing evidence
 - Corrupt workflow events, stale leases, forged dependencies, or tampered candidate links
+- Corrupt task or workflow history projected as observability evidence
 - Malformed, unsafe, mutable-checkout, or authority-expanding policy input
 - A failed primary worker leaving partial state that could contaminate a fallback attempt
 - A stale, oversized, linked, or tampered run artifact
@@ -64,7 +65,7 @@
 
 ### Historical routing evidence
 
-- Only validated event-schema-version-5 attempts become measured samples
+- Only validated event-schema-version-5 and later attempts become measured samples
 - A private digest-named index selects newest tasks without replaying all retained history
 - Evidence reads are repository-scoped, sample- and resource-bounded, read-only, and cancellation-aware
 - Capability, role, tier, and policy filters run before measured scoring
@@ -72,6 +73,19 @@
 - Missing or malformed provider usage never becomes zero-cost routing evidence
 - Reports retain source event hashes, evidence, scores, and reasons; task history binds evidence and decision digests
 - Invalid history fails before provider invocation; a zero task limit disables evidence reads
+
+### Observability
+
+- Trace and metric queries use only fully validated task and workflow journals
+- Repository scope and workflow-stage provenance are checked before projection
+- Queries have one absolute deadline, bounded samples, pagination, response-size
+  limits, cancellation, checked counters, and fail-closed corruption handling
+- Missing measurements remain missing; sequence establishes order and clock
+  anomalies are counted rather than converted into negative durations
+- Output omits prompts, responses, transcripts, patches, paths, command output,
+  approval feedback, provider endpoints, headers, and environment values
+- Observability never changes routing, policy, workflow, approval, or patch gates
+- No exporter, telemetry store, background collector, or dashboard is enabled
 
 ### Durable workflows
 

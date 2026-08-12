@@ -38,6 +38,10 @@ After delegation:
 6. Rerun validation in the real checkout.
 7. Review the final diff before committing.
 
+Use observability traces and metrics only as evidence for diagnosis and review.
+They do not authorize routing changes, workflow approval, patch application, or
+claims that missing measurements are zero.
+
 ## Project validation
 
 Run the repository's formatting, linting, type-checking, unit-test, and relevant integration-test commands. Do not claim success unless the captured exit code is zero.

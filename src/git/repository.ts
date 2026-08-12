@@ -61,7 +61,9 @@ export async function assertSafeRepositoryConfiguration(
 
 export async function resolveRepositoryRoot(
 	repositoryPath: string,
+	signal?: AbortSignal,
 ): Promise<string> {
+	signal?.throwIfAborted()
 	const requestedPath = path.resolve(repositoryPath)
 	let resolvedPath: string
 
@@ -86,10 +88,11 @@ export async function resolveRepositoryRoot(
 			{ cause: error instanceof Error ? error.message : String(error) },
 		)
 	}
-	const result = await runGit(resolvedPath, [
+	const result = await runGitBounded(resolvedPath, [
 		'rev-parse',
 		'--show-toplevel',
-	])
+	], gitOutputLimit, undefined, false, signal)
+	signal?.throwIfAborted()
 
 	if (result.exitCode !== 0) {
 		throw new HarnessError(
@@ -385,6 +388,7 @@ async function runGitBounded(
 	maxOutputBytes: number,
 	input?: string | Buffer,
 	requireValidUtf8 = false,
+	signal?: AbortSignal,
 ): Promise<Awaited<ReturnType<typeof runProcess>>> {
 	const safeArgs = [
 		'-c',
@@ -410,6 +414,7 @@ async function runGitBounded(
 		maxOutputBytes,
 		requireValidUtf8,
 		redactStdout: false,
+		...(signal === undefined ? {} : { signal }),
 		...(input === undefined ? {} : { input }),
 	})
 }

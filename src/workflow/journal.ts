@@ -313,6 +313,7 @@ export class WorkflowJournal {
 		}
 
 		const entries = await readdir(workflowsRoot, { withFileTypes: true })
+		signal?.throwIfAborted()
 		if (entries.length > maxWorkflowDirectories) {
 			throw traversalLimit('Workflow history contains too many directories')
 		}
@@ -432,6 +433,7 @@ export class WorkflowJournal {
 		}
 
 		const entries = await readdir(eventsDirectory, { withFileTypes: true })
+		signal?.throwIfAborted()
 		if (entries.length > maxEventsPerWorkflow * 2) {
 			throw new HarnessError('WORKFLOW_EVENT_LIMIT', 'Workflow has too many events')
 		}
@@ -476,6 +478,7 @@ export class WorkflowJournal {
 					path.join(eventsDirectory, pendingName),
 					maxEventBytes,
 				)
+			signal?.throwIfAborted()
 			bytesRead += contents.length
 			if (bytesRead > maxTimelineBytes) {
 				throw new HarnessError(
@@ -507,6 +510,7 @@ export class WorkflowJournal {
 		if (projection === null) {
 			throw invalidJournal('Workflow journal could not be projected')
 		}
+		signal?.throwIfAborted()
 		return {
 			timeline: workflowTimeline(projection, events),
 			projection,
@@ -528,6 +532,7 @@ export class WorkflowJournal {
 		try {
 			await assertPrivateDirectory(artifactRoot, workflowDirectory)
 			const entries = await readdir(workflowDirectory, { withFileTypes: true })
+			signal?.throwIfAborted()
 			if (entries.length > 4) {
 				throw invalidJournal('Workflow directory contains too many entries')
 			}
@@ -563,6 +568,7 @@ export class WorkflowJournal {
 					path.join(workflowDirectory, pendingName),
 					256,
 				)
+			signal?.throwIfAborted()
 			return parseReadyMarker(contents, workflowId)
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

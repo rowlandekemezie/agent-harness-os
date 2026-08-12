@@ -45,6 +45,10 @@ import { HarnessError, getErrorMessage } from '../lib/errors.js'
 import { Logger } from '../lib/logger.js'
 import { Redactor } from '../lib/redaction.js'
 import {
+	finishOperationTimer,
+	startOperationTimer,
+} from '../lib/timing.js'
+import {
 	isWorkflowTaskProvenance,
 	workflowProvenanceEquals,
 } from '../workflow/provenance.js'
@@ -157,6 +161,7 @@ export class WorkerService {
 		externalSignal?: AbortSignal,
 		candidateRequirement?: WorkflowCandidateRequirement,
 	): Promise<WorkerRunReport> {
+		const delegationTimer = startOperationTimer()
 		return await this.semaphore.use(async () => {
 			throwIfAborted(externalSignal)
 			assertWorkersConfigured(this.config)
@@ -195,6 +200,7 @@ export class WorkerService {
 						candidateRequirement,
 					)
 				const deadlineMs = Date.now() + resolvedTask.timeoutSeconds * 1_000
+				const routingTimer = startOperationTimer()
 				const routingEvidence = await this.routingEvidenceStore.collect({
 					artifactRoot,
 					repositoryPath,
@@ -208,12 +214,14 @@ export class WorkerService {
 					resolvedTask.routing,
 					routingEvidence,
 				)
+				const routingTiming = finishOperationTimer(routingTimer)
 				const taskSummary = await this.taskJournal.create({
 					artifactRoot,
 					objective: resolvedTask.objective,
 					mode: resolvedTask.mode,
 					repositoryPath,
 					baseCommit,
+					executionStartedAt: delegationTimer.startedAt,
 					policy: resolvedTask.policy,
 					...(resolvedTask.workflowProvenance === undefined
 						? {}
@@ -227,12 +235,34 @@ export class WorkerService {
 							candidate => candidate.worker.id,
 						),
 						maxAttempts: route.maxAttempts,
+						...routingTiming,
 						evidenceSha256: routingEvidence.sha256,
 						evidenceTaskCount: routingEvidence.sampledTaskCount,
 						evidenceAttemptCount: routingEvidence.sampledAttemptCount,
 						decisionSha256: route.decisionSha256,
 					},
 				})
+				const completeTask = async (
+					runId: string | null,
+					status: RunStatus,
+					signal?: AbortSignal,
+				): Promise<void> => {
+					const timing = finishOperationTimer(delegationTimer)
+					await this.taskJournal.append(
+						artifactRoot,
+						taskSummary.taskId,
+						{
+							type: 'TaskCompleted',
+							data: {
+								runId,
+								status,
+								completedAt: timing.completedAt,
+								durationMs: timing.durationMs,
+							},
+						},
+						signal,
+					)
+				}
 				let lastReport: WorkerRunReport | null = null
 
 				for (let index = 0; index < route.maxAttempts; index += 1) {
@@ -266,13 +296,9 @@ export class WorkerService {
 						const completionSignal = report.status === 'completed'
 							? createDeadlineSignal(externalSignal, deadlineMs)
 							: undefined
-						await this.taskJournal.append(
-							artifactRoot,
-							taskSummary.taskId,
-							{
-								type: 'TaskCompleted',
-								data: { runId: report.runId, status: report.status },
-							},
+						await completeTask(
+							report.runId,
+							report.status,
 							completionSignal,
 						)
 						return report
@@ -287,24 +313,11 @@ export class WorkerService {
 				}
 
 				if (lastReport !== null) {
-					await this.taskJournal.append(
-						artifactRoot,
-						taskSummary.taskId,
-						{
-							type: 'TaskCompleted',
-							data: {
-								runId: lastReport.runId,
-								status: lastReport.status,
-							},
-						},
-					)
+					await completeTask(lastReport.runId, lastReport.status)
 					return lastReport
 				}
 
-				await this.taskJournal.append(artifactRoot, taskSummary.taskId, {
-					type: 'TaskCompleted',
-					data: { runId: null, status: 'timed_out' },
-				})
+				await completeTask(null, 'timed_out')
 
 				throw new HarnessError(
 					'WORKER_ROUTE_TIMED_OUT',
@@ -397,23 +410,43 @@ export class WorkerService {
 	async getTaskTimeline(
 		repositoryPath: string,
 		taskId: string,
+		signal?: AbortSignal,
 	): Promise<TaskTimeline> {
+		signal?.throwIfAborted()
 		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
-		return await this.taskJournal.timeline(
+		const timeline = await this.taskJournal.timeline(
 			await this.getArtifactRoot(repositoryRoot),
 			taskId,
+			signal,
 		)
+		if (timeline.task.repositoryPath !== repositoryRoot) {
+			throw new HarnessError(
+				'TASK_HISTORY_SCOPE_MISMATCH',
+				'Task history is outside the requested repository',
+			)
+		}
+		return timeline
 	}
 
 	async listTasks(
 		repositoryPath: string,
 		query: TaskListQuery,
+		signal?: AbortSignal,
 	): Promise<TaskPage> {
+		signal?.throwIfAborted()
 		const repositoryRoot = await resolveRepositoryRoot(repositoryPath)
-		return await this.taskJournal.list(
+		const page = await this.taskJournal.list(
 			await this.getArtifactRoot(repositoryRoot),
 			query,
+			signal,
 		)
+		if (page.tasks.some(task => task.repositoryPath !== repositoryRoot)) {
+			throw new HarnessError(
+				'TASK_HISTORY_SCOPE_MISMATCH',
+				'Task history is outside the requested repository',
+			)
+		}
+		return page
 	}
 
 	async applyRun(
@@ -730,8 +763,8 @@ export class WorkerService {
 		worker: WorkerConfig,
 		context: AttemptContext,
 	): Promise<WorkerRunReport> {
-		const startedAtMs = Date.now()
-		const startedAt = new Date(startedAtMs).toISOString()
+		const attemptTimer = startOperationTimer()
+		const startedAt = attemptTimer.startedAt
 		const worktree = await this.worktreeManager.create(
 			task.repositoryPath,
 			task.baseRef,
@@ -834,18 +867,47 @@ export class WorkerService {
 					signal,
 					async observation => {
 						try {
-							await this.taskJournal.append(
-								context.artifactRoot,
-								context.taskId,
-								{
-									type: 'ToolCalled',
-									data: { runId: worktree.runId, ...observation },
-								},
-							)
+							if (observation.type === 'model_turn') {
+								await this.taskJournal.append(
+									context.artifactRoot,
+									context.taskId,
+									{
+										type: 'ModelTurnCompleted',
+										data: {
+											runId: worktree.runId,
+											iteration: observation.iteration,
+											outcome: observation.outcome,
+											toolCallCount: observation.toolCallCount,
+											startedAt: observation.startedAt,
+											completedAt: observation.completedAt,
+											durationMs: observation.durationMs,
+										},
+									},
+								)
+							} else {
+								await this.taskJournal.append(
+									context.artifactRoot,
+									context.taskId,
+									{
+										type: 'ToolCalled',
+										data: {
+											runId: worktree.runId,
+											toolName: observation.toolName,
+											iteration: observation.iteration,
+											outcome: observation.outcome,
+											inputBytes: observation.inputBytes,
+											outputBytes: observation.outputBytes,
+											startedAt: observation.startedAt,
+											completedAt: observation.completedAt,
+											durationMs: observation.durationMs,
+										},
+									},
+								)
+							}
 						} catch (error) {
 							throw new HarnessError(
 								'TASK_HISTORY_RECORDING_FAILED',
-								'Tool-call history could not be recorded',
+								'Agent-loop history could not be recorded',
 								{ cause: getErrorMessage(error) },
 							)
 						}
@@ -924,6 +986,7 @@ export class WorkerService {
 				failureCode = failureCode ?? 'WORKER_POLICY_VIOLATION'
 			}
 
+			const validationTimer = startOperationTimer()
 			if (status === 'completed') {
 				try {
 					await this.runRequiredCommands(
@@ -1000,6 +1063,7 @@ export class WorkerService {
 				status = 'failed'
 				failureCode = failureCode ?? 'VALIDATION_COMMAND_FAILED'
 			}
+			const validationTiming = finishOperationTimer(validationTimer)
 
 			await this.taskJournal.append(context.artifactRoot, context.taskId, {
 				type: 'ValidationCompleted',
@@ -1011,6 +1075,7 @@ export class WorkerService {
 							? 'passed'
 							: 'failed',
 					commandCount: commandResults.length,
+					...validationTiming,
 				},
 			})
 
@@ -1050,6 +1115,7 @@ export class WorkerService {
 				maxPatchBytes: maxArtifactPatchBytes,
 				deadlineMs: context.deadlineMs,
 			}
+			const evaluationTimer = startOperationTimer()
 			let evaluation: EvaluationSummary
 			try {
 				evaluation = await evaluateAll(
@@ -1101,6 +1167,7 @@ export class WorkerService {
 			}
 
 			validateEvaluationSummary(evaluation)
+			const evaluationTiming = finishOperationTimer(evaluationTimer)
 
 			if (
 				status === 'completed' &&
@@ -1132,11 +1199,12 @@ export class WorkerService {
 						worker.profile?.evaluationPolicy ?? 'default',
 					failedDimensions: collectDimensionIds(evaluation, 'failed'),
 					unknownDimensions: collectDimensionIds(evaluation, 'unknown'),
+					...evaluationTiming,
 				},
 			}, publicationSignal)
 			publicationSignal?.throwIfAborted()
 
-			const completedAtMs = Date.now()
+			const attemptTiming = finishOperationTimer(attemptTimer)
 			const usage = getProviderUsage(provider)
 			const initialReport: WorkerRunReport = {
 				schemaVersion: 3,
@@ -1149,8 +1217,8 @@ export class WorkerService {
 				repositoryPath: task.repositoryPath,
 				baseRef: worktree.baseCommit,
 				startedAt,
-				completedAt: new Date(completedAtMs).toISOString(),
-				durationMs: completedAtMs - startedAtMs,
+				completedAt: attemptTiming.completedAt,
+				durationMs: attemptTiming.durationMs,
 				workerSummary,
 				changedFiles,
 				patchPath: null,
@@ -1215,6 +1283,8 @@ export class WorkerService {
 					runId: persistedReport.runId,
 					status: persistedReport.status,
 					failureCode: persistedReport.failureCode ?? null,
+					startedAt: persistedReport.startedAt,
+					completedAt: persistedReport.completedAt,
 					durationMs: persistedReport.durationMs,
 					providerLatencyMs: usage.totalLatencyMs,
 					totalTokens: usage.totalTokens,

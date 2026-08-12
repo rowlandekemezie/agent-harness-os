@@ -332,7 +332,7 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 		assert.equal(timeline.task.status, 'completed')
 		assert.equal(timeline.task.patchApplicationStatus, 'applied')
 		assert.equal(timeline.task.policySha256, report.policy.digest)
-		assert.equal(timeline.events[0]?.schemaVersion, 5)
+		assert.equal(timeline.events[0]?.schemaVersion, 7)
 		const routeSelected = timeline.events.find(
 			event => event.type === 'RouteSelected',
 		)
@@ -357,13 +357,27 @@ test('delegates in a worktree, protects patch integrity, rejects stale bases, an
 				: null,
 			'number',
 		)
+		assert.equal(
+			routeSelected?.type === 'RouteSelected'
+				? typeof routeSelected.data.durationMs
+				: null,
+			'number',
+		)
+		assert.equal(
+			timeline.events.filter(
+				event => event.type === 'ModelTurnCompleted',
+			).length,
+			2,
+		)
 		assert.deepEqual(
 			timeline.events.map(event => event.type),
 			[
 				'TaskCreated',
 				'RouteSelected',
 				'WorkerStarted',
+				'ModelTurnCompleted',
 				'ToolCalled',
+				'ModelTurnCompleted',
 				'WorkerCompleted',
 				'PatchProduced',
 				'ValidationCompleted',

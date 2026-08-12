@@ -8,7 +8,7 @@ Codex
         |
         v
 MCP tools
-  health, routing, delegation, workflow control, history, report, apply
+  health, routing, delegation, workflow control, history, observability, report, apply
         |
         v
 Workflow service
@@ -129,6 +129,14 @@ Events are the history seam, while run reports remain patch authority. Event
 filenames include their content digest and each event links to its predecessor.
 The journal projects summaries from the validated chain instead of trusting a
 mutable summary file.
+
+### Observability
+
+`src/observability/service.ts` is a read-only projection over the task and
+workflow journals. It produces deterministic traces and recent same-mode task
+metrics without reading raw artifact files, creating another store, or feeding
+results back into routing and policy. Workflow-to-task spans require exact stage
+provenance before linking. See [Observability](observability.md).
 
 ### Workflow service and journal
 

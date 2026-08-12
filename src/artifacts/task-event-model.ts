@@ -18,6 +18,11 @@ type AttemptProjection = {
 	runId: string
 	workerId: string
 	attemptNumber: number
+	lastModelIteration: number
+	modelFailed: boolean
+	modelTerminal: boolean
+	expectedToolCallCount: number
+	observedToolCallCount: number
 	workerCompleted: boolean
 	workerOutcome: 'succeeded' | 'failed' | null
 	patchSha256: string | null
@@ -40,7 +45,7 @@ export type TaskEventProjection = {
 	lastAttempt: AttemptProjection | null
 	knownRunIds: Set<string>
 	applicationRunId: string | null
-	eventSchemaVersion: 1 | 2 | 3 | 4 | 5 | 6
+	eventSchemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7
 }
 
 export function validateTaskEvent(
@@ -65,7 +70,8 @@ export function validateTaskEvent(
 			value['schemaVersion'] !== 3 &&
 			value['schemaVersion'] !== 4 &&
 			value['schemaVersion'] !== 5 &&
-			value['schemaVersion'] !== 6) ||
+			value['schemaVersion'] !== 6 &&
+			value['schemaVersion'] !== 7) ||
 		!isUuid(value['eventId']) ||
 		value['taskId'] !== expectedTaskId ||
 		value['sequence'] !== expectedSequence ||
@@ -86,7 +92,28 @@ export function validateTaskEvent(
 				expectedSequence !== 1 ||
 				!hasExactKeys(
 					data,
-					value['schemaVersion'] >= 6
+					value['schemaVersion'] >= 7
+						? data['workflowProvenance'] === undefined
+							? [
+								'objective',
+								'mode',
+								'repositoryPath',
+								'baseCommit',
+								'executionStartedAt',
+								'policySha256',
+								'policySourceCount',
+							]
+							: [
+								'objective',
+								'mode',
+								'repositoryPath',
+								'baseCommit',
+								'executionStartedAt',
+								'policySha256',
+								'policySourceCount',
+								'workflowProvenance',
+							]
+						: value['schemaVersion'] >= 6
 						? [
 							'objective',
 							'mode',
@@ -116,11 +143,16 @@ export function validateTaskEvent(
 				!isWorkerMode(data['mode']) ||
 				!isBoundedString(data['repositoryPath'], 4_096) ||
 				!isBoundedString(data['baseCommit'], 1_024) ||
+				(value['schemaVersion'] >= 7 &&
+					!isIsoDate(data['executionStartedAt'])) ||
 				(value['schemaVersion'] >= 4 &&
 					(typeof data['policySha256'] !== 'string' ||
 						!sha256Pattern.test(data['policySha256']) ||
 						!isIntegerInRange(data['policySourceCount'], 0, 2))) ||
-				(value['schemaVersion'] >= 6 &&
+				(value['schemaVersion'] === 6 &&
+					!isWorkflowTaskProvenance(data['workflowProvenance'])) ||
+				(value['schemaVersion'] >= 7 &&
+					data['workflowProvenance'] !== undefined &&
 					!isWorkflowTaskProvenance(data['workflowProvenance']))
 			) {
 				throw invalidJournal('TaskCreated event has invalid data')
@@ -130,7 +162,20 @@ export function validateTaskEvent(
 			if (
 				!hasExactKeys(
 					data,
-					value['schemaVersion'] >= 5
+					value['schemaVersion'] >= 7
+						? [
+							'strategy',
+							'candidateWorkerIds',
+							'maxAttempts',
+							'startedAt',
+							'completedAt',
+							'durationMs',
+							'evidenceSha256',
+							'evidenceTaskCount',
+							'evidenceAttemptCount',
+							'decisionSha256',
+						]
+						: value['schemaVersion'] >= 5
 						? [
 							'strategy',
 							'candidateWorkerIds',
@@ -153,6 +198,7 @@ export function validateTaskEvent(
 					data['candidateWorkerIds'].length ||
 				!isIntegerInRange(data['maxAttempts'], 1, 8) ||
 				data['maxAttempts'] > data['candidateWorkerIds'].length ||
+				(value['schemaVersion'] >= 7 && !isTiming(data)) ||
 				(value['schemaVersion'] >= 5 &&
 					(typeof data['evidenceSha256'] !== 'string' ||
 						!sha256Pattern.test(data['evidenceSha256']) ||
@@ -174,24 +220,64 @@ export function validateTaskEvent(
 				throw invalidJournal('WorkerStarted event has invalid data')
 			}
 			return
-		case 'ToolCalled':
+		case 'ModelTurnCompleted':
 			if (
+				value['schemaVersion'] < 7 ||
 				!hasExactKeys(data, [
 					'runId',
-					'toolName',
 					'iteration',
 					'outcome',
-					'inputBytes',
-					'outputBytes',
+					'toolCallCount',
+					'startedAt',
+					'completedAt',
 					'durationMs',
 				]) ||
 				!isUuid(data['runId']) ||
+				!isIntegerInRange(data['iteration'], 1, 64) ||
+				(data['outcome'] !== 'succeeded' && data['outcome'] !== 'failed') ||
+				!isIntegerInRange(data['toolCallCount'], 0, 32) ||
+				(data['outcome'] === 'failed' && data['toolCallCount'] !== 0) ||
+				!isTiming(data)
+			) {
+				throw invalidJournal('ModelTurnCompleted event has invalid data')
+			}
+			return
+		case 'ToolCalled':
+			if (
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] >= 7
+						? [
+							'runId',
+							'toolName',
+							'iteration',
+							'outcome',
+							'inputBytes',
+							'outputBytes',
+							'startedAt',
+							'completedAt',
+							'durationMs',
+						]
+						: [
+							'runId',
+							'toolName',
+							'iteration',
+							'outcome',
+							'inputBytes',
+							'outputBytes',
+							'durationMs',
+						],
+				) ||
+				!isUuid(data['runId']) ||
 				!isBoundedString(data['toolName'], 100) ||
-				!isPositiveInteger(data['iteration']) ||
+				(value['schemaVersion'] >= 7
+					? !isIntegerInRange(data['iteration'], 1, 64)
+					: !isPositiveInteger(data['iteration'])) ||
 				(data['outcome'] !== 'succeeded' && data['outcome'] !== 'failed') ||
 				!isNonNegativeInteger(data['inputBytes']) ||
 				!isNonNegativeInteger(data['outputBytes']) ||
-				!isNonNegativeInteger(data['durationMs'])
+				!isNonNegativeInteger(data['durationMs']) ||
+				(value['schemaVersion'] >= 7 && !isTiming(data))
 			) {
 				throw invalidJournal('ToolCalled event has invalid data')
 			}
@@ -232,14 +318,27 @@ export function validateTaskEvent(
 			return
 		case 'ValidationCompleted':
 			if (
-				!hasExactKeys(data, ['runId', 'outcome', 'commandCount']) ||
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] >= 7
+						? [
+							'runId',
+							'outcome',
+							'commandCount',
+							'startedAt',
+							'completedAt',
+							'durationMs',
+						]
+						: ['runId', 'outcome', 'commandCount'],
+				) ||
 				!isUuid(data['runId']) ||
 				(data['outcome'] !== 'passed' &&
 					data['outcome'] !== 'failed' &&
 					data['outcome'] !== 'skipped') ||
 				!isIntegerInRange(data['commandCount'], 0, 20) ||
 				(data['outcome'] === 'skipped' && data['commandCount'] !== 0) ||
-				(data['outcome'] === 'passed' && data['commandCount'] === 0)
+				(data['outcome'] === 'passed' && data['commandCount'] === 0) ||
+				(value['schemaVersion'] >= 7 && !isTiming(data))
 			) {
 				throw invalidJournal('ValidationCompleted event has invalid data')
 			}
@@ -250,10 +349,23 @@ export function validateTaskEvent(
 					value['schemaVersion'] !== 3 &&
 					value['schemaVersion'] !== 4 &&
 					value['schemaVersion'] !== 5 &&
-					value['schemaVersion'] !== 6) ||
+					value['schemaVersion'] !== 6 &&
+					value['schemaVersion'] !== 7) ||
 				!hasExactKeys(
 					data,
-					value['schemaVersion'] >= 3
+					value['schemaVersion'] >= 7
+						? [
+							'runId',
+							'evaluatorIds',
+							'outcome',
+							'evaluationPolicy',
+							'failedDimensions',
+							'unknownDimensions',
+							'startedAt',
+							'completedAt',
+							'durationMs',
+						]
+						: value['schemaVersion'] >= 3
 						? [
 							'runId',
 							'evaluatorIds',
@@ -289,7 +401,8 @@ export function validateTaskEvent(
 				(data['outcome'] === 'failed' && data['failedDimensions'].length === 0) ||
 				(data['outcome'] === 'inconclusive' &&
 					(data['failedDimensions'].length > 0 ||
-						data['unknownDimensions'].length === 0))
+						data['unknownDimensions'].length === 0)) ||
+				(value['schemaVersion'] >= 7 && !isTiming(data))
 			) {
 				throw invalidJournal('EvaluationCompleted event has invalid data')
 			}
@@ -298,7 +411,19 @@ export function validateTaskEvent(
 			if (
 				!hasExactKeys(
 					data,
-					value['schemaVersion'] >= 5
+					value['schemaVersion'] >= 7
+						? [
+							'runId',
+							'status',
+							'failureCode',
+							'startedAt',
+							'completedAt',
+							'durationMs',
+							'providerLatencyMs',
+							'totalTokens',
+							'estimatedCostMicroUsd',
+						]
+						: value['schemaVersion'] >= 5
 						? [
 							'runId',
 							'status',
@@ -313,6 +438,7 @@ export function validateTaskEvent(
 				!isUuid(data['runId']) ||
 				!isRunStatus(data['status']) ||
 				!isNullableBoundedString(data['failureCode'], 200) ||
+				(value['schemaVersion'] >= 7 && !isTiming(data)) ||
 				(value['schemaVersion'] >= 5 &&
 					(!isNonNegativeInteger(data['durationMs']) ||
 						!isNonNegativeInteger(data['providerLatencyMs']) ||
@@ -325,9 +451,17 @@ export function validateTaskEvent(
 			return
 		case 'TaskCompleted':
 			if (
-				!hasExactKeys(data, ['runId', 'status']) ||
+				!hasExactKeys(
+					data,
+					value['schemaVersion'] >= 7
+						? ['runId', 'status', 'completedAt', 'durationMs']
+						: ['runId', 'status'],
+				) ||
 				(data['runId'] !== null && !isUuid(data['runId'])) ||
-				!isRunStatus(data['status'])
+				!isRunStatus(data['status']) ||
+				(value['schemaVersion'] >= 7 &&
+					(!isIsoDate(data['completedAt']) ||
+						!isNonNegativeInteger(data['durationMs'])))
 			) {
 				throw invalidJournal('TaskCompleted event has invalid data')
 			}
@@ -455,6 +589,11 @@ export function projectTaskEvent(
 				runId: event.data.runId,
 				workerId: event.data.workerId,
 				attemptNumber: event.data.attemptNumber,
+				lastModelIteration: 0,
+				modelFailed: false,
+				modelTerminal: false,
+				expectedToolCallCount: 0,
+				observedToolCallCount: 0,
 				workerCompleted: false,
 				workerOutcome: null,
 				patchSha256: null,
@@ -477,15 +616,64 @@ export function projectTaskEvent(
 				]
 			}
 			break
+		case 'ModelTurnCompleted': {
+			const activeAttempt = getActiveRun(
+				next,
+				event.data.runId,
+				appendOperation,
+			)
+			if (
+				activeAttempt.workerCompleted ||
+				activeAttempt.modelTerminal ||
+				activeAttempt.observedToolCallCount !==
+					activeAttempt.expectedToolCallCount ||
+				event.data.iteration !== activeAttempt.lastModelIteration + 1
+			) {
+				throw transitionError(
+					'ModelTurnCompleted is out of order',
+					appendOperation,
+				)
+			}
+			activeAttempt.lastModelIteration = event.data.iteration
+			activeAttempt.modelFailed = event.data.outcome === 'failed'
+			activeAttempt.modelTerminal =
+				event.data.outcome === 'failed' || event.data.toolCallCount === 0
+			activeAttempt.expectedToolCallCount = event.data.toolCallCount
+			activeAttempt.observedToolCallCount = 0
+			break
+		}
 		case 'ToolCalled':
-			if (getActiveRun(next, event.data.runId, appendOperation).workerCompleted) {
+			const toolAttempt = getActiveRun(
+				next,
+				event.data.runId,
+				appendOperation,
+			)
+			if (
+				toolAttempt.workerCompleted ||
+				(next.eventSchemaVersion >= 7 &&
+					(toolAttempt.modelFailed ||
+						event.data.iteration !== toolAttempt.lastModelIteration ||
+						toolAttempt.observedToolCallCount >=
+							toolAttempt.expectedToolCallCount))
+			) {
 				throw transitionError('ToolCalled cannot follow WorkerCompleted', appendOperation)
 			}
+			toolAttempt.observedToolCallCount += 1
 			break
 		case 'WorkerCompleted': {
 			const activeAttempt = getActiveRun(next, event.data.runId, appendOperation)
-			if (activeAttempt.workerCompleted) {
-				throw transitionError('WorkerCompleted cannot be repeated', appendOperation)
+			if (
+				activeAttempt.workerCompleted ||
+				(next.eventSchemaVersion >= 7 &&
+					(activeAttempt.observedToolCallCount !==
+						activeAttempt.expectedToolCallCount ||
+						(activeAttempt.modelFailed &&
+							event.data.outcome !== 'failed') ||
+						(event.data.outcome === 'succeeded' &&
+							(!activeAttempt.modelTerminal ||
+								activeAttempt.modelFailed))))
+			) {
+				throw transitionError('WorkerCompleted contradicts model evidence', appendOperation)
 			}
 			activeAttempt.workerCompleted = true
 			activeAttempt.workerOutcome = event.data.outcome
@@ -808,7 +996,15 @@ function isIntegerInRange(
 }
 
 function isIsoDate(value: unknown): value is string {
-	return typeof value === 'string' && !Number.isNaN(Date.parse(value))
+	return typeof value === 'string' &&
+		Number.isFinite(Date.parse(value)) &&
+		new Date(value).toISOString() === value
+}
+
+function isTiming(value: Record<string, unknown>): boolean {
+	return isIsoDate(value['startedAt']) &&
+		isIsoDate(value['completedAt']) &&
+		isNonNegativeInteger(value['durationMs'])
 }
 
 function isEvaluationOutcome(value: unknown): value is EvaluationOutcome {

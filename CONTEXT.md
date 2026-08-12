@@ -39,3 +39,13 @@ _Avoid_: Merge, apply, authorization
 Continue a workflow by replaying its history and starting unfinished work in a
 fresh attempt; it never continues a stopped provider process in place.
 _Avoid_: Replay, restart
+
+**Trace**:
+A read-only phase hierarchy projected from one validated task or workflow event
+chain.
+_Avoid_: Log, transcript, audit signature
+
+**Metric snapshot**:
+A bounded aggregate over recent validated same-mode task histories, with source
+digests and explicit measurement coverage.
+_Avoid_: Lifetime counter, routing weight, telemetry database

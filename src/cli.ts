@@ -132,6 +132,18 @@ approval_mode = "approve"
 [mcp_servers.agent_os.tools.list_workflows]
 approval_mode = "approve"
 
+[mcp_servers.agent_os.tools.list_tasks]
+approval_mode = "approve"
+
+[mcp_servers.agent_os.tools.get_task_timeline]
+approval_mode = "approve"
+
+[mcp_servers.agent_os.tools.get_observability_trace]
+approval_mode = "approve"
+
+[mcp_servers.agent_os.tools.get_observability_metrics]
+approval_mode = "approve"
+
 [mcp_servers.agent_os.tools.delegate_to_worker]
 approval_mode = "prompt"
 
