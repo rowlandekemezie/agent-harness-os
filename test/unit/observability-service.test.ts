@@ -134,7 +134,7 @@ test('aggregates deterministic metrics with explicit cost and timing coverage', 
 	assert.equal(metrics.usage.unpricedAttemptCount, 1)
 	assert.equal(metrics.usage.fullyPricedTaskCount, 1)
 	assert.equal(metrics.durationMs.routing.sampleCount, 2)
-	assert.equal(metrics.durationMs.model.sampleCount, 3)
+	assert.equal(metrics.durationMs.model.sampleCount, 4)
 	assert.equal(metrics.coverage.legacyTaskCount, 0)
 	assert.equal(metrics.coverage.attemptsWithoutModelTurnCount, 0)
 	assert.equal(metrics.workers.length, 2)
@@ -570,6 +570,18 @@ async function appendAttempt(
 				...timing(10),
 			},
 		})
+		if (input.status === 'completed') {
+			await journal.append(artifactRoot, taskId, {
+				type: 'ModelTurnCompleted',
+				data: {
+					runId,
+					iteration: 2,
+					outcome: 'succeeded',
+					toolCallCount: 0,
+					...timing(20),
+				},
+			})
+		}
 	}
 	await journal.append(artifactRoot, taskId, {
 		type: 'WorkerCompleted',

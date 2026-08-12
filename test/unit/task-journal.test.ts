@@ -1158,6 +1158,18 @@ test('records schema-version-7 timings and rejects tools after a failed model tu
 		}),
 		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
 	)
+	await assert.rejects(
+		journal.append(artifactRoot, task.taskId, {
+			type: 'WorkerCompleted',
+			data: {
+				runId,
+				outcome: 'succeeded',
+				failureCode: null,
+				requestCount: 1,
+			},
+		}),
+		hasHarnessCode('INVALID_TASK_EVENT_TRANSITION'),
+	)
 	const secondTask = await journal.create({
 		artifactRoot,
 		objective: 'Reject incomplete tool evidence.',

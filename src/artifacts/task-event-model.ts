@@ -665,10 +665,15 @@ export function projectTaskEvent(
 			if (
 				activeAttempt.workerCompleted ||
 				(next.eventSchemaVersion >= 7 &&
-					activeAttempt.observedToolCallCount !==
-						activeAttempt.expectedToolCallCount)
+					(activeAttempt.observedToolCallCount !==
+						activeAttempt.expectedToolCallCount ||
+						(activeAttempt.modelFailed &&
+							event.data.outcome !== 'failed') ||
+						(event.data.outcome === 'succeeded' &&
+							(!activeAttempt.modelTerminal ||
+								activeAttempt.modelFailed))))
 			) {
-				throw transitionError('WorkerCompleted cannot be repeated', appendOperation)
+				throw transitionError('WorkerCompleted contradicts model evidence', appendOperation)
 			}
 			activeAttempt.workerCompleted = true
 			activeAttempt.workerOutcome = event.data.outcome
